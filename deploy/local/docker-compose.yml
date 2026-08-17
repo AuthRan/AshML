@@ -1,0 +1,48 @@
+# Level 1 development environment (spec §41): the control plane's dependencies,
+# without Kubernetes. Phase 1 needs Postgres; Phase 4 needs MinIO.
+#
+#   docker compose -f deploy/local/docker-compose.yml up -d
+#
+# Kubernetes arrives in Phase 2 via k3d, separately from this file.
+
+name: ashml-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ashml
+      POSTGRES_PASSWORD: ashml
+      POSTGRES_DB: ashml
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ashml -d ashml"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # S3-compatible artifact storage. Checkpoints and model binaries live here,
+  # never in Postgres (ADR 0001).
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ashml
+      MINIO_ROOT_PASSWORD: ashml-dev-secret
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:
+  minio-data:

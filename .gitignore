@@ -1,0 +1,17 @@
+node_modules/
+npm-debug.log*
+.env
+.env.local
+dist/
+coverage/
+*.log
+
+# Python (compute plane)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local data
+data/
+checkpoints/

@@ -1,0 +1,30 @@
+# A training job manifest. Submit with:
+#   ash job submit examples/training/resnet-cifar.yaml
+#
+# Sized for a single RTX 2080 Ti (11 GB). The platform is what is being tested
+# here, not the model (spec §35).
+
+project: vision
+name: resnet-cifar
+
+priority: MEDIUM
+max_retries: 2
+
+resources:
+  cpu: 8
+  memory_bytes: 34359738368      # 32 GiB
+  gpu: 1
+  gpu_memory_min_bytes: 8589934592  # 8 GiB
+
+spec:
+  image: ash/ml-pytorch:latest
+  command:
+    - python
+    - train.py
+  args:
+    - --epochs=50
+    - --batch-size=128
+    - --lr=0.001
+  env:
+    DATASET: cifar10
+    DATASET_VERSION: v3

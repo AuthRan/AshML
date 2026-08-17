@@ -1,0 +1,22 @@
+{
+  "name": "@ashml/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AshML control-plane API server",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test",
+    "migrate": "node-pg-migrate -m ../../db/migrations -j sql"
+  },
+  "dependencies": {
+    "@fastify/swagger": "^9.4.2",
+    "fastify": "^5.2.1",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "node-pg-migrate": "^9.0.0"
+  }
+}

@@ -1,0 +1,685 @@
+openapi: 3.1.0
+info:
+  title: AshML API
+  description: Control-plane API for the AshML Kubernetes-native GPU ML platform.
+    Generated from the route schemas — do not edit by hand.
+  version: 0.1.0-dev
+components:
+  schemas:
+    def-0:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              description: Stable, machine-readable error code
+            message:
+              type: string
+      title: Error
+    def-1:
+      type: object
+      required:
+        - provider
+        - index
+        - uuid
+        - model
+        - memory_total_bytes
+        - memory_used_bytes
+        - memory_free_bytes
+        - utilization_pct
+        - health
+        - simulated
+      properties:
+        provider:
+          type: string
+          description: Provider that discovered this device
+        index:
+          type: integer
+          minimum: 0
+        uuid:
+          type: string
+        model:
+          type: string
+        memory_total_bytes:
+          type: integer
+          minimum: 0
+        memory_used_bytes:
+          type: integer
+          minimum: 0
+        memory_free_bytes:
+          type: integer
+          minimum: 0
+        utilization_pct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        temperature_c:
+          type: integer
+        power_watts:
+          type: number
+        health:
+          type: string
+          enum:
+            - OK
+            - DEGRADED
+            - FAILED
+            - UNKNOWN
+        simulated:
+          type: boolean
+          description: "True when this device is fabricated rather than real hardware.
+            Never hide this: the spec forbids passing simulated telemetry off as
+            real (Rule 5)."
+      title: GpuDevice
+    def-2:
+      type: object
+      required:
+        - id
+        - name
+        - created_at
+        - quota
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        quota:
+          type: object
+          required:
+            - gpu
+            - cpu
+            - memory_bytes
+            - jobs
+          properties:
+            gpu:
+              type: integer
+            cpu:
+              type: integer
+            memory_bytes:
+              type: integer
+            jobs:
+              type: integer
+      title: Project
+    def-3:
+      type: object
+      required:
+        - id
+        - name
+        - project
+        - state
+        - priority
+        - resources
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        project:
+          type: string
+        state:
+          type: string
+          enum:
+            - CREATED
+            - QUEUED
+            - SCHEDULING
+            - STARTING
+            - RUNNING
+            - FAILED
+            - RETRYING
+            - CANCELLING
+            - SUCCEEDED
+            - CANCELLED
+        priority:
+          type: string
+          enum:
+            - HIGH
+            - MEDIUM
+            - LOW
+        resources:
+          type: object
+          properties:
+            cpu:
+              type: integer
+            memory_bytes:
+              type: integer
+            gpu:
+              type: integer
+            gpu_memory_min_bytes:
+              type: integer
+        spec:
+          type: object
+          additionalProperties: true
+        attempt:
+          type: integer
+        max_retries:
+          type: integer
+        failure_reason:
+          type:
+            - "null"
+            - string
+        placement:
+          type: object
+          properties:
+            node_id:
+              type:
+                - "null"
+                - string
+            reason:
+              type:
+                - "null"
+                - string
+        queued_at:
+          type:
+            - "null"
+            - string
+          format: date-time
+        started_at:
+          type:
+            - "null"
+            - string
+          format: date-time
+        finished_at:
+          type:
+            - "null"
+            - string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type:
+            - "null"
+            - string
+          format: date-time
+      title: TrainingJob
+    def-4:
+      type: object
+      required:
+        - id
+        - event_type
+        - created_at
+      properties:
+        id:
+          type: integer
+        event_type:
+          type: string
+        from_state:
+          type:
+            - "null"
+            - string
+        to_state:
+          type:
+            - "null"
+            - string
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+      title: JobEvent
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      tags:
+        - system
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    type: string
+  /readyz:
+    get:
+      summary: Readiness probe
+      tags:
+        - system
+      description: Reports ready only when dependencies are reachable. A 503 here
+        tells Kubernetes to stop routing traffic without restarting the pod.
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    type: string
+                  database:
+                    type: string
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/version:
+    get:
+      summary: Server version and active GPU provider
+      tags:
+        - system
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - version
+                  - gpu_provider
+                properties:
+                  version:
+                    type: string
+                  gpu_provider:
+                    type: string
+  /api/v1/gpus:
+    get:
+      summary: List GPUs visible to the active provider
+      tags:
+        - gpus
+      description: "Devices with `simulated: true` are fabricated, not real hardware.
+        Clients must surface that flag to the user (spec Rule 5)."
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - provider
+                  - gpus
+                properties:
+                  provider:
+                    type: string
+                  gpus:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-1"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects:
+    post:
+      summary: Create a project
+      tags:
+        - projects
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                description:
+                  type: string
+                  maxLength: 1000
+                quota:
+                  type: object
+                  properties:
+                    gpu:
+                      type: integer
+                      minimum: 0
+                    cpu:
+                      type: integer
+                      minimum: 0
+                    memory_bytes:
+                      type: integer
+                      minimum: 0
+                    jobs:
+                      type: integer
+                      minimum: 0
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-2"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    get:
+      summary: List projects
+      tags:
+        - projects
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - projects
+                properties:
+                  projects:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-2"
+  /api/v1/projects/{name}:
+    get:
+      summary: Get a project by name
+      tags:
+        - projects
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-2"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/jobs:
+    post:
+      summary: Submit a training job
+      tags:
+        - jobs
+      description: Creates the job and admits it to the queue in one transaction.
+        Nothing executes until Phase 2 wires up Kubernetes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - project
+                - name
+                - spec
+              additionalProperties: false
+              properties:
+                project:
+                  type: string
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                priority:
+                  type: string
+                  enum:
+                    - HIGH
+                    - MEDIUM
+                    - LOW
+                  default: MEDIUM
+                max_retries:
+                  type: integer
+                  minimum: 0
+                  maximum: 10
+                  default: 0
+                resources:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    cpu:
+                      type: integer
+                      minimum: 0
+                      default: 1
+                    memory_bytes:
+                      type: integer
+                      minimum: 0
+                      default: 0
+                    gpu:
+                      type: integer
+                      minimum: 0
+                      default: 0
+                    gpu_memory_min_bytes:
+                      type: integer
+                      minimum: 0
+                      default: 0
+                spec:
+                  type: object
+                  required:
+                    - image
+                  properties:
+                    image:
+                      type: string
+                      minLength: 1
+                    command:
+                      type: array
+                      items:
+                        type: string
+                    args:
+                      type: array
+                      items:
+                        type: string
+                    env:
+                      type: object
+                      additionalProperties:
+                        type: string
+                  additionalProperties: true
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-3"
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    get:
+      summary: List training jobs
+      tags:
+        - jobs
+      parameters:
+        - schema:
+            type: string
+          in: query
+          name: project
+          required: false
+        - schema:
+            type: string
+            enum:
+              - CREATED
+              - QUEUED
+              - SCHEDULING
+              - STARTING
+              - RUNNING
+              - FAILED
+              - RETRYING
+              - CANCELLING
+              - SUCCEEDED
+              - CANCELLED
+          in: query
+          name: state
+          required: false
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+          in: query
+          name: limit
+          required: false
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - jobs
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-3"
+  /api/v1/jobs/{id}:
+    get:
+      summary: Get a job
+      tags:
+        - jobs
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-3"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/jobs/{id}/events:
+    get:
+      summary: Get a job's event history
+      tags:
+        - jobs
+      description: The append-only audit trail of everything that happened to this
+        job, oldest first (spec §47).
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - events
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-4"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/jobs/{id}/cancel:
+    post:
+      summary: Cancel a job
+      tags:
+        - jobs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type:
+                - object
+                - "null"
+              additionalProperties: false
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-3"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+servers:
+  - url: /
+    description: Current host
+tags:
+  - name: system
+    description: Health and version
+  - name: gpus
+    description: GPU inventory and telemetry
+  - name: projects
+    description: Projects and quotas
+  - name: jobs
+    description: Training jobs

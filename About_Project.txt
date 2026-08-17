@@ -1,0 +1,2460 @@
+AshML — Kubernetes-Native GPU Machine Learning Infrastructure Platform
+Master Project Specification / Engineering Reference
+1. Project Overview
+Project Name
+AshML
+
+Subtitle
+A Kubernetes-native GPU machine learning infrastructure and orchestration platform powered by AshGPU and integrated with Ashcode.
+
+2. Vision
+AshML is a self-hosted, Kubernetes-native machine learning infrastructure platform designed to combine:
+
+Machine Learning
+
+ML Systems
+
+Backend Engineering
+
+Distributed Systems
+
+GPU Infrastructure
+
+Kubernetes
+
+DevOps / Platform Engineering
+
+Observability
+
+Reliability Engineering
+
+AI Developer Tooling
+
+into one coherent engineering project.
+
+The goal is not to build another generic AI application, chatbot, RAG application, or simple model-serving API.
+
+The goal is to build a small but technically serious ML infrastructure platform, conceptually similar to a miniature internal ML cloud.
+
+The platform should allow a developer to:
+
+Register datasets and models.
+
+Submit ML training jobs.
+
+Request CPU/GPU/memory resources.
+
+Schedule workloads onto available compute resources.
+
+Execute workloads using Kubernetes.
+
+Use AshGPU as the GPU execution/runtime layer where applicable.
+
+Track experiments and training metrics.
+
+Store checkpoints and model artifacts.
+
+Register model versions.
+
+Deploy trained models as inference services.
+
+Route inference requests to model deployments.
+
+Monitor infrastructure and ML workloads.
+
+Detect workload failures.
+
+Recover/reschedule failed workloads where possible.
+
+Inspect logs, metrics, traces, scheduling decisions, and resource usage.
+
+Interact with the platform through a CLI/API.
+
+Eventually allow Ashcode to act as an AI-powered interface for operating the platform.
+
+The final system should feel like a real infrastructure product, not a collection of disconnected demos.
+
+3. Why This Project Exists
+This project is intentionally designed to demonstrate competence across several engineering domains.
+
+It should be strong enough to support applications for:
+
+Backend Engineering
+
+Distributed Systems Engineering
+
+Infrastructure Engineering
+
+DevOps / Platform Engineering
+
+SRE
+
+Kubernetes Engineering
+
+ML Infrastructure / ML Platform Engineering
+
+ML Systems Engineering
+
+GPU Systems
+
+Core ML Engineering
+
+The key principle is:
+
+One system should demonstrate multiple engineering disciplines naturally, rather than artificially combining unrelated technologies.
+
+For example:
+
+Kubernetes exists because workloads need orchestration.
+
+The scheduler exists because ML workloads have specialized resource requirements.
+
+AshGPU exists because GPU execution needs to be exposed to the platform.
+
+The model registry exists because trained artifacts need lifecycle management.
+
+Observability exists because distributed infrastructure needs visibility.
+
+Ashcode exists because developers need a high-level interface to operate complex infrastructure.
+
+Everything should have a reason.
+
+4. High-Level Concept
+AshML can be thought of as a miniature ML cloud / internal ML platform.
+
+                         ┌─────────────────────┐
+                         │       Ashcode       │
+                         │ AI Developer Agent  │
+                         └──────────┬──────────┘
+                                    │
+                              CLI / API / SDK
+                                    │
+                         ┌──────────▼──────────┐
+                         │      AshML API      │
+                         │    Control Plane    │
+                         └──────────┬──────────┘
+                                    │
+                   ┌────────────────┼────────────────┐
+                   │                │                │
+              Job Service      Model Service     Experiment
+                   │                │                │
+                   └────────────────┼────────────────┘
+                                    │
+                             Scheduler / Queue
+                                    │
+                              Kubernetes
+                                    │
+              ┌─────────────────────┼─────────────────────┐
+              │                     │                     │
+        CPU workloads         GPU workloads         Services
+              │                     │                     │
+              │                  AshGPU                   │
+              │                     │                     │
+              └─────────────────────┼─────────────────────┘
+                                    │
+                            ML Training / Inference
+                                    │
+                   ┌────────────────┼────────────────┐
+                   │                │                │
+               Artifacts        Metrics           Logs
+                   │                │                │
+                   └────────────────┼────────────────┘
+                                    │
+                          Observability Platform
+5. Core Architectural Principle
+AshML should be designed around a clear separation between the:
+
+Control Plane
+Responsible for deciding what should happen.
+
+Examples:
+
+API
+
+Authentication
+
+Authorization
+
+Job management
+
+Scheduling
+
+Experiment management
+
+Model registry
+
+Resource management
+
+Orchestration
+
+State management
+
+Compute / Data Plane
+Responsible for actually doing the work.
+
+Examples:
+
+Kubernetes workloads
+
+Training containers
+
+Inference containers
+
+GPU workloads
+
+AshGPU
+
+Storage
+
+Model artifacts
+
+This distinction should remain clear throughout the project.
+
+6. Major Components
+The initial architecture should contain the following major components:
+
+AshML API Server
+AshML Scheduler
+AshML Kubernetes Operator
+AshML CLI
+AshML Model Registry
+AshML Experiment System
+AshML Artifact System
+AshML Inference Platform
+AshGPU Integration
+Observability Stack
+Ashcode Integration
+7. AshML API Server
+The API server is the primary control-plane interface.
+
+It should expose APIs for:
+
+Users
+
+Projects
+
+Datasets
+
+Experiments
+
+Jobs
+
+Models
+
+Model versions
+
+Deployments
+
+Nodes
+
+Resources
+
+Metrics
+
+Logs
+
+Job events
+
+Possible API styles:
+
+REST initially
+
+gRPC internally where useful
+
+CLI client built on top of the API
+
+The implementation language should prioritize correctness, maintainability, and systems performance.
+
+A reasonable initial choice is:
+
+Go for infrastructure/control-plane services.
+
+Python may be used for:
+
+ML workloads
+
+Training code
+
+Evaluation
+
+Experimentation
+
+ML-specific services
+
+Do not unnecessarily rewrite ML workloads in Go.
+
+8. Core Domain Objects
+AshML should have explicit domain concepts.
+
+At minimum:
+
+User
+Project
+
+Dataset
+DatasetVersion
+
+Experiment
+
+TrainingJob
+EvaluationJob
+
+Model
+ModelVersion
+
+Artifact
+
+Deployment
+InferenceRequest
+
+ComputeNode
+GPUDevice
+
+JobQueue
+ResourceQuota
+Example relationship:
+
+Project
+ ├── Dataset
+ │    └── DatasetVersion
+ │
+ ├── Experiment
+ │    └── TrainingJob
+ │          ├── DatasetVersion
+ │          ├── Artifact
+ │          └── ModelVersion
+ │
+ └── Model
+      ├── ModelVersion
+      └── Deployment
+9. Training Job Lifecycle
+A training job should have an explicit lifecycle.
+
+Example:
+
+CREATED
+   ↓
+QUEUED
+   ↓
+SCHEDULING
+   ↓
+STARTING
+   ↓
+RUNNING
+   ↓
+SUCCEEDED
+Failure paths:
+
+RUNNING
+   ↓
+FAILED
+   ↓
+RETRYING
+   ↓
+QUEUED
+Cancellation:
+
+QUEUED / RUNNING
+        ↓
+    CANCELLING
+        ↓
+    CANCELLED
+Possible states:
+
+CREATED
+QUEUED
+SCHEDULING
+STARTING
+RUNNING
+SUCCEEDED
+FAILED
+RETRYING
+CANCELLING
+CANCELLED
+State transitions must be explicit and persisted.
+
+The system must not depend exclusively on in-memory state.
+
+10. Training Job Specification
+A training job should be declarative.
+
+Example:
+
+apiVersion: ash.ai/v1
+kind: TrainingJob
+
+metadata:
+  name: resnet-cifar
+
+spec:
+  image: ash/ml-pytorch:latest
+
+  command:
+    - python
+    - train.py
+
+  args:
+    - --epochs
+    - "50"
+
+  resources:
+    cpu: "8"
+    memory: "32Gi"
+    gpu: "2"
+
+  dataset:
+    name: cifar10
+    version: v3
+
+  output:
+    model: resnet-cifar
+
+  retryPolicy:
+    maxRetries: 3
+The exact schema may evolve.
+
+The important principle is:
+
+Users describe desired state, while the platform determines how to achieve it.
+
+11. Scheduling System
+The scheduler is one of the most important components of AshML.
+
+Do not simply treat the scheduler as a thin wrapper around Kubernetes.
+
+The project should eventually contain an ML-aware scheduling layer.
+
+The scheduler should consider:
+
+CPU availability
+
+RAM availability
+
+GPU availability
+
+GPU memory
+
+Number of GPUs
+
+GPU type
+
+Node availability
+
+Resource quotas
+
+Job priority
+
+Queue state
+
+Locality
+
+Potentially GPU utilization
+
+Potentially GPU topology
+
+Potentially data locality
+
+Example:
+
+Training Job
+    │
+    ▼
+Resource Requirements
+    │
+    ├── CPU: 8
+    ├── RAM: 32 GB
+    ├── GPU: 2
+    └── GPU Memory: >= 16 GB
+    │
+    ▼
+Scheduler
+    │
+    ├── Node A → insufficient GPU
+    ├── Node B → 1 GPU available
+    ├── Node C → 2 GPUs available
+    └── Node D → unavailable
+    │
+    ▼
+Node C selected
+    │
+    ▼
+Kubernetes workload created
+12. Scheduler Evolution
+The scheduler should be built incrementally.
+
+Stage 1 — FIFO
+Basic queue scheduling.
+
+job arrives
+   ↓
+queue
+   ↓
+first available resource
+Stage 2 — Priority
+HIGH
+MEDIUM
+LOW
+Stage 3 — Resource-aware scheduling
+Consider:
+
+CPU
+
+RAM
+
+GPU count
+
+GPU memory
+
+Stage 4 — GPU-aware scheduling
+Consider:
+
+GPU type
+
+GPU utilization
+
+GPU memory
+
+Device availability
+
+Stage 5 — Advanced scheduling
+Potential future features:
+
+Fair scheduling
+
+Weighted queues
+
+Quotas
+
+Gang scheduling
+
+Topology awareness
+
+Preemption
+
+Workload affinity
+
+Data locality
+
+Do not implement advanced scheduling until the basic scheduler is reliable.
+
+13. Kubernetes Integration
+Kubernetes should be a fundamental part of the architecture.
+
+AshML should use Kubernetes for:
+
+Workload lifecycle
+
+Container orchestration
+
+Networking
+
+Service discovery
+
+Resource isolation
+
+Restart behavior
+
+Health checks
+
+Persistent workloads
+
+Deployment management
+
+Potential Kubernetes resources:
+
+Deployment
+Job
+Pod
+Service
+ConfigMap
+Secret
+PersistentVolumeClaim
+Ingress
+ServiceAccount
+Role
+RoleBinding
+CustomResourceDefinition
+Kubernetes should not simply be present for resume keywords.
+
+It must actually solve the workload orchestration problem.
+
+14. AshML Kubernetes Operator
+One of the major milestones is building a Kubernetes Operator.
+
+AshML should define custom resources such as:
+
+apiVersion: ash.ai/v1
+kind: TrainingJob
+
+metadata:
+  name: resnet-cifar
+
+spec:
+  replicas: 2
+
+  resources:
+    gpu: 2
+    cpu: 8
+    memory: 32Gi
+
+  training:
+    framework: pytorch
+    script: train.py
+The operator should:
+
+Watch TrainingJob resources.
+
+Validate specifications.
+
+Determine required resources.
+
+Interact with the scheduler.
+
+Create necessary Kubernetes resources.
+
+Monitor child resources.
+
+Update job status.
+
+Detect failures.
+
+Retry when appropriate.
+
+Handle completion.
+
+Clean up temporary resources.
+
+Persist useful status and metadata.
+
+Eventually the operator should become responsible for maintaining the desired state of ML workloads.
+
+15. AshGPU Integration
+AshGPU is a critical differentiating component of AshML.
+
+AshGPU should serve as the custom GPU/runtime layer for the platform.
+
+The exact integration will depend on the capabilities and maturity of AshGPU.
+
+Potential responsibilities include:
+
+GPU discovery
+GPU allocation
+GPU execution
+GPU memory management
+GPU metrics
+GPU utilization
+GPU health
+GPU device information
+The long-term goal is to make AshGPU visible to AshML and Kubernetes as a real compute resource.
+
+Potential architecture:
+
+Kubernetes
+    │
+    ▼
+AshML Scheduler
+    │
+    ▼
+AshGPU Integration
+    │
+    ▼
+GPU Device
+If feasible, implement a Kubernetes device-plugin-style integration so Kubernetes workloads can request AshGPU resources declaratively.
+
+For example:
+
+resources:
+  limits:
+    ash.ai/gpu: 2
+This should only be implemented once the underlying AshGPU functionality is mature enough.
+
+16. GPU Resource Management
+AshML should eventually expose GPU metadata such as:
+
+GPU ID
+GPU model/type
+Memory capacity
+Memory used
+Utilization
+Temperature
+Power usage
+Availability
+Health
+Node
+Example:
+
+Node:
+  node-01
+
+GPU:
+  gpu-0
+  type: AshGPU
+  memory: 16GB
+  utilization: 72%
+  status: AVAILABLE
+This information should feed both:
+
+Scheduler decisions
+
+Observability dashboards
+
+17. Experiment Tracking
+Every training execution should be reproducible.
+
+An experiment should record:
+
+Experiment ID
+Project
+Git commit
+Dataset version
+Model version
+Training configuration
+Hyperparameters
+Hardware
+GPU count
+GPU type
+Container image
+Start time
+End time
+Metrics
+Artifacts
+Logs
+Example:
+
+Experiment #184
+
+Git:
+  commit = a91d23c
+
+Dataset:
+  cifar10:v3
+
+Model:
+  resnet18
+
+Hardware:
+  GPUs = 2
+  GPU = AshGPU
+
+Training:
+  epochs = 50
+  batch_size = 128
+  learning_rate = 0.001
+
+Results:
+  accuracy = 91.4%
+  loss = 0.31
+
+Artifact:
+  resnet18:v7
+The purpose is reproducibility.
+
+18. Model Registry
+AshML should contain a model registry.
+
+A model should have multiple versions.
+
+Example:
+
+Model: resnet-cifar
+
+v1
+v2
+v3
+v4
+Each model version should contain metadata such as:
+
+Model architecture
+Training experiment
+Dataset version
+Git commit
+Metrics
+Artifact location
+Creation timestamp
+Status
+Possible lifecycle states:
+
+CREATED
+VALIDATED
+STAGED
+PRODUCTION
+ARCHIVED
+19. Artifact Storage
+Training produces artifacts.
+
+Examples:
+
+Model checkpoints
+Final model
+Tokenizer
+Configuration
+Evaluation results
+Other generated artifacts
+The platform should use object storage.
+
+An S3-compatible backend is preferred.
+
+For local development, MinIO or another compatible implementation may be used.
+
+Large model binaries must NOT be stored directly in PostgreSQL.
+
+PostgreSQL stores metadata and references.
+
+Object storage stores large artifacts.
+
+20. Inference Platform
+After a model is trained and registered, it should be deployable.
+
+Example:
+
+ash model deploy resnet-cifar:v4
+The control plane should create an inference deployment.
+
+Architecture:
+
+Client
+  │
+  ▼
+API Gateway
+  │
+  ▼
+Model Router
+  │
+  ▼
+Inference Service
+  │
+  ▼
+AshGPU
+  │
+  ▼
+Model
+The inference service should eventually support:
+
+Model loading
+
+Health checks
+
+Readiness checks
+
+Batching
+
+Concurrency limits
+
+Request timeouts
+
+Model version selection
+
+Metrics
+
+Logging
+
+21. Model Version Routing
+The platform should eventually support multiple versions.
+
+Example:
+
+model:v6 → 90%
+model:v7 → 10%
+This enables:
+
+Canary deployments
+
+A/B testing
+
+Gradual rollout
+
+Rollback
+
+Example:
+
+ash deployment rollout model:v7 --traffic 10
+Then:
+
+ash deployment rollout model:v7 --traffic 50
+Eventually:
+
+ash deployment promote model:v7
+22. Failure Recovery
+Reliability is a major goal.
+
+The system should deliberately support failure scenarios.
+
+Training pod failure
+training pod dies
+      ↓
+operator detects failure
+      ↓
+checkpoint discovered
+      ↓
+new pod created
+      ↓
+training resumes
+GPU failure
+GPU becomes unhealthy
+      ↓
+GPU marked unavailable
+      ↓
+scheduler stops assigning jobs
+      ↓
+recoverable workload rescheduled
+Inference failure
+inference pod crashes
+      ↓
+Kubernetes restarts pod
+      ↓
+readiness check
+      ↓
+traffic restored
+Node failure
+node disappears
+      ↓
+Kubernetes detects node failure
+      ↓
+workloads become unavailable
+      ↓
+controller/scheduler attempts recovery
+Failure handling must be observable.
+
+The platform should clearly communicate:
+
+What failed
+When it failed
+Why it failed
+What recovery action was taken
+Whether recovery succeeded
+23. Observability
+Observability is mandatory.
+
+The system should provide:
+
+Infrastructure Metrics
+CPU usage
+Memory usage
+GPU utilization
+GPU memory
+Network
+Disk
+ML Metrics
+Training loss
+Validation loss
+Accuracy
+Throughput
+Samples/sec
+Epoch duration
+Platform Metrics
+Jobs submitted
+Jobs running
+Jobs queued
+Jobs failed
+Queue depth
+Scheduler latency
+Job startup time
+Inference Metrics
+Requests/sec
+p50 latency
+p95 latency
+p99 latency
+Error rate
+Timeout rate
+Queue depth
+24. Logging
+Every major component should produce structured logs.
+
+Prefer JSON/structured logging.
+
+Example:
+
+{
+  "timestamp": "2026-08-17T10:00:00Z",
+  "service": "scheduler",
+  "level": "INFO",
+  "job_id": "job-184",
+  "event": "job_scheduled",
+  "node": "gpu-node-02"
+}
+Logs should be correlated using identifiers such as:
+
+request_id
+job_id
+experiment_id
+deployment_id
+node_id
+25. Distributed Tracing
+Where practical, use OpenTelemetry.
+
+Example:
+
+API request
+   ↓
+CreateJob
+   ↓
+QueueJob
+   ↓
+Scheduler
+   ↓
+Kubernetes API
+   ↓
+Pod creation
+   ↓
+Training workload
+The objective is to make it possible to investigate latency across the distributed system.
+
+26. Monitoring Stack
+Use established open-source observability components rather than reinventing them.
+
+Potential stack:
+
+Prometheus
+Grafana
+OpenTelemetry
+Loki or equivalent logging backend
+The exact components may change.
+
+The architectural goal remains:
+
+Metrics
+Logs
+Traces
+GPU telemetry
+Application telemetry
+27. Ash CLI
+AshML should provide a CLI.
+
+Example commands:
+
+ash login
+
+ash project list
+
+ash dataset list
+
+ash experiment list
+
+ash job submit training.yaml
+
+ash job list
+
+ash job get job-184
+
+ash job logs job-184
+
+ash job cancel job-184
+
+ash model list
+
+ash model versions resnet-cifar
+
+ash model deploy resnet-cifar:v4
+
+ash deployment list
+
+ash deployment status resnet-cifar
+
+ash gpu list
+
+ash node list
+The CLI should be useful even without Ashcode.
+
+28. Ashcode Integration
+Ashcode should eventually become an intelligent interface on top of AshML.
+
+Ashcode should NOT directly manipulate Kubernetes resources blindly.
+
+Preferred architecture:
+
+Ashcode
+   ↓
+AshML API / SDK
+   ↓
+AshML Control Plane
+   ↓
+Kubernetes / AshGPU
+This maintains proper architectural boundaries.
+
+Ashcode should be able to answer questions such as:
+
+"show my running jobs"
+
+"why is job 184 stuck?"
+
+"how much GPU capacity is available?"
+
+"deploy model v7"
+
+"compare experiment 184 and 173"
+
+"why did training become slower?"
+
+"show failed jobs from today"
+
+"what GPU is currently underutilized?"
+29. Ashcode as an Infrastructure Copilot
+A major long-term feature is allowing Ashcode to analyze AshML platform state.
+
+For example:
+
+User:
+
+Why is experiment 184 slower than experiment 173?
+Ashcode should inspect:
+
+Experiment metadata
+Training configuration
+Dataset
+GPU utilization
+CPU utilization
+Memory
+Network
+Logs
+Scheduler decisions
+Pod events
+and potentially produce:
+
+Experiment 184 is approximately 37% slower.
+
+Likely causes:
+
+1. Data-loader workers decreased from 8 to 2.
+2. GPU utilization fell from 91% to 58%.
+3. Dataset storage latency increased.
+
+Primary bottleneck appears to be input pipeline performance.
+This is where Ashcode becomes much more powerful than a generic coding agent.
+
+30. AI-Assisted Operations
+Eventually Ashcode may perform controlled actions such as:
+
+Restart job
+Cancel job
+Reschedule workload
+Deploy model
+Rollback deployment
+Scale inference service
+Inspect logs
+However:
+
+Destructive or high-impact actions must require explicit confirmation unless a carefully designed autonomous mode is implemented.
+
+Example:
+
+Ashcode:
+
+I recommend cancelling job-184 because it has been stuck for 42 minutes.
+
+Would you like me to cancel it?
+After confirmation:
+
+✓ job cancelled
+31. Security
+Security should be built into the architecture rather than added at the end.
+
+Required concepts:
+
+Authentication
+
+Authorization
+
+RBAC
+
+Service accounts
+
+Kubernetes RBAC
+
+Secret management
+
+Network isolation where appropriate
+
+Resource quotas
+
+Project isolation
+
+Example:
+
+User
+ ↓
+Authentication
+ ↓
+Project permissions
+ ↓
+AshML authorization
+ ↓
+Kubernetes service account
+ ↓
+Workload
+Do not allow arbitrary users to submit unrestricted Kubernetes resources.
+
+The AshML control plane should validate workloads.
+
+32. Multi-Tenancy / Projects
+Full enterprise multi-tenancy is not required initially.
+
+However, the architecture should support logical project isolation.
+
+Example:
+
+Project A
+ ├── datasets
+ ├── experiments
+ ├── jobs
+ └── models
+
+Project B
+ ├── datasets
+ ├── experiments
+ ├── jobs
+ └── models
+Each project can eventually have:
+
+GPU quota
+CPU quota
+Memory quota
+Job quota
+Storage quota
+33. Resource Quotas
+Example:
+
+project: research
+
+quota:
+  gpu: 4
+  cpu: 32
+  memory: 128Gi
+The scheduler must respect quotas.
+
+If a project has:
+
+GPU quota = 4
+it should not be able to schedule a fifth GPU even if the cluster has available GPUs.
+
+34. Reproducibility
+A core goal is that training should be reproducible.
+
+An experiment should capture:
+
+Code version
+Container version
+Dataset version
+Model configuration
+Hyperparameters
+Hardware
+GPU configuration
+Random seed
+Dependencies
+Ideally:
+
+Experiment ID
+      ↓
+Exact code
+Exact dataset
+Exact configuration
+Exact container
+Exact hardware information
+This allows the same experiment to be rerun.
+
+35. ML Workloads
+The initial ML workloads should be intentionally small.
+
+Do not start by trying to train a huge language model.
+
+Use manageable workloads such as:
+
+Computer Vision
+CIFAR-10
+ResNet
+NLP
+Small Transformer
+Small text dataset
+LLM Systems
+Eventually:
+
+Tiny language model
+Small-scale fine-tuning
+The purpose is to test infrastructure, not compete with frontier models.
+
+36. Distributed Training
+After single-GPU training works reliably, implement multi-GPU training.
+
+Possible architecture:
+
+TrainingJob
+    │
+    ▼
+Controller
+    │
+    ├── Worker 0
+    ├── Worker 1
+    ├── Worker 2
+    └── Worker 3
+Investigate:
+
+PyTorch Distributed
+
+DDP
+
+Collective communication
+
+Worker coordination
+
+Rendezvous
+
+Checkpointing
+
+Failure recovery
+
+The exact framework can evolve.
+
+The important objective is to demonstrate that AshML can orchestrate distributed ML workloads.
+
+37. Benchmarking
+The project must include benchmarks.
+
+Do not only demonstrate that something works.
+
+Measure it.
+
+Potential metrics:
+
+Job submission latency
+Scheduler latency
+Queue latency
+Pod startup time
+GPU allocation latency
+Training throughput
+GPU utilization
+Inference latency
+p50 latency
+p95 latency
+p99 latency
+Recovery time
+Example benchmark format:
+
+100 training jobs submitted
+
+Average scheduler latency: X ms
+p95 scheduler latency: Y ms
+
+Average startup time: X sec
+
+GPU utilization:
+before optimization: 61%
+after optimization: 87%
+Actual numbers must always be measured.
+
+Never invent performance numbers.
+
+38. Chaos / Failure Testing
+Once the platform works, deliberately introduce failures.
+
+Examples:
+
+Kill training pod
+Kill inference pod
+Restart scheduler
+Restart API server
+Remove GPU
+Stop worker node
+Fill GPU memory
+Simulate network failure
+Then verify recovery.
+
+This should eventually become automated tests.
+
+39. CI/CD
+The project should have a real CI/CD pipeline.
+
+On every pull request:
+
+Lint
+Unit tests
+Integration tests
+Build
+Container build
+Security checks
+On main branch:
+
+Build images
+Publish images
+Deploy to test cluster
+Run integration tests
+Eventually:
+
+Git push
+   ↓
+CI
+   ↓
+Tests
+   ↓
+Container build
+   ↓
+Registry
+   ↓
+Deployment
+   ↓
+Smoke tests
+40. Infrastructure as Code
+Kubernetes resources should be reproducible.
+
+Use:
+
+Helm
+
+Kustomize
+
+Terraform where appropriate
+
+Kubernetes manifests
+
+The entire development cluster should ideally be reproducible from a clean machine.
+
+A developer should eventually be able to do something conceptually similar to:
+
+git clone <repository>
+
+make bootstrap
+
+make cluster
+
+make deploy
+
+make test
+and obtain a working development environment.
+
+41. Local Development
+The project must support a local development mode.
+
+The full architecture may require:
+
+Kubernetes
+GPU
+Object storage
+PostgreSQL
+Redis
+Observability
+but development should not require everything simultaneously.
+
+Possible development levels:
+
+Level 1
+API + PostgreSQL
+
+Level 2
+API + Kubernetes
+
+Level 3
+Kubernetes + simulated GPU resources
+
+Level 4
+Kubernetes + real AshGPU
+
+Level 5
+Full observability + distributed workloads
+
+This keeps development manageable.
+
+42. Repository Structure
+A possible repository structure:
+
+ashml/
+│
+├── README.md
+├── LICENSE
+├── Makefile
+├── go.mod
+│
+├── cmd/
+│   ├── ashml-server/
+│   ├── ashml-controller/
+│   ├── ashml-scheduler/
+│   └── ash/
+│
+├── internal/
+│   ├── api/
+│   ├── scheduler/
+│   ├── jobs/
+│   ├── models/
+│   ├── experiments/
+│   ├── artifacts/
+│   ├── deployments/
+│   ├── resources/
+│   ├── auth/
+│   └── storage/
+│
+├── operator/
+│   ├── api/
+│   ├── controllers/
+│   └── config/
+│
+├── sdk/
+│   └── ...
+│
+├── cli/
+│   └── ...
+│
+├── ml/
+│   ├── examples/
+│   ├── training/
+│   ├── evaluation/
+│   └── inference/
+│
+├── ashgpu/
+│   ├── integration/
+│   └── ...
+│
+├── deploy/
+│   ├── helm/
+│   ├── manifests/
+│   └── local/
+│
+├── monitoring/
+│   ├── prometheus/
+│   ├── grafana/
+│   └── dashboards/
+│
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   ├── e2e/
+│   └── chaos/
+│
+├── docs/
+│   ├── architecture/
+│   ├── api/
+│   ├── development/
+│   ├── deployment/
+│   └── design/
+│
+└── examples/
+    ├── training/
+    ├── inference/
+    └── distributed-training/
+The exact structure is not mandatory.
+
+Maintainability is more important than matching this tree exactly.
+
+43. Technology Philosophy
+Use mature technologies where they make sense.
+
+Do not reinvent infrastructure unnecessarily.
+
+For example:
+
+Kubernetes → orchestration
+PostgreSQL → metadata/state
+Redis → queues/caching where appropriate
+S3-compatible storage → artifacts
+Prometheus → metrics
+Grafana → visualization
+OpenTelemetry → tracing
+Build custom components only where they demonstrate the project's core engineering value.
+
+The most important custom components should be:
+
+AshML Control Plane
+AshML Scheduler
+AshML Kubernetes Operator
+AshGPU Integration
+Ashcode Integration
+44. Important Engineering Principle
+Do not use technology merely because it looks impressive on a resume.
+
+Every component must answer:
+
+Why does this exist?
+
+For example, do not add:
+
+Kafka
+RabbitMQ
+Redis
+NATS
+gRPC
+REST
+GraphQL
+just because they are popular.
+
+Better:
+
+REST
+→ Public control-plane API
+
+gRPC
+→ Internal service communication where justified
+
+Redis
+→ Transient queue/cache where appropriate
+
+PostgreSQL
+→ Durable metadata/state
+
+Object storage
+→ Large artifacts
+
+Kubernetes
+→ Workload orchestration
+Minimize unnecessary complexity.
+
+45. API Design
+The API should be versioned.
+
+Example:
+
+/api/v1/projects
+/api/v1/datasets
+/api/v1/experiments
+/api/v1/jobs
+/api/v1/models
+/api/v1/deployments
+/api/v1/nodes
+/api/v1/gpus
+Use consistent error handling.
+
+Example:
+
+{
+  "error": {
+    "code": "INSUFFICIENT_GPU",
+    "message": "Requested 4 GPUs but only 2 are currently available."
+  }
+}
+Avoid returning inconsistent ad-hoc error messages.
+
+46. Database Design
+PostgreSQL should contain metadata such as:
+
+users
+projects
+datasets
+dataset_versions
+experiments
+training_jobs
+job_events
+models
+model_versions
+deployments
+nodes
+gpu_devices
+resource_quotas
+artifacts
+Large binary objects should NOT be stored directly in PostgreSQL.
+
+Use object storage.
+
+47. Event Model
+Important state changes should produce events.
+
+Examples:
+
+JOB_CREATED
+JOB_QUEUED
+JOB_SCHEDULED
+JOB_STARTED
+JOB_FAILED
+JOB_RETRYING
+JOB_COMPLETED
+JOB_CANCELLED
+
+MODEL_REGISTERED
+MODEL_DEPLOYED
+MODEL_ROLLED_BACK
+
+GPU_ALLOCATED
+GPU_RELEASED
+GPU_FAILED
+Events are useful for:
+
+Debugging
+
+Observability
+
+Auditing
+
+Ashcode
+
+UI
+
+Future event-driven architecture
+
+48. Auditability
+Important actions should be auditable.
+
+Record:
+
+Who
+What
+When
+Resource
+Result
+Example:
+
+User: ash
+Action: deploy_model
+Model: resnet:v7
+Time: ...
+Result: SUCCESS
+This becomes especially important once Ashcode can perform operations.
+
+49. Web Dashboard
+A dashboard is useful, but it is not the primary goal.
+
+Keep it relatively simple.
+
+It should display:
+
+Cluster
+Nodes
+GPUs
+CPU
+RAM
+Jobs
+Queued
+Running
+Completed
+Failed
+Experiments
+Loss
+Accuracy
+Duration
+Models
+Versions
+Status
+Deployments
+Inference
+Requests
+Latency
+Errors
+Do not spend months building a beautiful frontend.
+
+The backend and infrastructure are the project.
+
+50. Core User Journey
+The final demo should support this workflow.
+
+Step 1 — Create project
+ash project create vision
+Step 2 — Submit training
+ash job submit examples/training/resnet.yaml
+Step 3 — Scheduler processes job
+QUEUED
+ ↓
+SCHEDULING
+ ↓
+GPU NODE SELECTED
+ ↓
+KUBERNETES JOB CREATED
+Step 4 — Training runs
+AshGPU
+ ↓
+PyTorch
+ ↓
+ResNet
+Metrics appear in the monitoring system.
+
+Step 5 — Training completes
+Checkpoint
+ ↓
+Artifact storage
+ ↓
+Model registry
+Step 6 — Deploy model
+ash model deploy resnet-cifar:v1
+Step 7 — Inference
+ash predict resnet-cifar:v1 image.jpg
+Step 8 — Observe
+Dashboard displays:
+
+GPU utilization
+Training loss
+Inference latency
+Model performance
+Service health
+Step 9 — Failure
+Kill the inference pod.
+
+Kubernetes should recover it.
+
+Kill a training worker.
+
+AshML should recover/reschedule where supported.
+
+Step 10 — Ashcode
+Ask:
+
+Why is the training job slow?
+or:
+
+Deploy the latest model with 10% traffic.
+Ashcode uses the AshML APIs to inspect or operate the platform.
+
+51. Milestone Plan
+The project should be built incrementally.
+
+Do not attempt to implement everything at once.
+
+Milestone 0 — Architecture
+Deliver:
+
+Repository
+Architecture document
+Component boundaries
+Database schema
+API specification
+Development environment
+No major features yet.
+
+Milestone 1 — Basic Control Plane
+Implement:
+
+API
+PostgreSQL
+Projects
+Jobs
+Job state
+Basic CLI
+Success criteria:
+
+Create project
+Submit job
+Inspect job
+Cancel job
+Milestone 2 — Kubernetes Integration
+Implement:
+
+Kubernetes client
+Job creation
+Pod management
+Status synchronization
+Logs
+Success criteria:
+
+API
+ ↓
+AshML
+ ↓
+Kubernetes
+ ↓
+Container
+Milestone 3 — Basic Scheduler
+Implement:
+
+Queue
+FIFO scheduling
+Resource validation
+Basic resource accounting
+Success criteria:
+
+Submit 10 jobs
+Jobs queue
+Available resources are respected
+Jobs execute in order
+Milestone 4 — GPU Scheduling
+Implement:
+
+GPU discovery
+GPU resource accounting
+GPU-aware placement
+Success criteria:
+
+Job requests GPU
+Scheduler finds suitable GPU
+Workload runs on correct node
+Milestone 5 — AshGPU Integration
+Integrate:
+
+AshGPU discovery
+GPU metrics
+Resource allocation
+Workload execution
+Success criteria:
+
+AshML
+ ↓
+Kubernetes
+ ↓
+AshGPU
+ ↓
+ML workload
+Milestone 6 — Training Platform
+Implement:
+
+Training jobs
+Datasets
+Experiments
+Metrics
+Checkpoints
+Artifacts
+Success criteria:
+
+Submit training
+ ↓
+Train model
+ ↓
+Store checkpoint
+ ↓
+Record metrics
+Milestone 7 — Model Registry
+Implement:
+
+Models
+Versions
+Artifacts
+Metadata
+Success criteria:
+
+Experiment
+ ↓
+Model version
+ ↓
+Registry
+Milestone 8 — Inference
+Implement:
+
+Model deployment
+Inference API
+Health checks
+Metrics
+Success criteria:
+
+Registered model
+ ↓
+Deployment
+ ↓
+Inference endpoint
+Milestone 9 — Observability
+Implement:
+
+Metrics
+Logs
+Dashboards
+Tracing
+GPU telemetry
+Success criteria:
+
+The operator can diagnose:
+
+Why is a job slow?
+Why did a job fail?
+Which GPU is busy?
+Why is inference latency high?
+Milestone 10 — Failure Recovery
+Implement:
+
+Retry
+Checkpoint recovery
+Pod failure recovery
+GPU failure handling
+Success criteria:
+
+Deliberately kill workloads and demonstrate recovery.
+
+Milestone 11 — Kubernetes Operator
+Move workload lifecycle logic into a proper operator.
+
+Success criteria:
+
+TrainingJob CRD
+ ↓
+Operator
+ ↓
+Kubernetes workload
+ ↓
+Status reconciliation
+Milestone 12 — Ashcode Integration
+Implement Ashcode tools/actions for:
+
+List jobs
+Inspect job
+Inspect logs
+Inspect GPU
+Compare experiments
+Deploy model
+Rollback deployment
+Explain failures
+Success criteria:
+
+Ashcode can operate the platform through official AshML APIs.
+
+Milestone 13 — Distributed Training
+Implement:
+
+Multi-GPU training
+Worker coordination
+Checkpointing
+Failure handling
+Success criteria:
+
+A distributed training workload executes successfully across multiple GPUs.
+
+Milestone 14 — Production Hardening
+Add:
+
+Authentication
+RBAC
+Quotas
+Rate limiting
+Audit logs
+Security checks
+CI/CD
+Integration tests
+Chaos tests
+Documentation
+52. Definition of Done
+The project should NOT be considered complete merely because the API works.
+
+A strong version of AshML is complete when:
+
+Infrastructure
+Kubernetes deployment works.
+
+Control plane is separated from compute workloads.
+
+Resources are tracked.
+
+GPU resources are visible.
+
+Jobs can be scheduled.
+
+ML
+Training workloads execute.
+
+Experiments are recorded.
+
+Metrics are captured.
+
+Checkpoints are stored.
+
+Models are versioned.
+
+Models can be deployed.
+
+Reliability
+Failed workloads are detected.
+
+Recoverable jobs can retry.
+
+Inference workloads recover from pod failures.
+
+Scheduler handles unavailable resources.
+
+Observability
+Metrics exist.
+
+Logs exist.
+
+Traces exist.
+
+GPU telemetry exists.
+
+Dashboards exist.
+
+Developer Experience
+CLI exists.
+
+API is documented.
+
+Example workloads exist.
+
+Local setup is documented.
+
+Ashcode integration works.
+
+Engineering Quality
+Unit tests exist.
+
+Integration tests exist.
+
+End-to-end tests exist.
+
+CI works.
+
+Containers are reproducible.
+
+Kubernetes manifests are reproducible.
+
+Documentation explains architecture and tradeoffs.
+
+53. What NOT to Do
+Do not build a generic AI chatbot
+The primary product is infrastructure.
+
+Do not make RAG the main feature
+RAG can be an example workload, but it is not the core project.
+
+Do not make the frontend the project
+The UI is secondary.
+
+Do not use Kubernetes as decoration
+Kubernetes must solve real orchestration problems.
+
+Do not add microservices unnecessarily
+Use the smallest architecture that correctly solves the problem.
+
+Do not fake GPU functionality
+If AshGPU functionality is unavailable, explicitly mark simulations/mocks.
+
+Do not claim distributed ML without actually running distributed workloads
+The project must demonstrate real behavior.
+
+Do not optimize for technology count
+Depth is more valuable than breadth.
+
+54. Engineering Standards
+The project should prioritize:
+
+Correctness
+
+Reliability
+
+Observability
+
+Reproducibility
+
+Maintainability
+
+Performance
+
+Security
+
+Developer experience
+
+Do not optimize prematurely.
+
+First make the system correct.
+
+Then measure.
+
+Then optimize based on measurements.
+
+55. Coding-Agent Instructions
+This document is intended to be used as the master project specification by Claude Code, OpenCode, Codex, or another coding agent.
+
+The coding agent should treat AshML as a serious, long-term infrastructure project.
+
+Before making major changes:
+
+Inspect the repository.
+
+Understand the existing architecture.
+
+Read relevant documentation.
+
+Identify existing abstractions.
+
+Avoid duplicating functionality.
+
+Preserve existing behavior unless the task explicitly requires breaking changes.
+
+Determine which milestone the current task belongs to.
+
+Implement the smallest correct increment.
+
+Add tests.
+
+Update documentation when architecture or behavior changes.
+
+56. Coding-Agent Rules
+Rule 1 — Do not implement the entire specification at once
+This document describes the long-term vision.
+
+It does NOT mean every feature should be implemented immediately.
+
+Always determine:
+
+What is already implemented?
+What is the current milestone?
+What is the smallest correct implementation?
+What dependencies does it have?
+What existing code can be reused?
+Rule 2 — Prefer incremental implementation
+For every feature:
+
+Design
+ ↓
+Small implementation
+ ↓
+Tests
+ ↓
+Integration
+ ↓
+Observability
+ ↓
+Documentation
+Do not build huge amounts of untested code.
+
+Rule 3 — Preserve architecture
+Maintain the distinction between:
+
+Control Plane
+Compute Plane
+Do not place arbitrary infrastructure logic inside ML training containers.
+
+Rule 4 — Avoid unnecessary dependencies
+Before introducing a dependency, ask:
+
+Can the standard library solve this?
+
+Does the dependency materially simplify the system?
+
+Does it create operational complexity?
+
+Is it mature and maintained?
+Rule 5 — Do not fake functionality
+Never implement fake GPU metrics, fake scheduling, fake distributed training, fake Kubernetes behavior, or fake performance numbers simply to make a demo work.
+
+If functionality is unavailable, clearly identify it as:
+
+TODO
+Stub
+Simulation
+Mock
+Future integration
+A simulated GPU may be used for development, but it must be clearly separated from the real AshGPU path.
+
+57. Testing Philosophy
+Every major component should have tests.
+
+Unit Tests
+Test:
+
+Scheduler decisions
+State transitions
+Resource accounting
+Authorization
+API validation
+Model version logic
+Integration Tests
+Test:
+
+API + Database
+API + Kubernetes
+Scheduler + Kubernetes
+Operator + Kubernetes
+Artifact storage
+End-to-End Tests
+Test complete workflows:
+
+Submit job
+ ↓
+Schedule
+ ↓
+Run
+ ↓
+Complete
+ ↓
+Register model
+ ↓
+Deploy
+ ↓
+Inference
+Failure Tests
+Test:
+
+Pod failure
+Node failure
+GPU failure
+API restart
+Scheduler restart
+58. Documentation Requirements
+Every major subsystem should have documentation.
+
+At minimum:
+
+architecture.md
+scheduler.md
+gpu.md
+kubernetes.md
+operator.md
+training.md
+model-registry.md
+inference.md
+observability.md
+failure-recovery.md
+development.md
+deployment.md
+Important architectural decisions should be documented as ADRs.
+
+Example:
+
+docs/adr/0001-use-postgresql-for-control-plane-state.md
+docs/adr/0002-use-kubernetes-as-compute-orchestrator.md
+docs/adr/0003-design-ashml-scheduler.md
+59. Performance Philosophy
+Performance matters, but benchmarks must drive optimization.
+
+Measure:
+
+API latency
+Scheduler latency
+Queue latency
+Resource allocation latency
+Job startup latency
+GPU utilization
+Training throughput
+Inference latency
+When optimizing:
+
+Measure
+ ↓
+Identify bottleneck
+ ↓
+Change implementation
+ ↓
+Benchmark
+ ↓
+Compare
+Do not make unsupported performance claims.
+
+60. Final Demonstration
+The final portfolio demonstration should tell a complete story.
+
+Start with:
+
+I want to train a model.
+Then:
+
+ash job submit examples/training/resnet.yaml
+Show:
+
+Job queued
+ ↓
+Scheduler evaluates resources
+ ↓
+GPU selected
+ ↓
+Kubernetes workload created
+ ↓
+AshGPU allocated
+ ↓
+Training starts
+Show the monitoring dashboard:
+
+GPU utilization
+Training loss
+Throughput
+Memory
+Then training completes:
+
+Checkpoint stored
+ ↓
+Experiment recorded
+ ↓
+Model registered
+Then:
+
+ash model deploy resnet:v3
+Show:
+
+Deployment created
+Health check passed
+Inference available
+Then kill the inference pod.
+
+Show:
+
+Pod failure
+ ↓
+Kubernetes recovery
+ ↓
+Health check
+ ↓
+Traffic restored
+Finally open Ashcode:
+
+Why did training take longer than the previous experiment?
+Ashcode analyzes the platform.
+
+This is the final story.
+
+61. Resume-Level Engineering Outcomes
+When mature, the project should be able to support resume claims such as:
+
+Designed and implemented a Kubernetes-native ML infrastructure platform for GPU workload orchestration, training, model management, and inference.
+
+Built an ML-aware GPU scheduler supporting resource-aware workload placement and queue management.
+
+Developed a Kubernetes Operator for declarative ML training workloads and lifecycle reconciliation.
+
+Integrated custom AshGPU compute infrastructure with Kubernetes-based workload execution.
+
+Implemented model versioning, experiment tracking, artifact management, and GPU-backed inference deployment.
+
+Built observability across infrastructure, GPU, training, and inference layers using metrics, logs, and distributed tracing.
+
+Implemented workload failure detection, checkpoint-based recovery, and automated rescheduling.
+
+Integrated Ashcode as an AI-powered developer interface for inspecting and operating ML infrastructure.
+
+Built reproducible CI/CD, integration testing, and failure-testing workflows for the platform.
+
+Actual resume bullets should only claim features that are genuinely implemented and measured.
+
+62. Long-Term Vision
+The ultimate vision is:
+
+                         ASH ECOSYSTEM
+
+                           Ashcode
+                              │
+                    AI Developer Interface
+                              │
+                              ▼
+                            AshML
+                              │
+                 ML Infrastructure Control Plane
+                              │
+               ┌──────────────┼──────────────┐
+               │              │              │
+           Scheduler       Registry       Serving
+               │              │              │
+               └──────────────┼──────────────┘
+                              │
+                         Kubernetes
+                              │
+                           AshGPU
+                              │
+                       GPU Compute Layer
+AshGPU is the compute foundation.
+
+AshML is the ML infrastructure/control layer.
+
+Ashcode is the intelligent developer/operator interface.
+
+Together they form a coherent engineering ecosystem.
+
+63. The Core Question
+Every architectural decision should ultimately help answer:
+
+How can we build a reliable, observable, reproducible, Kubernetes-native platform for running machine learning workloads efficiently on GPU infrastructure?
+
+The project is successful when the answer is demonstrated through working software rather than only documentation.
+
+64. Final Guiding Principle
+Do not optimize this project for the number of technologies used.
+
+Optimize it for the depth of engineering demonstrated.
+
+A smaller system that genuinely implements:
+
+GPU-aware scheduling
++
+Kubernetes orchestration
++
+ML training
++
+Model lifecycle
++
+Inference
++
+Observability
++
+Failure recovery
++
+AshGPU integration
++
+Ashcode integration
+is significantly more valuable than a giant repository containing dozens of superficial integrations.
+
+The goal is to build something that, when an experienced backend, infrastructure, or ML systems engineer looks at the architecture, they think:
+
+"This person understands how these systems actually fit together."
+
+That is the standard AshML should aim for.
