@@ -149,7 +149,7 @@ and placement starts using it (ADR 0008).
 
 ---
 
-## Phase 4 — ML Lifecycle *(current — reporting, storage and SDK done; registry and the real workload next)*
+## Phase 4 — ML Lifecycle *(current — everything but the real workload)*
 
 Spec milestones 6 and 7.
 
@@ -161,7 +161,7 @@ Spec milestones 6 and 7.
 - ~~MinIO artifact storage: presigned uploads, so the run writes bytes AshML can serve back~~ **done**
 - ~~Python SDK: the thin client that makes a training script report without ceremony~~ **done** —
   `sdk/python`, zero dependencies, proven end to end from a real pod in k3d
-- Model registry: models, versions, lifecycle states
+- ~~Model registry: models, versions, lifecycle states~~ **done**
 - Real workload: ResNet-18 on CIFAR-10, single GPU
 
 **Exit criteria:** train ResNet on CIFAR-10 through the platform; the run appears as an
@@ -193,6 +193,27 @@ Where the store cannot be asked — no bucket configured, or a URI the run broug
 storage AshML knows nothing about — the artifact still completes, but is recorded and
 displayed as `verified: false`. The two cases must never look alike, so `ash job
 artifacts` prints a CHECKED column and says plainly which is which (spec Rule 5).
+
+### The registry's one promise
+
+A model has **at most one version in PRODUCTION**, and promotion displaces the incumbent
+inside the same transaction — never an instant with two, never one with none. That is
+what makes "the production model" a question with an answer instead of a tie-break every
+consumer has to invent for itself.
+
+Two supporting decisions:
+
+- **A version can only be registered from a READY artifact.** This is what the artifact
+  lifecycle was built for. A registry entry pointing at unconfirmed bytes only moves the
+  moment of discovery from "the upload failed" to "production cannot load the model".
+- **A displaced version goes to STAGING, not ARCHIVED.** It is the most likely rollback
+  target, and the person promoting at 3am has not decided to retire it forever. A
+  rollback is then just promoting the previous version again.
+
+Registering is deliberately **not** something the SDK does. A training script that could
+promote itself to production is the anti-pattern the lifecycle exists to prevent; the run
+produces a verified artifact, and a human or CI decides whether it becomes a version and
+whether that version serves traffic.
 
 ### Deferred within this phase
 

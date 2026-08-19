@@ -37,7 +37,21 @@ with ashml.init() as run:                      # identity comes from the contain
 `examples/training/sdk_smoke.py` exercises that whole path in the cluster — it trains
 nothing and says so, which is the point: it proves the reporting, not a model.
 
-**Not yet in Phase 4:** the model registry, and the real ResNet-18/CIFAR-10 workload.
+What a run produces can then be registered and promoted, and the registry holds one
+promise: **at most one version of a model is in PRODUCTION**, with promotion displacing
+the incumbent in the same transaction. A version can only be registered from a `READY`
+artifact — the payoff of everything above, since a registry entry pointing at
+unconfirmed bytes just moves the discovery from "the upload failed" to "production
+cannot load the model".
+
+```bash
+ash model create fraud-detector
+ash model register fraud-detector --artifact <artifact-id>   # inherits the run's metrics
+ash model promote fraud-detector 1
+ash model production fraud-detector                          # what is serving, and is it verified
+```
+
+**Not yet in Phase 4:** the real ResNet-18/CIFAR-10 workload.
 
 **Not yet:** GPU jobs cannot run on this host — the machine has two RTX 2080 Tis, but
 installing the NVIDIA container toolkit needs root, so no GPU reaches a k3d node and the

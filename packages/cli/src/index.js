@@ -858,6 +858,186 @@ experiment
     });
   });
 
+// ------------------------------------------------------------------ model
+
+const model = program.command('model').description('The model registry: versions and what is serving');
+
+const modelProjectOption = ['-p, --project <name>', 'project the model belongs to (or $ASHML_PROJECT)'];
+
+/** Renders the versions of one model. Shared by `get` and `versions`. */
+function versionTable(versions) {
+  const table = newTable(['VER', 'STATUS', 'CHECKED', 'METRICS', 'SIZE', 'AGE']);
+  for (const v of versions) {
+    const metrics = Object.entries(v.metrics ?? {})
+      .map(([key, value]) => `${key}=${typeof value === 'number' ? num(value) : value}`)
+      .join(' ') || '-';
+    table.push([
+      v.version,
+      v.status,
+      v.artifact ? verifiedLabel(v.artifact) : '-',
+      metrics,
+      size(v.artifact?.size_bytes ?? 0),
+      age(v.created_at),
+    ]);
+  }
+  return table;
+}
+
+model
+  .command('create <name>')
+  .description('Create a model')
+  .option(...modelProjectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const created = await api(endpoint(), `/api/v1/projects/${requireProject(opts)}/models`, {
+      method: 'POST',
+      body: { name },
+    });
+    output(opts, created, () => console.log(`created model ${created.name} (${created.id})`));
+  });
+
+model
+  .command('list')
+  .description('List a project\'s models')
+  .option(...modelProjectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (opts) => {
+    const body = await api(endpoint(), `/api/v1/projects/${requireProject(opts)}/models`);
+    output(opts, body, ({ models }) => {
+      if (models.length === 0) {
+        console.log('No models registered in this project.');
+        return;
+      }
+      const table = newTable(['NAME', 'VERSIONS', 'LATEST', 'PRODUCTION', 'AGE']);
+      for (const m of models) {
+        table.push([
+          m.name,
+          m.version_count,
+          m.latest_version ?? '-',
+          // The question the registry exists to answer, in its own column.
+          m.production_version ?? '-',
+          age(m.created_at),
+        ]);
+      }
+      console.log(table.toString());
+    });
+  });
+
+model
+  .command('get <name>')
+  .description('Show a model and its versions')
+  .option(...modelProjectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const project = requireProject(opts);
+    const m = await api(endpoint(), `/api/v1/projects/${project}/models/${name}`);
+    const { versions } = await api(endpoint(), `/api/v1/projects/${project}/models/${name}/versions`);
+
+    output(opts, { ...m, versions }, () => {
+      console.log(`name:       ${m.name}`);
+      console.log(`project:    ${m.project}`);
+      console.log(`versions:   ${m.version_count}`);
+      console.log(`production: ${m.production_version ?? 'none'}`);
+      console.log(`created:    ${m.created_at}`);
+      if (versions.length > 0) {
+        console.log('');
+        console.log(versionTable(versions).toString());
+      }
+    });
+  });
+
+model
+  .command('versions <name>')
+  .description('List a model\'s versions')
+  .option(...modelProjectOption)
+  .option('--status <status>', 'only versions in this status')
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const query = opts.status ? `?status=${encodeURIComponent(opts.status)}` : '';
+    const body = await api(
+      endpoint(),
+      `/api/v1/projects/${requireProject(opts)}/models/${name}/versions${query}`,
+    );
+    output(opts, body, ({ versions }) => {
+      if (versions.length === 0) {
+        console.log('No versions match.');
+        return;
+      }
+      console.log(versionTable(versions).toString());
+    });
+  });
+
+model
+  .command('register <name>')
+  .description('Register a new version from an artifact a run produced')
+  .requiredOption('--artifact <id>', 'the artifact holding the model bytes; must be READY')
+  .option('-d, --description <text>', 'what changed in this version')
+  .option(...modelProjectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const body = { artifact_id: opts.artifact };
+    if (opts.description) body.description = opts.description;
+
+    const version = await api(
+      endpoint(),
+      `/api/v1/projects/${requireProject(opts)}/models/${name}/versions`,
+      { method: 'POST', body },
+    );
+    output(opts, version, () => {
+      console.log(`registered ${version.model} v${version.version} (${version.status})`);
+      console.log(`  artifact: ${version.artifact.uri}`);
+      // Registering is not deploying, and the CLI should not let anyone assume it was.
+      console.log(`\nNothing is serving it yet. Promote with:`);
+      console.log(`  ash model promote ${version.model} ${version.version}`);
+    });
+  });
+
+/** promote / stage / archive are the same call with the status baked in. */
+function statusCommand(verb, status, description) {
+  model
+    .command(`${verb} <name> <version>`)
+    .description(description)
+    .option(...modelProjectOption)
+    .option('--json', 'emit raw JSON')
+    .action(async (name, version, opts) => {
+      const result = await api(
+        endpoint(),
+        `/api/v1/projects/${requireProject(opts)}/models/${name}/versions/${version}/status`,
+        { method: 'POST', body: { status } },
+      );
+      output(opts, result, () => {
+        console.log(`${result.version.model} v${result.version.version} is now ${result.version.status}`);
+        if (result.displaced) {
+          // Never silent: someone promoting at 3am must see what they just took out.
+          console.log(
+            `  v${result.displaced.version} was displaced from PRODUCTION and is now ${result.displaced.status}`,
+          );
+        }
+      });
+    });
+}
+
+statusCommand('promote', 'PRODUCTION', 'Make a version the one this model means');
+statusCommand('stage', 'STAGING', 'Move a version into staging for evaluation');
+statusCommand('archive', 'ARCHIVED', 'Retire a version permanently');
+
+model
+  .command('production <name>')
+  .description('Show the version this model currently means')
+  .option(...modelProjectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const body = await api(endpoint(), `/api/v1/projects/${requireProject(opts)}/models/${name}/production`);
+    output(opts, body, ({ version }) => {
+      console.log(`${version.model} v${version.version}`);
+      console.log(`  artifact:  ${version.artifact.uri}`);
+      console.log(`  verified:  ${version.artifact.verified === true ? 'yes' : 'NO'}`);
+      console.log(`  promoted:  ${version.promoted_at}`);
+      console.log(`  job:       ${version.job_id ?? '-'}`);
+      console.log(`  metrics:   ${JSON.stringify(version.metrics)}`);
+    });
+  });
+
 // --------------------------------------------------------------- artifact
 
 const artifact = program.command('artifact').description('Inspect and fetch run artifacts');

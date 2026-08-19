@@ -596,6 +596,118 @@ components:
           type: string
           format: date-time
       title: Artifact
+    def-11:
+      type: object
+      required:
+        - id
+        - name
+        - project
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        project:
+          type: string
+        version_count:
+          type: integer
+        latest_version:
+          type:
+            - "null"
+            - integer
+        production_version:
+          type:
+            - "null"
+            - integer
+          description: The version this model currently means. At most one, ever.
+        created_at:
+          type: string
+          format: date-time
+      title: Model
+    def-12:
+      type: object
+      required:
+        - id
+        - model
+        - version
+        - status
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        model:
+          type: string
+        project:
+          type: string
+        version:
+          type: integer
+        status:
+          type: string
+          enum:
+            - CREATED
+            - STAGING
+            - PRODUCTION
+            - ARCHIVED
+        description:
+          type:
+            - "null"
+            - string
+        metrics:
+          type: object
+          additionalProperties: true
+          description: The run’s own last reported value per metric, copied here so two
+            versions can be compared without going back to their jobs
+        artifact:
+          type:
+            - "null"
+            - object
+          description: The bytes this version is. Always READY — a version cannot be
+            registered otherwise.
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            uri:
+              type: string
+            digest:
+              type:
+                - "null"
+                - string
+            size_bytes:
+              type: integer
+            status:
+              type: string
+            verified:
+              type:
+                - "null"
+                - boolean
+              description: Whether AshML checked the bytes itself, rather than the run
+                claiming so
+        experiment_id:
+          type:
+            - "null"
+            - string
+          format: uuid
+        job_id:
+          type:
+            - "null"
+            - string
+          format: uuid
+        promoted_at:
+          type:
+            - "null"
+            - string
+          format: date-time
+          description: When this version first entered PRODUCTION
+        created_at:
+          type: string
+          format: date-time
+      title: ModelVersion
 paths:
   /healthz:
     get:
@@ -2352,6 +2464,381 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/models:
+    post:
+      summary: Create a model
+      tags:
+        - models
+      description: A model is a name. What gets served is a *version* of it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-11"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    get:
+      summary: List a project’s models
+      tags:
+        - models
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - models
+                properties:
+                  models:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-11"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/models/{model}:
+    get:
+      summary: Get a model
+      tags:
+        - models
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+          description: Project name
+        - schema:
+            type: string
+          in: path
+          name: model
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-11"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/models/{model}/versions:
+    post:
+      summary: Register a new version from an artifact
+      tags:
+        - models
+      description: The artifact must be READY. A registry entry pointing at bytes
+        nobody confirmed only moves the moment of discovery from "the upload
+        failed" to "production cannot load the model". The version number is
+        allocated by the platform, and the version starts in CREATED —
+        registering is not promoting.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - artifact_id
+              additionalProperties: false
+              properties:
+                artifact_id:
+                  type: string
+                  format: uuid
+                description:
+                  type: string
+                  maxLength: 2000
+                metrics:
+                  type: object
+                  additionalProperties: true
+                  description: Defaults to the source job’s own last reported value per metric.
+                    Give this only to record something the run did not, such as
+                    a held-out evaluation done afterwards.
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+          description: Project name
+        - schema:
+            type: string
+          in: path
+          name: model
+          required: true
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-12"
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    get:
+      summary: List a model’s versions, newest first
+      tags:
+        - models
+      parameters:
+        - schema:
+            type: string
+            enum:
+              - CREATED
+              - STAGING
+              - PRODUCTION
+              - ARCHIVED
+          in: query
+          name: status
+          required: false
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+          description: Project name
+        - schema:
+            type: string
+          in: path
+          name: model
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - versions
+                properties:
+                  versions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-12"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/models/{model}/production:
+    get:
+      summary: The version this model currently means
+      tags:
+        - models
+      description: "Its own endpoint rather than a filter on the list: this is what an
+        inference router asks, and it should not have to reason about an array
+        to get an answer."
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+          description: Project name
+        - schema:
+            type: string
+          in: path
+          name: model
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    $ref: "#/components/schemas/def-12"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/models/{model}/versions/{version}:
+    get:
+      summary: Get one version
+      tags:
+        - models
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: model
+          required: true
+        - schema:
+            type: integer
+            minimum: 1
+          in: path
+          name: version
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-12"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/models/{model}/versions/{version}/status:
+    post:
+      summary: Move a version through the lifecycle
+      tags:
+        - models
+      description: Promoting to PRODUCTION displaces the incumbent in the same
+        transaction, so there is never an instant with two production versions
+        and never one with none. The displaced version goes to STAGING, not
+        ARCHIVED — it is the most likely rollback target, and retiring it is a
+        separate decision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - status
+              additionalProperties: false
+              properties:
+                status:
+                  type: string
+                  enum:
+                    - CREATED
+                    - STAGING
+                    - PRODUCTION
+                    - ARCHIVED
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: model
+          required: true
+        - schema:
+            type: integer
+            minimum: 1
+          in: path
+          name: version
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - version
+                properties:
+                  version:
+                    $ref: "#/components/schemas/def-12"
+                  displaced:
+                    type:
+                      - "null"
+                      - object
+                    description: The version this promotion pushed out of PRODUCTION, if any
+                    properties:
+                      version:
+                        type: integer
+                      status:
+                        type: string
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
 servers:
   - url: /
     description: Current host
@@ -2374,3 +2861,5 @@ tags:
     description: Training metrics reported by running jobs
   - name: artifacts
     description: Checkpoints and models produced by runs
+  - name: models
+    description: "The model registry: versions and their lifecycle"
