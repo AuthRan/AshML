@@ -17,6 +17,7 @@ import { Phase } from '../k8s/backend.js';
 import { buildJobManifest, kubeJobName } from '../k8s/manifest.js';
 import { JobState } from '../domain/job-state.js';
 import * as jobService from './jobs.js';
+import { scheduleJob, Placement } from './scheduler.js';
 
 /**
  * Launches one claimed job onto the cluster.
@@ -32,7 +33,10 @@ import * as jobService from './jobs.js';
  */
 export async function launchJob(pool, backend, job, { logger = null } = {}) {
   const namespace = backend.namespace;
-  const manifest = buildJobManifest(job, { namespace });
+  // The node is passed through so the Pod lands where AshML decided, not where
+  // Kubernetes would have chosen. Without this the scheduler's decision is a record of
+  // an intention rather than a cause (see ADR 0003).
+  const manifest = buildJobManifest(job, { namespace, nodeName: job.placement?.node_name ?? null });
   const name = manifest.metadata.name;
 
   await backend.createJob(manifest);
@@ -68,6 +72,33 @@ export async function cancelWorkload(pool, backend, job, { logger = null } = {})
 }
 
 /**
+ * Puts a claimed job through the scheduler, then launches it if it was placed.
+ *
+ * A job already bound to a node skips straight to launching. That is what makes a
+ * launch interrupted by a crash recoverable without re-deciding placement — re-running
+ * the scheduler would be harmless but would write a second, misleading set of decisions
+ * for a placement that had already been made.
+ *
+ * @returns {Promise<string|null>} the new state, or null if it went back to the queue
+ */
+export async function placeAndLaunch(pool, backend, job, { logger = null } = {}) {
+  if (!job.placement?.node_id) {
+    const result = await scheduleJob(pool, job.id, { logger });
+
+    if (result.placement !== Placement.BOUND) {
+      logger?.debug({ job_id: job.id, reason: result.reason }, 'job returned to the queue');
+      return null;
+    }
+
+    // Re-read: the scheduler wrote the binding, and the manifest needs the node name.
+    job = await jobService.getJob(pool, job.id);
+  }
+
+  await launchJob(pool, backend, job, { logger });
+  return JobState.STARTING;
+}
+
+/**
  * Reconciles one job against the cluster.
  *
  * @returns {Promise<string|null>} the new state, or null if nothing changed
@@ -78,10 +109,10 @@ export async function reconcileJob(pool, backend, job, { logger = null } = {}) {
     return JobState.CANCELLED;
   }
 
-  // Claimed but never launched — finish what a previous tick or process started.
+  // Claimed but not yet launched. It may not have been placed yet either — a job that
+  // was requeued and re-claimed, or one interrupted mid-launch by a restart.
   if (job.state === JobState.SCHEDULING) {
-    await launchJob(pool, backend, job, { logger });
-    return JobState.STARTING;
+    return placeAndLaunch(pool, backend, job, { logger });
   }
 
   const observation = await backend.observeJob(backend.namespace, job.k8s_job_name);
@@ -118,10 +149,10 @@ export async function reconcileJob(pool, backend, job, { logger = null } = {}) {
  *
  * @param {object} [options]
  * @param {number} [options.maxLaunches] how many queued jobs to admit this pass
- * @returns {Promise<{reconciled: number, launched: number, errors: number}>}
+ * @returns {Promise<{reconciled: number, launched: number, requeued: number, errors: number}>}
  */
 export async function runOnce(pool, backend, { logger = null, maxLaunches = 10 } = {}) {
-  const summary = { reconciled: 0, launched: 0, errors: 0 };
+  const summary = { reconciled: 0, launched: 0, requeued: 0, errors: 0 };
 
   const active = await jobService.listJobsToReconcile(pool);
   for (const job of active) {
@@ -134,19 +165,37 @@ export async function runOnce(pool, backend, { logger = null, maxLaunches = 10 }
     }
   }
 
-  for (let i = 0; i < maxLaunches; i += 1) {
+  // Jobs this pass has already refused. A job that cannot be placed goes back to the
+  // queue, so without this the pass would claim it again immediately and never look
+  // past it — one job asking for more GPUs than any node has would block the entire
+  // queue behind it, including jobs that fit perfectly well. Classic head-of-line
+  // blocking, and the reason the pass walks the queue rather than stopping at the
+  // first refusal.
+  const refused = [];
+
+  while (summary.launched < maxLaunches) {
     let job;
     try {
-      job = await jobService.claimNextJob(pool, { claimedBy: `executor:${backend.name}` });
+      job = await jobService.claimNextJob(pool, {
+        claimedBy: `executor:${backend.name}`,
+        excludeIds: refused,
+      });
     } catch (err) {
       summary.errors += 1;
       logger?.error({ err }, 'claiming from the queue failed');
       break;
     }
-    if (!job) break;
+    if (!job) break; // Queue empty, or everything left in it was already refused.
 
     try {
-      await launchJob(pool, backend, job, { logger });
+      const state = await placeAndLaunch(pool, backend, job, { logger });
+      if (state === null) {
+        // Nothing fit, or the project is over quota. The job is back in the queue with
+        // a recorded reason; move on to whatever is behind it.
+        summary.requeued += 1;
+        refused.push(job.id);
+        continue;
+      }
       summary.launched += 1;
     } catch (err) {
       summary.errors += 1;
@@ -154,6 +203,7 @@ export async function runOnce(pool, backend, { logger = null, maxLaunches = 10 }
       // deliberately not failed here: an unreachable API server is a platform problem,
       // and failing the user's job for it would be blaming them for our outage.
       logger?.error({ err, job_id: job.id }, 'launch failed; will retry on the next pass');
+      refused.push(job.id);
     }
   }
 
@@ -178,7 +228,7 @@ export function startExecutor(pool, backend, { logger = null, intervalMs = 2000,
     if (stopped) return;
     try {
       const summary = await runOnce(pool, backend, { logger, maxLaunches });
-      if (summary.launched > 0 || summary.reconciled > 0 || summary.errors > 0) {
+      if (summary.launched > 0 || summary.reconciled > 0 || summary.errors > 0 || summary.requeued > 0) {
         logger?.debug({ ...summary, backend: backend.name }, 'executor pass');
       }
     } catch (err) {

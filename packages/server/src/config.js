@@ -40,6 +40,10 @@ export function loadConfig(env = process.env) {
     executorEnabled: parseBool(env.ASHML_EXECUTOR_ENABLED, 'ASHML_EXECUTOR_ENABLED', true),
     executorIntervalMs: parseCount(env.ASHML_EXECUTOR_INTERVAL_MS, 'ASHML_EXECUTOR_INTERVAL_MS') ?? 2000,
 
+    // Node inventory changes on the order of minutes and GPU telemetry on the order of
+    // seconds; neither is worth a `LIST nodes` and an `nvidia-smi` fork on every job pass.
+    discoveryIntervalMs: parseCount(env.ASHML_DISCOVERY_INTERVAL_MS, 'ASHML_DISCOVERY_INTERVAL_MS') ?? 15_000,
+
     databaseUrl: env.ASHML_DATABASE_URL
       ?? 'postgresql://ashml:ashml@127.0.0.1:5432/ashml',
     databasePoolMax: parseCount(env.ASHML_DB_POOL_MAX, 'ASHML_DB_POOL_MAX') ?? 10,

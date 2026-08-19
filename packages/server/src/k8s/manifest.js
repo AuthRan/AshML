@@ -107,14 +107,33 @@ function containerEnv(job) {
 }
 
 /**
+ * Pins the Pod to the node AshML's scheduler chose.
+ *
+ * A `nodeSelector` on the hostname label, not `spec.nodeName`. Setting `nodeName`
+ * directly would bypass the Kubernetes scheduler altogether — including its resource
+ * checks and the device plugin's GPU assignment — so an error in AshML's own accounting
+ * would silently over-commit the node instead of being caught.
+ *
+ * With a selector the division of labour is the one ADR 0003 describes: AshML decides
+ * *which* node and Kubernetes verifies that the node can genuinely take the Pod. If
+ * AshML is wrong the Pod stays Pending, which is visible and diagnosable, rather than
+ * running somewhere it does not fit.
+ */
+function podPlacement(nodeName) {
+  if (!nodeName) return {};
+  return { nodeSelector: { 'kubernetes.io/hostname': nodeName } };
+}
+
+/**
  * Builds the complete Kubernetes Job manifest for a training job.
  *
  * @param {object} job a job as returned by the jobs repo
  * @param {object} [options]
  * @param {string} [options.namespace] namespace to create the Job in
+ * @param {string} [options.nodeName] the node AshML's scheduler chose, if any
  * @returns {object} a Kubernetes batch/v1 Job
  */
-export function buildJobManifest(job, { namespace = 'ashml-jobs' } = {}) {
+export function buildJobManifest(job, { namespace = 'ashml-jobs', nodeName = null } = {}) {
   if (!job.spec?.image) {
     throw new Error(`job ${job.id}: spec.image is required to build a Kubernetes Job`);
   }
@@ -174,6 +193,7 @@ export function buildJobManifest(job, { namespace = 'ashml-jobs' } = {}) {
         spec: {
           restartPolicy: 'Never',
           containers: [container],
+          ...podPlacement(nodeName),
         },
       },
     },

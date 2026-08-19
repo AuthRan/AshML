@@ -151,6 +151,20 @@ describe('buildJobManifest', () => {
     assert.equal(env.find((e) => e.name === 'DATASET').value, 'cifar10');
   });
 
+  test('pins the Pod to the node the scheduler chose, via a selector not spec.nodeName', () => {
+    const podSpec = buildJobManifest(makeJob(), { nodeName: 'node-1' }).spec.template.spec;
+
+    assert.deepEqual(podSpec.nodeSelector, { 'kubernetes.io/hostname': 'node-1' });
+    // spec.nodeName would bypass Kubernetes' own resource checks and the device
+    // plugin, so an error in AshML's accounting would over-commit the node silently.
+    assert.equal(podSpec.nodeName, undefined);
+  });
+
+  test('leaves placement to Kubernetes when no node was chosen', () => {
+    const podSpec = buildJobManifest(makeJob()).spec.template.spec;
+    assert.equal(podSpec.nodeSelector, undefined);
+  });
+
   test('places the Job in the namespace it is given', () => {
     const manifest = buildJobManifest(makeJob(), { namespace: 'ashml-prod' });
     assert.equal(manifest.metadata.namespace, 'ashml-prod');

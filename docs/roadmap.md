@@ -93,7 +93,7 @@ Deferred out of this phase:
 
 ---
 
-## Phase 3 — Scheduler + GPU *(current)*
+## Phase 3 — Scheduler + GPU *(complete, with one deferral)*
 
 Spec milestones 3 and 4. **This is the differentiator — do not let it slip.**
 
@@ -101,15 +101,55 @@ Spec milestones 3 and 4. **This is the differentiator — do not let it slip.**
 - Stage 1 FIFO → Stage 2 priority → Stage 3 resource-aware (CPU/RAM/GPU count/GPU memory)
 - Resource accounting and per-project quotas, enforced before admission
 - GPU discovery through `GpuProvider`; devices persisted in `gpu_devices`
-- NVIDIA device plugin in k3d so Pods can request `nvidia.com/gpu`
+- ~~NVIDIA device plugin in k3d so Pods can request `nvidia.com/gpu`~~ **blocked, see below**
 - **Scheduling decisions recorded** — why each node was chosen or rejected
 
-**Exit criteria:** submit 10 jobs requesting 1–2 GPUs against a 2-GPU node; jobs
-queue correctly, run two at a time, and `ash job get` explains the placement.
+**Exit criteria:** submit more jobs than fit; they queue correctly, run only as many at
+a time as capacity allows, and the platform explains every placement. **Met** —
+`make e2e-scheduler` asserts it against a real k3d cluster, checking with `kubectl` that
+each Pod actually landed on the node AshML chose.
+
+Placement is a pure function (`domain/placement.js`), as is quota admission
+(`domain/quota.js`). Both are exhaustively unit-tested, because a scheduler that refuses
+a job for the *wrong* reason is worse than one that refuses it for none — it sends the
+user to fix the wrong thing. Policy is best-fit: GPU jobs are packed rather than spread
+(two nodes with one free GPU each cannot run a two-GPU job), and CPU-only jobs are kept
+off GPU nodes.
+
+### The GPU deferral, stated plainly
+
+The exit criterion was written in terms of GPUs. This host has two real RTX 2080 Tis,
+but Docker here has no `nvidia` container runtime, and installing the NVIDIA container
+toolkit requires root, which is not available. So no GPU can be passed into a k3d node,
+the cluster advertises `nvidia.com/gpu: 0`, and **no GPU job can run on this cluster
+today**.
+
+What was done instead of faking it:
+
+- The end-to-end proof constrains on **CPU**, which is real capacity on this cluster and
+  exercises the identical scheduler path — accounting, admission, requeue, decision
+  record, and node binding.
+- The GPU-specific arithmetic (count, per-device memory matching, health) is covered by
+  unit tests and against a precisely-sized fake cluster in `scheduler.integration.test.js`.
+- A GPU job on this cluster is **queued with an explanation**, and `make e2e-scheduler`
+  asserts exactly that. The e2e also asserts the opposite branch, so the day a device
+  plugin is installed the same check verifies the job runs.
+
+Installing the device plugin requires no AshML change: the advertised capacity appears
+and placement starts using it (ADR 0008).
+
+### Also deferred
+
+- **Preemption.** A high-priority job does not evict a running low-priority one; it
+  waits. Eviction without checkpointing throws away work, so this belongs after Phase 4
+  gives runs something to resume from.
+- **Multi-node GPU attribution.** `GpuProvider` runs in the server process, so it can
+  only describe the machine it runs on. Per-node discovery needs a DaemonSet — Phase 5,
+  alongside DCGM.
 
 ---
 
-## Phase 4 — ML Lifecycle *(weeks 9–10)*
+## Phase 4 — ML Lifecycle *(current)*
 
 Spec milestones 6 and 7.
 

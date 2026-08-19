@@ -16,6 +16,26 @@ export async function createProject(pool, { name, description, quota }) {
   }
 }
 
+/**
+ * Changes a project's quota.
+ *
+ * Lowering a limit below what is already running does not stop those jobs. Killing
+ * work that was admitted under the old quota would destroy results a user is entitled
+ * to; the new limit governs the next admission instead, and the project simply runs
+ * over its quota until enough jobs finish.
+ */
+export async function updateQuota(pool, name, quota) {
+  return withTransaction(pool, async (client) => {
+    const project = await projectsRepo.getProjectByName(client, name);
+    if (!project) {
+      throw new NotFoundError(`project "${name}" not found`);
+    }
+
+    await projectsRepo.updateQuota(client, project.id, quota);
+    return projectsRepo.getProjectByName(client, name);
+  });
+}
+
 export async function listProjects(pool) {
   return projectsRepo.listProjects(pool);
 }

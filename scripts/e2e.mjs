@@ -20,6 +20,7 @@ import { promisify } from 'node:util';
 import { buildApp } from '../packages/server/src/app.js';
 import { loadConfig } from '../packages/server/src/config.js';
 import { runOnce } from '../packages/server/src/services/executor.js';
+import { discoverCluster, listNodes } from '../packages/server/src/services/nodes.js';
 import { getJob, getJobEvents } from '../packages/server/src/services/jobs.js';
 import { JobState } from '../packages/server/src/domain/job-state.js';
 
@@ -80,10 +81,24 @@ async function submit(name, payload) {
 
 // --------------------------------------------------------------- the checks
 
-check('the cluster is reachable and the namespace exists', async () => {
+check('the cluster is reachable, the namespace exists, and the inventory is current', async () => {
   await app.k8s.ensureNamespace();
   const found = await kubectl('get', 'namespace', NAMESPACE, '-o', 'jsonpath={.metadata.name}');
   assert.equal(found, NAMESPACE);
+
+  // Nothing can be scheduled against a node table that has not been reconciled. Without
+  // this, a node left behind by another run — the test suite's fake cluster, say — is
+  // still marked ready, and jobs are placed onto a machine that does not exist. The Pod
+  // then sits Pending forever, which is exactly the failure this platform exists to
+  // make visible rather than to cause.
+  await discoverCluster(app.db, app.k8s, app.gpuProvider);
+
+  const nodes = (await listNodes(app.db)).filter((n) => n.ready);
+  const fromKubectl = (await kubectl('get', 'nodes', '-o', 'jsonpath={.items[*].metadata.name}')).split(/\s+/);
+  assert.deepEqual(
+    nodes.map((n) => n.name).sort(), fromKubectl.sort(),
+    'AshML must place against the nodes the cluster actually has',
+  );
 });
 
 check('a project can be created', async () => {

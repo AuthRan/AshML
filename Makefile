@@ -81,6 +81,10 @@ test: ## Unit and integration tests
 e2e: ## End-to-end: submit a job, run it on k3d, assert it SUCCEEDED
 	node scripts/e2e.mjs
 
+.PHONY: e2e-scheduler
+e2e-scheduler: ## End-to-end: overfill the cluster, assert queueing and placement
+	node scripts/e2e-scheduler.mjs
+
 .PHONY: openapi
 openapi: ## Regenerate api/openapi.yaml from the route schemas
 	npm run openapi

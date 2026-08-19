@@ -11,6 +11,7 @@
  *   {
  *     name: string,
  *     ensureNamespace(): Promise<void>,
+ *     listNodes(): Promise<NodeInfo[]>,
  *     createJob(manifest): Promise<void>,
  *     observeJob(namespace, name): Promise<Observation|null>,
  *     deleteJob(namespace, name): Promise<void>,
@@ -29,6 +30,17 @@
  *
  * `observeJob` returns null when the Job is not in the cluster at all, which the
  * executor must treat as a distinct case from "not finished yet".
+ *
+ * A `NodeInfo` is what the scheduler needs to know about a machine, already converted
+ * out of Kubernetes' quantity strings into plain numbers:
+ *
+ *   { name: string, ready: boolean, cpu_cores: number, memory_bytes: number,
+ *     gpu_capacity: number }
+ *
+ * `gpu_capacity` is what Kubernetes advertises as `nvidia.com/gpu` — which is zero
+ * until a device plugin is installed, regardless of how much silicon the machine has.
+ * That difference is the point: AshML must schedule against what the cluster will
+ * actually grant, not against what `nvidia-smi` can see.
  */
 
 export const Phase = Object.freeze({

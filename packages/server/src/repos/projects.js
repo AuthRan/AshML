@@ -29,6 +29,33 @@ function toProject(row) {
   };
 }
 
+/**
+ * Updates a project's quota.
+ *
+ * Only the fields present in `quota` are changed, so raising the GPU limit does not
+ * silently reset the CPU limit to zero — which, since zero means unlimited, would be a
+ * quota change that quietly removed a quota.
+ */
+export async function updateQuota(client, projectId, quota) {
+  const { rows } = await client.query(
+    `UPDATE resource_quotas
+     SET gpu_limit    = COALESCE($2, gpu_limit),
+         cpu_limit    = COALESCE($3, cpu_limit),
+         memory_bytes = COALESCE($4, memory_bytes),
+         job_limit    = COALESCE($5, job_limit)
+     WHERE project_id = $1
+     RETURNING gpu_limit, cpu_limit, memory_bytes, job_limit`,
+    [
+      projectId,
+      quota.gpu ?? null,
+      quota.cpu ?? null,
+      quota.memory_bytes ?? null,
+      quota.jobs ?? null,
+    ],
+  );
+  return rows.length ? rows[0] : null;
+}
+
 export async function createProject(client, { name, description = '', quota = {} }) {
   const { rows } = await client.query(
     `INSERT INTO projects (name, description, owner_id)

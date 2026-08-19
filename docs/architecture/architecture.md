@@ -143,7 +143,55 @@ Three decisions in this layer are load-bearing:
 
 The status loop polls rather than watches; ADR 0007 explains why, and what it costs.
 
-## 7. State model
+## 7. Scheduling
+
+Two pure modules decide whether a job runs, and a thin service applies what they decide:
+
+| Module | Question it answers |
+|---|---|
+| `domain/quota.js` | May this project afford another job at all? |
+| `domain/placement.js` | Is there a node this job fits on, and which is best? |
+| `services/scheduler.js` | Gathers the inputs, applies the verdict, writes down why |
+
+Quota is checked **first**, and the order is deliberate: a project over its own limit
+should be told so even when the cluster is idle. Evaluating nodes first would report "no
+capacity" for what is actually a limit the user set themselves, sending them to
+investigate a cluster that is fine.
+
+Both gates are pure — no database, no clock, no randomness — so the same job against the
+same cluster always produces the same decision. That is not tidiness: a placement that
+cannot be reproduced cannot be debugged, and this is the logic the platform exists to
+demonstrate.
+
+**Policy is best fit, not first fit.** GPU jobs are packed onto the node that will have
+the fewest GPUs left over, because spreading them fragments the cluster — two nodes with
+one free GPU each cannot run a two-GPU job, while one node with two free can. CPU-only
+jobs are steered towards nodes with the fewest schedulable GPUs, so a GPU does not end up
+idle behind a CPU shortage. Ties break on node name, so placement is deterministic.
+
+**Capacity is what the cluster will grant, not what the hardware has.** A node's usable
+CPU is its `allocatable` minus the requests of Pods AshML did not create, and its
+schedulable GPUs are `min(nvidia.com/gpu advertised, healthy devices discovered)`. ADR
+0008 covers why, and what went wrong before it did.
+
+**Every pass leaves a record.** `scheduling_decisions` holds one row per node considered,
+with the numbers that produced the verdict — not just the winner, because "why not the
+other node?" is as much a part of explaining a placement as "why this one". A node that
+fit but lost the ranking is recorded `VIABLE`, distinct from `SELECTED`; marking every
+fitting node selected would show several winners for one job.
+
+**A refused job returns to the queue, and the pass moves on.** It does not stop the pass:
+one job asking for more GPUs than any node has would otherwise block every job behind it
+— textbook head-of-line blocking, and something the executor's admission loop explicitly
+walks past by tracking what it has already refused this pass.
+
+What the scheduler deliberately does **not** do in v1: preempt running work (eviction
+without a checkpoint to resume from destroys results — Phase 4 first), or model every
+Kubernetes predicate. Because placement is expressed as a `nodeSelector` rather than
+`spec.nodeName`, a gap in AshML's model surfaces as a visible Pending Pod rather than an
+over-committed node.
+
+## 8. State model
 
 Job state lives in Postgres, never only in memory (spec §9). `packages/server/src/domain` owns the
 legal transition table; any transition not in that table is rejected and returns an
@@ -154,7 +202,7 @@ The scheduler and the Kubernetes status-sync loop both drive transitions, so the
 transition table is the only thing preventing two writers from corrupting state. It is
 unit-tested exhaustively.
 
-## 8. Reproducibility model
+## 9. Reproducibility model
 
 A result is worth nothing if nobody can say what produced it, so the pieces are pinned
 by identity rather than by name:
@@ -183,14 +231,14 @@ both sides' accounting.
 Phase 4]**. They are left null until something real can set them; deriving them from job
 timestamps would be a guess presented as a record.
 
-## 9. Storage split
+## 10. Storage split
 
 - **PostgreSQL** — metadata, state, events, audit. Small rows.
 - **MinIO / S3** — checkpoints, model binaries, evaluation outputs. Large blobs.
 
 Blobs never go in Postgres (spec §19). The `artifacts` table stores a URI and a digest.
 
-## 10. Observability contract
+## 11. Observability contract
 
 Every component emits structured JSON logs via `pino`, carrying whichever of
 `request_id`, `job_id`, `experiment_id`, `deployment_id`, `node_id` are in scope.

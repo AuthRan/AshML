@@ -57,6 +57,23 @@ async function applyTransition(client, jobId, toState, { message = '', details =
 }
 
 /**
+ * Applies a transition inside a transaction the caller already owns.
+ *
+ * `applyTransition` is deliberately private — this module is the only place
+ * `training_jobs.state` is written, and that rule is what keeps two writers from
+ * corrupting a job. The scheduler is the one caller that genuinely cannot use the
+ * public helpers: it must read cluster capacity, decide, and change state inside *one*
+ * transaction, or two concurrent passes will both see the same free GPU. Handing it the
+ * same validated primitive keeps the rule intact rather than letting it write state
+ * directly.
+ *
+ * @param {import('pg').PoolClient} client must already be in a transaction
+ */
+export async function applyTransitionForScheduler(client, jobId, toState, options) {
+  return applyTransition(client, jobId, toState, options);
+}
+
+/**
  * Submits a job: creates it, then immediately queues it.
  *
  * Both steps happen in one transaction so a job can never be left in CREATED with no
@@ -183,9 +200,9 @@ export async function cancelJob(pool, jobId, { reason = 'cancelled by user' } = 
  *
  * @returns {Promise<object|null>} the claimed job, now in SCHEDULING
  */
-export async function claimNextJob(pool, { claimedBy = 'scheduler' } = {}) {
+export async function claimNextJob(pool, { claimedBy = 'scheduler', excludeIds = [] } = {}) {
   return withTransaction(pool, async (client) => {
-    const locked = await jobsRepo.lockNextQueuedJob(client);
+    const locked = await jobsRepo.lockNextQueuedJob(client, { excludeIds });
     if (!locked) {
       return null;
     }
@@ -249,12 +266,37 @@ export async function recordObservation(pool, jobId, observation) {
     };
 
     switch (observation.phase) {
-      case 'PENDING':
-        // Still pulling the image or waiting for a node. STARTING already says that.
+      case 'PENDING': {
+        // Still pulling the image, or waiting for a node that may never take it. The
+        // state does not change — STARTING is correct — but the *reason* is recorded,
+        // because "STARTING, indefinitely, no explanation" is the same experience as a
+        // hang. An unschedulable Pod and a slow image pull look identical from outside
+        // until something says which it is.
+        const reason = observation.reason || '';
+        if (reason && reason !== job.pending_reason) {
+          await jobsRepo.setPendingReason(client, jobId, reason);
+          // Written to the event log as well, so the sequence of things a job waited on
+          // survives after the fact. Only on change: the executor observes every couple
+          // of seconds and an unchanged reason is not news.
+          await jobsRepo.insertJobEvent(client, {
+            jobId,
+            eventType: 'JOB_WAITING',
+            // Deliberately no from_state/to_state: nothing transitioned. Recording the
+            // current state in both would make the event log read as a STARTING ->
+            // STARTING move, and the sequence of `to_state` values would stop being the
+            // job's actual path through the state machine — which is the one thing that
+            // log is relied on for.
+            message: reason,
+            details: { ...details, state: job.state },
+          });
+        }
         return null;
+      }
 
       case 'RUNNING':
         if (job.state === JobState.RUNNING) return null;
+        // Whatever it was waiting on has happened; the explanation must not outlive it.
+        await jobsRepo.setPendingReason(client, jobId, '');
         await applyTransition(client, jobId, JobState.RUNNING, {
           message: observation.reason || 'pod running',
           details,
@@ -272,6 +314,7 @@ export async function recordObservation(pool, jobId, observation) {
             details,
           });
         }
+        await jobsRepo.setPendingReason(client, jobId, '');
         await applyTransition(client, jobId, JobState.SUCCEEDED, {
           message: observation.reason || 'completed',
           details,

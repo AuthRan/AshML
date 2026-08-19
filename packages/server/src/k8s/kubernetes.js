@@ -57,6 +57,90 @@ function reasonFromPod(pod) {
 }
 
 /**
+ * Sums the resource requests of Pods that AshML did not create, per node.
+ *
+ * Kubernetes reserves against *requests*, not usage, and it counts every Pod on the
+ * node — kube-system daemons, the CNI, metrics-server, anything else sharing the
+ * cluster. AshML reading `allocatable` alone would believe the whole node is its own,
+ * admit jobs summing to all of it, and then have Kubernetes refuse the last one because
+ * the system Pods were already there. The job would sit Pending while AshML insisted it
+ * had been placed.
+ *
+ * Only running and pending Pods count: a Succeeded or Failed Pod holds nothing.
+ */
+async function reservedByForeignPods(core) {
+  const pods = await core.listPodForAllNamespaces({
+    fieldSelector: 'status.phase!=Succeeded,status.phase!=Failed',
+  });
+
+  const byNode = new Map();
+  for (const pod of pods.items) {
+    const nodeName = pod.spec?.nodeName;
+    if (!nodeName) continue; // Not yet bound, so holding nothing.
+
+    // AshML's own jobs are already accounted for in its database; counting them here
+    // as well would charge every running job to the node twice.
+    if (pod.metadata?.labels?.['app.kubernetes.io/managed-by'] === MANAGED_BY) continue;
+
+    const entry = byNode.get(nodeName) ?? { cpu: 0, memory_bytes: 0 };
+    for (const container of [...(pod.spec.containers ?? []), ...(pod.spec.initContainers ?? [])]) {
+      const requests = container.resources?.requests ?? {};
+      entry.cpu += parseCpuMillis(requests.cpu);
+      entry.memory_bytes += parseMemory(requests.memory);
+    }
+    byNode.set(nodeName, entry);
+  }
+
+  // Summed in milli-cores and rounded *up* to whole cores at the end. Rounding each
+  // container down would let a hundred 100m system Pods reserve nothing at all.
+  for (const entry of byNode.values()) {
+    entry.cpu = Math.ceil(entry.cpu / 1000);
+  }
+  return byNode;
+}
+
+/** Parses a CPU quantity into milli-cores, keeping the precision `parseCpu` discards. */
+function parseCpuMillis(quantity) {
+  if (!quantity) return 0;
+  const text = String(quantity);
+  if (text.endsWith('m')) return Number.parseInt(text.slice(0, -1), 10) || 0;
+  return Math.round(Number.parseFloat(text) * 1000) || 0;
+}
+
+/**
+ * Parses a Kubernetes CPU quantity into whole cores, rounding down.
+ *
+ * Kubernetes expresses CPU in cores or in milli-cores ("8" or "7800m"). AshML schedules
+ * in whole cores, and rounding *down* is the only safe direction: rounding 7800m up to
+ * 8 would let the scheduler promise a core the node cannot grant.
+ */
+function parseCpu(quantity) {
+  if (!quantity) return 0;
+  const text = String(quantity);
+  if (text.endsWith('m')) {
+    return Math.floor(Number.parseInt(text.slice(0, -1), 10) / 1000);
+  }
+  return Math.floor(Number.parseFloat(text));
+}
+
+/** Parses a Kubernetes memory quantity ("64Gi", "1024Mi", "8000000") into bytes. */
+function parseMemory(quantity) {
+  if (!quantity) return 0;
+  const text = String(quantity).trim();
+
+  const suffixes = [
+    ['Ki', 1024], ['Mi', 1024 ** 2], ['Gi', 1024 ** 3], ['Ti', 1024 ** 4],
+    ['k', 1000], ['M', 1000 ** 2], ['G', 1000 ** 3], ['T', 1000 ** 4],
+  ];
+  for (const [suffix, multiplier] of suffixes) {
+    if (text.endsWith(suffix)) {
+      return Math.floor(Number.parseFloat(text.slice(0, -suffix.length)) * multiplier);
+    }
+  }
+  return Math.floor(Number.parseFloat(text)) || 0;
+}
+
+/**
  * @param {object} [options]
  * @param {string} [options.namespace] namespace training Jobs are created in
  * @param {string} [options.kubeconfig] path to a kubeconfig; defaults to the standard
@@ -134,6 +218,43 @@ export function createKubernetesBackend({ namespace = 'ashml-jobs', kubeconfig =
         // Another server replica won the race; that is the outcome we wanted.
         if (statusOf(err) !== 409) throw err;
       }
+    },
+
+    /**
+     * Lists the cluster's nodes as the scheduler needs to see them.
+     *
+     * `status.allocatable` is used rather than `status.capacity`: capacity is the
+     * machine's total, while allocatable is what Kubernetes will actually hand to Pods
+     * after reserving for the kubelet and system daemons. Scheduling against capacity
+     * would promise resources the cluster has already spoken for.
+     */
+    async listNodes() {
+      const { core } = connect();
+      const nodes = await core.listNode();
+
+      // What Pods AshML did not create have already claimed. Read once for the whole
+      // cluster rather than per node, because it is one API call either way.
+      const reserved = await reservedByForeignPods(core);
+
+      return nodes.items.map((node) => {
+        const allocatable = node.status?.allocatable ?? {};
+        const ready = (node.status?.conditions ?? [])
+          .some((c) => c.type === 'Ready' && c.status === 'True');
+        const claimed = reserved.get(node.metadata.name) ?? { cpu: 0, memory_bytes: 0 };
+
+        return {
+          name: node.metadata.name,
+          ready,
+          cpu_cores: parseCpu(allocatable.cpu),
+          memory_bytes: parseMemory(allocatable.memory),
+          // The advertised figure, not the hardware. Zero here with GPUs physically
+          // present means no device plugin — see migration 1755300000000.
+          gpu_capacity: Number.parseInt(allocatable['nvidia.com/gpu'] ?? '0', 10) || 0,
+          reserved_cpu: claimed.cpu,
+          reserved_memory: claimed.memory_bytes,
+          labels: node.metadata.labels ?? {},
+        };
+      });
     },
 
     /**

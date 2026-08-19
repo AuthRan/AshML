@@ -8,6 +8,7 @@
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { startExecutor } from './services/executor.js';
+import { startDiscovery, discoverCluster } from './services/nodes.js';
 
 const config = loadConfig();
 
@@ -20,6 +21,7 @@ try {
 }
 
 let executor = null;
+let discovery = null;
 if (config.executorEnabled) {
   try {
     // Done before the loop starts, and before the port is bound, so a broken
@@ -37,6 +39,19 @@ if (config.executorEnabled) {
     process.exit(1);
   }
 
+  // One discovery pass before the executor starts. Without it the first scheduling
+  // pass runs against an empty node table and every job is refused for "no compute
+  // nodes are registered" — technically true, and completely misleading.
+  const inventory = await discoverCluster(app.db, app.k8s, app.gpuProvider, { logger: app.log });
+  for (const warning of inventory.warnings) {
+    app.log.warn({ warning }, 'cluster inventory');
+  }
+
+  discovery = startDiscovery(app.db, app.k8s, app.gpuProvider, {
+    logger: app.log,
+    intervalMs: config.discoveryIntervalMs,
+  });
+
   executor = startExecutor(app.db, app.k8s, {
     logger: app.log,
     intervalMs: config.executorIntervalMs,
@@ -52,6 +67,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
       // pool underneath an in-flight pass would roll back a state change that has
       // already happened in the cluster.
       await executor?.stop();
+      await discovery?.stop();
       await app.close();
       process.exit(0);
     } catch (err) {

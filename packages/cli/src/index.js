@@ -162,6 +162,84 @@ project
     });
   });
 
+project
+  .command('quota <name>')
+  .description('Change a project\'s resource quota (0 means unlimited)')
+  .option('--gpu <n>', 'maximum GPUs', (v) => Number.parseInt(v, 10))
+  .option('--cpu <n>', 'maximum CPUs', (v) => Number.parseInt(v, 10))
+  .option('--jobs <n>', 'maximum concurrent jobs', (v) => Number.parseInt(v, 10))
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    // Only what the user named is sent, so raising one limit cannot reset another.
+    const body = {};
+    if (opts.gpu !== undefined) body.gpu = opts.gpu;
+    if (opts.cpu !== undefined) body.cpu = opts.cpu;
+    if (opts.jobs !== undefined) body.jobs = opts.jobs;
+
+    if (Object.keys(body).length === 0) {
+      console.error('nothing to change: pass at least one of --gpu, --cpu, --jobs');
+      process.exitCode = 1;
+      return;
+    }
+
+    const updated = await api(endpoint(), `/api/v1/projects/${name}/quota`, { method: 'PATCH', body });
+    output(opts, updated, (p) => {
+      console.log(`quota for ${p.name}:`);
+      console.log(`  gpu:  ${p.quota.gpu || 'unlimited'}`);
+      console.log(`  cpu:  ${p.quota.cpu || 'unlimited'}`);
+      console.log(`  jobs: ${p.quota.jobs || 'unlimited'}`);
+    });
+  });
+
+// ------------------------------------------------------------------- nodes
+
+const nodeCmd = program.command('node').description('Inspect compute nodes and capacity');
+
+nodeCmd
+  .command('list')
+  .description('List compute nodes, their capacity, and what is committed')
+  .option('--json', 'emit raw JSON')
+  .action(async (opts) => {
+    const body = await api(endpoint(), '/api/v1/nodes');
+    output(opts, body, ({ nodes }) => {
+      if (nodes.length === 0) {
+        console.log('No compute nodes registered. Is the cluster up? Try: make cluster');
+        return;
+      }
+
+      // "usable" rather than "total": capacity already claimed by pods AshML does not
+      // own is not available to it, and showing the raw total would overstate the node.
+      const table = newTable(['NAME', 'READY', 'GPU (FREE/USABLE)', 'CPU (FREE/USABLE)', 'JOBS']);
+      for (const n of nodes) {
+        // GPU total is what the cluster will grant, not how much silicon is present —
+        // showing the hardware count would imply capacity that cannot be scheduled.
+        table.push([
+          n.name,
+          n.ready ? 'yes' : 'no',
+          `${n.free.gpu}/${n.schedulable_gpus ?? 0}`,
+          `${n.free.cpu}/${n.cpu_cores - (n.reserved_cpu ?? 0)}`,
+          n.running_jobs ?? 0,
+        ]);
+      }
+      console.log(table.toString());
+
+      // Never let a simulated device pass for real hardware (spec Rule 5).
+      const simulated = nodes.flatMap((n) => n.gpus).filter((g) => g.simulated);
+      if (simulated.length > 0) {
+        console.error(`\nwarning: ${simulated.length} of the GPUs listed are simulated, not real hardware.`);
+      }
+
+      // The single most confusing state in the system, said out loud.
+      const invisible = nodes.filter((n) => n.gpus.length > 0 && n.gpu_capacity === 0);
+      if (invisible.length > 0) {
+        console.error(
+          'warning: GPUs are present but the cluster advertises none — no device plugin '
+          + 'is installed, so GPU jobs cannot be scheduled.',
+        );
+      }
+    });
+  });
+
 // -------------------------------------------------------------------- jobs
 
 /** States after which no further output will ever appear, so `--follow` can stop. */
@@ -245,7 +323,14 @@ job
       if (j.experiment) console.log(`experiment: ${j.experiment.name} (${j.experiment.id})`);
       console.log(`attempt:   ${j.attempt} of ${j.max_retries + 1}`);
       if (j.k8s_job_name) console.log(`k8s job:   ${j.k8s_job_name}`);
+      if (j.placement?.node_name) console.log(`node:      ${j.placement.node_name}`);
       if (j.placement?.reason) console.log(`placement: ${j.placement.reason}`);
+      if (!j.placement?.node_name && j.state === 'QUEUED') {
+        console.log(`placement: not yet placed — run 'ash job why ${j.id}' for the detail`);
+      }
+      // Said before the failure line: a job that is waiting has not failed, and the
+      // most common question about a STARTING job is why it is still STARTING.
+      if (j.pending_reason) console.log(`waiting:   ${j.pending_reason}`);
       if (j.failure_reason) console.log(`failure:   ${j.failure_reason}`);
       console.log(`created:   ${j.created_at}`);
     });
@@ -264,6 +349,40 @@ job
         table.push([e.created_at, e.event_type, move, e.message || '-']);
       }
       console.log(table.toString());
+    });
+  });
+
+job
+  .command('why <id>')
+  .description('Explain why a job was, or was not, scheduled')
+  .option('-p, --passes <n>', 'how many scheduling passes to show', (v) => Number.parseInt(v, 10), 3)
+  .option('--json', 'emit raw JSON')
+  .action(async (id, opts) => {
+    const body = await api(endpoint(), `/api/v1/jobs/${id}/scheduling?passes=${opts.passes}`);
+    output(opts, body, () => {
+      console.log(`job ${body.job_id} is ${body.state}`);
+      if (body.placement?.node_name) {
+        console.log(`placed on ${body.placement.node_name}: ${body.placement.reason}`);
+      }
+
+      if (body.passes.length === 0) {
+        console.log('\nNo scheduling passes recorded yet — the job has not been claimed from the queue.');
+        return;
+      }
+
+      for (const pass of body.passes) {
+        // A repeated verdict is one line, not one per pass — the scheduler re-evaluates
+        // every couple of seconds, so a stuck job would otherwise scroll forever.
+        const repeated = pass.repeat_count > 1
+          ? ` — same verdict ×${pass.repeat_count}, last at ${pass.last_seen_at}`
+          : '';
+        console.log(`\n${pass.at} (attempt ${pass.attempt})${repeated}`);
+        const table = newTable(['NODE', 'OUTCOME', 'REASON']);
+        for (const d of pass.decisions) {
+          table.push([d.node_name ?? '-', d.outcome, d.reason]);
+        }
+        console.log(table.toString());
+      }
     });
   });
 

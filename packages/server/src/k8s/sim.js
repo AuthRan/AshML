@@ -24,6 +24,9 @@ import { Phase, registerBackend } from './backend.js';
  * @param {number} [options.observationsToRunning] observations spent PENDING
  * @param {number} [options.observationsToFinish] further observations spent RUNNING
  * @param {string} [options.finalPhase] SUCCEEDED or FAILED
+ * @param {object[]} [options.nodes] the fake cluster's nodes. Defaults to a single
+ *   2-GPU node, which is the shape of the real development host and therefore the
+ *   shape the scheduler tests care about.
  */
 export function createSimBackend({
   namespace = 'ashml-jobs',
@@ -31,9 +34,21 @@ export function createSimBackend({
   observationsToRunning = 1,
   observationsToFinish = 2,
   finalPhase = Phase.SUCCEEDED,
+  nodes = null,
 } = {}) {
   /** `${namespace}/${name}` -> record */
   const jobs = new Map();
+
+  const simNodes = nodes ?? [{
+    name: 'sim-node-0',
+    ready: true,
+    cpu_cores: 16,
+    memory_bytes: 64 * 1024 ** 3,
+    gpu_capacity: 2,
+    reserved_cpu: 0,
+    reserved_memory: 0,
+    labels: {},
+  }];
 
   const key = (ns, name) => `${ns}/${name}`;
 
@@ -43,6 +58,10 @@ export function createSimBackend({
     simulated: true,
 
     async ensureNamespace() {},
+
+    async listNodes() {
+      return simNodes.map((node) => ({ ...node, simulated: true }));
+    },
 
     async createJob(manifest) {
       const ns = manifest.metadata.namespace ?? namespace;

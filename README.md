@@ -4,16 +4,20 @@ A Kubernetes-native GPU machine learning infrastructure platform — a miniature
 ML cloud. Register datasets, submit training jobs, schedule them onto GPU resources,
 track experiments, version models, deploy inference, and observe all of it.
 
-**Status: Phase 2 (Kubernetes execution) complete.** Projects, datasets, experiments and
-training jobs are persisted in PostgreSQL with an append-only event log and a
-`SKIP LOCKED` queue. Submitted jobs now **actually run**: the executor claims them from
-the queue, creates a Kubernetes Job, and drives AshML state from observed Pod status
-through to `SUCCEEDED`, `FAILED` or `CANCELLED`. Logs stream back with `ash job logs`.
+**Status: Phase 3 (scheduler) complete.** Projects, datasets, experiments and training
+jobs are persisted in PostgreSQL with an append-only event log and a `SKIP LOCKED`
+queue. Submitted jobs **actually run**: AshML's own scheduler decides whether a job may
+run and on which node, the executor creates the Kubernetes Job there, and job state is
+driven from observed Pod status through to `SUCCEEDED`, `FAILED` or `CANCELLED`.
 
-**Not yet:** AshML does not choose the node — Kubernetes still places the Pod, and
-GPU-requesting jobs stay Pending because k3d has no device plugin installed. That is
-Phase 3, which is where the scheduler this project exists to demonstrate lives. Retries
-are stored but not driven (Phase 5).
+Overfill the cluster and jobs queue rather than over-committing it; `ash job why <id>`
+prints every node the scheduler considered and what was wrong with it.
+
+**Not yet:** GPU jobs cannot run on this host — the machine has two RTX 2080 Tis, but
+installing the NVIDIA container toolkit needs root, so no GPU reaches a k3d node and the
+cluster advertises `nvidia.com/gpu: 0`. AshML handles this the honest way: such a job is
+**queued with an explanation**, never placed onto a GPU the cluster will not grant
+(ADR 0008). Retries and preemption are stored but not driven (Phase 5).
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the phase plan and
 [`docs/architecture/architecture.md`](docs/architecture/architecture.md) for the design.
@@ -34,7 +38,9 @@ npm start            # start the control plane (API + executor)
 ```
 
 `make e2e` runs the whole path against the real cluster — submit, run, log, fail,
-cancel — and cross-checks every assertion with `kubectl`.
+cancel — and cross-checks every assertion with `kubectl`. `make e2e-scheduler` overfills
+the cluster and asserts that jobs queue, run only as capacity allows, and land on the
+node AshML actually chose.
 
 Then, in another shell:
 
@@ -60,8 +66,12 @@ ash job submit examples/training/resnet-cifar.yaml --experiment <experiment-id>
 ash job list
 ash job get <id>
 ash job events <id>      # full audit trail
+ash job why <id>         # every node considered, and why it was chosen or rejected
 ash job logs <id> -f     # the container's own output, followed until it finishes
 ash job cancel <id>      # stops at CANCELLING until the Pod is really gone
+
+ash node list            # cluster capacity: what is free, what is committed
+ash project quota vision --gpu 2 --jobs 4
 ash gpu list
 ```
 
@@ -87,6 +97,7 @@ packages/server/src/
   routes/     HTTP surface and JSON Schema
   gpu/        provider seam: nvidia (real), sim (flagged)
   k8s/        execution seam: kubernetes (real), sim (flagged); manifest translation
+  domain/     also placement and quota — pure, and the differentiating logic
   db/         connection pool and transaction helper
 packages/cli/      `ash` command-line client
 db/migrations/     PostgreSQL schema
@@ -115,6 +126,7 @@ from anywhere and importing nothing.
 | `ASHML_KUBECONFIG` | — | Kubeconfig path; unset uses `$KUBECONFIG`, `~/.kube/config`, then in-cluster credentials |
 | `ASHML_EXECUTOR_ENABLED` | `true` | Set false for a read-only API replica that runs nothing |
 | `ASHML_EXECUTOR_INTERVAL_MS` | `2000` | Status-sync interval; sets the floor on scheduling latency (ADR 0007) |
+| `ASHML_DISCOVERY_INTERVAL_MS` | `15000` | How often node and GPU inventory is refreshed |
 | `ASHML_ENDPOINT` | `http://127.0.0.1:8080` | API endpoint the CLI targets |
 | `ASHML_PROJECT` | — | Default project for project-scoped `ash` commands |
 

@@ -2,6 +2,7 @@
 
 import { ALL_STATES } from '../domain/job-state.js';
 import * as jobService from '../services/jobs.js';
+import * as schedulerService from '../services/scheduler.js';
 
 const jobSchema = {
   $id: 'TrainingJob',
@@ -38,10 +39,18 @@ const jobSchema = {
       description: 'Name of the Kubernetes Job running this attempt, once launched',
     },
     failure_reason: { type: ['string', 'null'] },
+    pending_reason: {
+      type: ['string', 'null'],
+      description:
+        'Why a launched job is not yet running — an image pull, an unschedulable Pod. '
+        + 'Cleared once it runs. Not a failure.',
+    },
     placement: {
       type: 'object',
+      description: 'Where the scheduler put this job, and why',
       properties: {
         node_id: { type: ['string', 'null'] },
+        node_name: { type: ['string', 'null'] },
         reason: { type: ['string', 'null'] },
       },
     },
@@ -278,6 +287,93 @@ export async function registerJobRoutes(app) {
       });
       request.log.info({ job_id: job.id, state: job.state }, 'job cancelled');
       return job;
+    },
+  );
+
+  app.get(
+    '/api/v1/jobs/:id/scheduling',
+    {
+      schema: {
+        tags: ['jobs'],
+        summary: 'Explain why a job was, or was not, scheduled',
+        description:
+          'Every node the scheduler considered on each of the most recent passes, and '
+          + 'what was wrong with the ones it rejected. This is the answer to "why is my '
+          + 'job still queued" — a question a single placement summary cannot answer '
+          + 'once the situation that produced it has passed.',
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: { id: { type: 'string', format: 'uuid' } },
+        },
+        querystring: {
+          type: 'object',
+          properties: {
+            passes: { type: 'integer', minimum: 1, maximum: 50, default: 5 },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            required: ['job_id', 'state', 'passes'],
+            properties: {
+              job_id: { type: 'string', format: 'uuid' },
+              state: { type: 'string', enum: ALL_STATES },
+              placement: {
+                type: 'object',
+                properties: {
+                  node_id: { type: ['string', 'null'] },
+                  node_name: { type: ['string', 'null'] },
+                  reason: { type: ['string', 'null'] },
+                },
+              },
+              passes: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    pass_id: { type: 'string' },
+                    attempt: { type: 'integer' },
+                    at: { type: 'string', format: 'date-time' },
+                    last_seen_at: { type: ['string', 'null'], format: 'date-time' },
+                    repeat_count: {
+                      type: 'integer',
+                      description:
+                        'How many consecutive passes reached this same verdict. '
+                        + 'Identical refusals are folded together rather than repeated.',
+                    },
+                    decisions: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          node_id: { type: ['string', 'null'] },
+                          node_name: { type: ['string', 'null'] },
+                          outcome: {
+                            type: 'string',
+                            enum: ['SELECTED', 'VIABLE', 'REJECTED', 'NO_CAPACITY', 'QUOTA_EXCEEDED'],
+                          },
+                          reason: { type: 'string' },
+                          details: { type: 'object', additionalProperties: true },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          404: { $ref: 'Error#' },
+        },
+      },
+    },
+    async (request) => {
+      const job = await jobService.getJob(app.db, request.params.id);
+      const passes = await schedulerService.getSchedulingHistory(app.db, job.id, {
+        passes: request.query.passes ?? 5,
+      });
+
+      return { job_id: job.id, state: job.state, placement: job.placement, passes };
     },
   );
 

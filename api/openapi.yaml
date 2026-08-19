@@ -312,10 +312,21 @@ components:
           type:
             - "null"
             - string
+        pending_reason:
+          type:
+            - "null"
+            - string
+          description: Why a launched job is not yet running — an image pull, an
+            unschedulable Pod. Cleared once it runs. Not a failure.
         placement:
           type: object
+          description: Where the scheduler put this job, and why
           properties:
             node_id:
+              type:
+                - "null"
+                - string
+            node_name:
               type:
                 - "null"
                 - string
@@ -375,6 +386,90 @@ components:
           type: string
           format: date-time
       title: JobEvent
+    def-8:
+      type: object
+      required:
+        - id
+        - name
+        - ready
+        - cpu_cores
+        - memory_bytes
+        - allocated
+        - gpus
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        ready:
+          type: boolean
+        cpu_cores:
+          type: integer
+        memory_bytes:
+          type: integer
+        running_jobs:
+          type: integer
+        gpu_capacity:
+          type: integer
+          description: GPUs Kubernetes will actually grant. Zero with devices present
+            means no device plugin is installed (ADR 0008)
+        reserved_cpu:
+          type: integer
+          description: CPU already requested by pods AshML did not create
+        reserved_memory:
+          type: integer
+        allocated:
+          type: object
+          description: What AshML has committed on this node, from its own records
+          properties:
+            cpu:
+              type: integer
+            memory_bytes:
+              type: integer
+            gpu:
+              type: integer
+        schedulable_gpus:
+          type: integer
+          description: min(advertised, healthy) — what placement may actually use
+        free:
+          type: object
+          description: Capacity minus commitments — what the scheduler places against
+          properties:
+            cpu:
+              type: integer
+            memory_bytes:
+              type: integer
+            gpu:
+              type: integer
+        gpus:
+          type: array
+          items:
+            type: object
+            properties:
+              uuid:
+                type: string
+              index:
+                type: integer
+              model:
+                type: string
+              memory_total_bytes:
+                type: integer
+              memory_used_bytes:
+                type: integer
+              utilization_pct:
+                type: integer
+              health:
+                type: string
+              simulated:
+                type: boolean
+                description: True when this device is fabricated rather than real hardware
+        last_seen_at:
+          type:
+            - "null"
+            - string
+          format: date-time
+      title: ComputeNode
 paths:
   /healthz:
     get:
@@ -544,6 +639,54 @@ paths:
       summary: Get a project by name
       tags:
         - projects
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-2"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/quota:
+    patch:
+      summary: Change a project's resource quota
+      tags:
+        - projects
+      description: Quotas are enforced at admission, before any Kubernetes object
+        exists (ADR 0003). A limit of 0 means unlimited. Lowering a limit does
+        not stop jobs already running under the old one — it governs the next
+        admission.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                gpu:
+                  type: integer
+                  minimum: 0
+                cpu:
+                  type: integer
+                  minimum: 0
+                memory_bytes:
+                  type: integer
+                  minimum: 0
+                jobs:
+                  type: integer
+                  minimum: 0
       parameters:
         - schema:
             type: string
@@ -1170,6 +1313,126 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/def-0"
+  /api/v1/jobs/{id}/scheduling:
+    get:
+      summary: Explain why a job was, or was not, scheduled
+      tags:
+        - jobs
+      description: Every node the scheduler considered on each of the most recent
+        passes, and what was wrong with the ones it rejected. This is the answer
+        to "why is my job still queued" — a question a single placement summary
+        cannot answer once the situation that produced it has passed.
+      parameters:
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 5
+          in: query
+          name: passes
+          required: false
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - job_id
+                  - state
+                  - passes
+                properties:
+                  job_id:
+                    type: string
+                    format: uuid
+                  state:
+                    type: string
+                    enum:
+                      - CREATED
+                      - QUEUED
+                      - SCHEDULING
+                      - STARTING
+                      - RUNNING
+                      - FAILED
+                      - RETRYING
+                      - CANCELLING
+                      - SUCCEEDED
+                      - CANCELLED
+                  placement:
+                    type: object
+                    properties:
+                      node_id:
+                        type:
+                          - "null"
+                          - string
+                      node_name:
+                        type:
+                          - "null"
+                          - string
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                  passes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        pass_id:
+                          type: string
+                        attempt:
+                          type: integer
+                        at:
+                          type: string
+                          format: date-time
+                        last_seen_at:
+                          type:
+                            - "null"
+                            - string
+                          format: date-time
+                        repeat_count:
+                          type: integer
+                          description: How many consecutive passes reached this same verdict. Identical
+                            refusals are folded together rather than repeated.
+                        decisions:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              node_id:
+                                type:
+                                  - "null"
+                                  - string
+                              node_name:
+                                type:
+                                  - "null"
+                                  - string
+                              outcome:
+                                type: string
+                                enum:
+                                  - SELECTED
+                                  - VIABLE
+                                  - REJECTED
+                                  - NO_CAPACITY
+                                  - QUOTA_EXCEEDED
+                              reason:
+                                type: string
+                              details:
+                                type: object
+                                additionalProperties: true
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
   /api/v1/jobs/{id}/logs:
     get:
       summary: Read a job's container logs
@@ -1250,6 +1513,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/def-0"
+  /api/v1/nodes:
+    get:
+      summary: List compute nodes and their capacity
+      tags:
+        - nodes
+      description: The cluster as the scheduler sees it. `allocated` comes from
+        AshML's own job records rather than from the node's reported usage,
+        which lags — a Pod created a moment ago has not appeared in it yet.
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - nodes
+                properties:
+                  nodes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-8"
 servers:
   - url: /
     description: Current host
@@ -1266,3 +1551,5 @@ tags:
     description: Experiments and reproducibility capture
   - name: jobs
     description: Training jobs
+  - name: nodes
+    description: Compute nodes, capacity, and GPU inventory

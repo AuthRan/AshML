@@ -18,6 +18,7 @@ import { createSimBackend } from '../k8s/sim.js';
 import { Phase } from '../k8s/backend.js';
 import { JobState } from '../domain/job-state.js';
 import { runOnce, launchJob, reconcileJob } from './executor.js';
+import { discoverCluster, listNodes } from './nodes.js';
 import { getJob, getJobEvents, cancelJob, claimNextJob } from './jobs.js';
 import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE } from '../test-support/db.js';
 
@@ -43,6 +44,12 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     backend = createSimBackend({ namespace: 'ashml-test', autoAdvance: false });
     app = await buildApp(config, { logger: false, pool, k8s: backend });
     await app.ready();
+
+    // A job cannot be launched until it has been placed, and it cannot be placed until
+    // the scheduler knows a node exists. Registering the fake cluster's node is
+    // therefore part of this suite's setup, not a separate concern — without it every
+    // test here would fail for "no compute nodes are registered".
+    await discoverCluster(pool, backend, app.gpuProvider);
   });
 
   after(async () => {
@@ -55,6 +62,9 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     // The fake cluster is wiped alongside the database. Leaving workloads behind for
     // jobs that no longer exist is not a state a real cluster and database ever share.
     backend._reset();
+    // Nodes are not project-scoped, so `truncateAll` leaves them in place. Asserted
+    // rather than assumed: if that ever changes, every test here fails confusingly.
+    assert.ok((await listNodes(pool)).length > 0, 'the test cluster must still have a node');
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/projects',
@@ -107,6 +117,73 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     await runOnce(pool, backend);
 
     assert.equal((await getJob(pool, submitted.id)).state, JobState.STARTING);
+  });
+
+  test('a job stuck before running says why, without being called failed', async () => {
+    // "STARTING, indefinitely, no explanation" is the same experience as a hang. An
+    // unschedulable Pod and a slow image pull look identical from outside until
+    // something says which it is.
+    const submitted = await submit();
+    await runOnce(pool, backend);
+    const { k8s_job_name: name } = await getJob(pool, submitted.id);
+
+    backend._setPhase('ashml-test', name, Phase.PENDING, 'ImagePullBackOff: no such image');
+    await runOnce(pool, backend);
+
+    const job = await getJob(pool, submitted.id);
+    assert.equal(job.state, JobState.STARTING, 'waiting is not failing');
+    assert.match(job.pending_reason, /ImagePullBackOff/);
+    assert.equal(job.failure_reason, null, 'a waiting job must not look like a failed one');
+
+    // And the sequence is on the event log, so it survives after the fact.
+    const events = await getJobEvents(pool, submitted.id);
+    const waiting = events.filter((e) => e.event_type === 'JOB_WAITING');
+    assert.equal(waiting.length, 1);
+    assert.match(waiting[0].message, /ImagePullBackOff/);
+
+    // It is not a transition, so it must not appear as one — the sequence of to_state
+    // values has to stay the job's actual path through the state machine.
+    assert.equal(waiting[0].to_state, null);
+    assert.equal(waiting[0].details.state, JobState.STARTING);
+    assert.deepEqual(
+      events.map((e) => e.to_state).filter(Boolean),
+      ['CREATED', 'QUEUED', 'SCHEDULING', 'STARTING'],
+    );
+  });
+
+  test('an unchanged pending reason is not written again on every pass', async () => {
+    // The executor observes every couple of seconds; an unchanged reason is not news,
+    // and logging it each time would bury the events that matter.
+    const submitted = await submit();
+    await runOnce(pool, backend);
+    const { k8s_job_name: name } = await getJob(pool, submitted.id);
+
+    backend._setPhase('ashml-test', name, Phase.PENDING, 'ImagePullBackOff: no such image');
+    await runOnce(pool, backend);
+    await runOnce(pool, backend);
+    await runOnce(pool, backend);
+
+    const events = await getJobEvents(pool, submitted.id);
+    assert.equal(events.filter((e) => e.event_type === 'JOB_WAITING').length, 1);
+  });
+
+  test('the reason a job was waiting is cleared once it runs', async () => {
+    // A job showing "ImagePullBackOff" while happily running is worse than showing
+    // nothing at all.
+    const submitted = await submit();
+    await runOnce(pool, backend);
+    const { k8s_job_name: name } = await getJob(pool, submitted.id);
+
+    backend._setPhase('ashml-test', name, Phase.PENDING, 'ContainerCreating');
+    await runOnce(pool, backend);
+    assert.ok((await getJob(pool, submitted.id)).pending_reason);
+
+    backend._setPhase('ashml-test', name, Phase.RUNNING, 'pod running');
+    await runOnce(pool, backend);
+
+    const job = await getJob(pool, submitted.id);
+    assert.equal(job.state, JobState.RUNNING);
+    assert.equal(job.pending_reason, null);
   });
 
   test('an observed running pod moves the job to RUNNING and stamps started_at', async () => {

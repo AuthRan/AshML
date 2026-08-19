@@ -105,4 +105,44 @@ export async function registerProjectRoutes(app) {
     },
     async (request) => projectService.getProject(app.db, request.params.name),
   );
+
+  app.patch(
+    '/api/v1/projects/:name/quota',
+    {
+      schema: {
+        tags: ['projects'],
+        summary: 'Change a project\'s resource quota',
+        description:
+          'Quotas are enforced at admission, before any Kubernetes object exists '
+          + '(ADR 0003). A limit of 0 means unlimited. Lowering a limit does not stop '
+          + 'jobs already running under the old one — it governs the next admission.',
+        params: {
+          type: 'object',
+          required: ['name'],
+          properties: { name: { type: 'string' } },
+        },
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          // Every field optional: a request changes only what it names, so raising the
+          // GPU limit cannot silently reset the others to unlimited.
+          properties: {
+            gpu: { type: 'integer', minimum: 0 },
+            cpu: { type: 'integer', minimum: 0 },
+            memory_bytes: { type: 'integer', minimum: 0 },
+            jobs: { type: 'integer', minimum: 0 },
+          },
+        },
+        response: {
+          200: { $ref: 'Project#' },
+          404: { $ref: 'Error#' },
+        },
+      },
+    },
+    async (request) => {
+      const project = await projectService.updateQuota(app.db, request.params.name, request.body ?? {});
+      request.log.info({ project: project.name, quota: project.quota }, 'quota updated');
+      return project;
+    },
+  );
 }

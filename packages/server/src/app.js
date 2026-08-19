@@ -23,6 +23,7 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerGpuRoutes } from './routes/gpus.js';
 import { registerProjectRoutes } from './routes/projects.js';
 import { registerJobRoutes } from './routes/jobs.js';
+import { registerNodeRoutes } from './routes/nodes.js';
 import { registerDatasetRoutes } from './routes/datasets.js';
 import { registerExperimentRoutes } from './routes/experiments.js';
 import { createPool } from './db/pool.js';
@@ -125,6 +126,7 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null 
         { name: 'datasets', description: 'Datasets and their immutable versions' },
         { name: 'experiments', description: 'Experiments and reproducibility capture' },
         { name: 'jobs', description: 'Training jobs' },
+        { name: 'nodes', description: 'Compute nodes, capacity, and GPU inventory' },
       ],
     },
   });
@@ -163,6 +165,7 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null 
   await app.register(registerDatasetRoutes);
   await app.register(registerExperimentRoutes);
   await app.register(registerJobRoutes);
+  await app.register(registerNodeRoutes);
 
   return app;
 }

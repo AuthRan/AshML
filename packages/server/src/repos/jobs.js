@@ -8,12 +8,13 @@
 const JOB_COLUMNS = `
   j.id, j.name, j.state, j.priority,
   j.cpu_request, j.memory_request, j.gpu_request, j.gpu_memory_min,
-  j.spec, j.attempt, j.max_retries, j.failure_reason,
+  j.spec, j.attempt, j.max_retries, j.failure_reason, j.pending_reason,
   j.scheduled_node_id, j.placement_reason, j.k8s_job_name,
   j.queued_at, j.started_at, j.finished_at, j.created_at, j.updated_at,
   p.name AS project_name,
   j.experiment_id,
-  e.name AS experiment_name
+  e.name AS experiment_name,
+  cn.name AS node_name
 `;
 
 /**
@@ -24,6 +25,7 @@ const JOB_FROM = `
   FROM training_jobs j
   JOIN projects p ON p.id = j.project_id
   LEFT JOIN experiments e ON e.id = j.experiment_id
+  LEFT JOIN compute_nodes cn ON cn.id = j.scheduled_node_id
 `;
 
 function iso(value) {
@@ -51,8 +53,10 @@ function toJob(row) {
     max_retries: row.max_retries,
     k8s_job_name: row.k8s_job_name || null,
     failure_reason: row.failure_reason || null,
+    pending_reason: row.pending_reason || null,
     placement: {
       node_id: row.scheduled_node_id,
+      node_name: row.node_name ?? null,
       reason: row.placement_reason || null,
     },
     queued_at: iso(row.queued_at),
@@ -199,17 +203,25 @@ export async function listJobEvents(client, jobId) {
  *
  * The lock is what makes two schedulers safe: the loser skips the row rather than
  * blocking on it (ADR 0004).
+ *
+ * `excludeIds` lets one scheduling pass walk past jobs it has already refused. Without
+ * it a job that cannot currently be placed — one asking for more GPUs than any node has
+ * — is claimed, refused, returned to the queue, and immediately claimed again, and no
+ * job behind it in the queue is ever considered. Priority order is preserved: the pass
+ * still takes the highest-priority job it has not yet refused.
  */
-export async function lockNextQueuedJob(client) {
+export async function lockNextQueuedJob(client, { excludeIds = [] } = {}) {
   const { rows } = await client.query(
     `SELECT ${JOB_COLUMNS}
      ${JOB_FROM}
      WHERE j.state = 'QUEUED'
+       AND NOT (j.id = ANY($1::uuid[]))
      ORDER BY
        CASE j.priority WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 WHEN 'LOW' THEN 2 ELSE 3 END,
        j.queued_at
      LIMIT 1
      FOR UPDATE OF j SKIP LOCKED`,
+    [excludeIds],
   );
   return rows.length ? toJob(rows[0]) : null;
 }
@@ -250,6 +262,20 @@ export async function listJobsToReconcile(client, { limit = 200 } = {}) {
     [limit],
   );
   return rows.map(toJob);
+}
+
+/**
+ * Records why a launched job is not yet running.
+ *
+ * Cleared (to '') the moment it runs, so a stale explanation cannot outlive the
+ * condition that produced it — a job showing "ImagePullBackOff" while happily running
+ * is worse than showing nothing.
+ */
+export async function setPendingReason(client, id, reason) {
+  await client.query(
+    `UPDATE training_jobs SET pending_reason = $2, updated_at = now() WHERE id = $1`,
+    [id, reason],
+  );
 }
 
 /** Queue depth by priority. Cheap enough to expose as a metric (spec §23). */
