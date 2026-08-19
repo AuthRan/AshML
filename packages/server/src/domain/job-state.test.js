@@ -10,6 +10,7 @@ import {
   canTransition,
   transition,
   IllegalTransitionError,
+  hasLaunched,
 } from './job-state.js';
 
 describe('job state machine', () => {
@@ -116,3 +117,37 @@ describe('job state machine', () => {
     assert.equal(canTransition(JobState.CREATED, 'MUTATED'), false);
   });
 });
+
+describe('has a workload been launched', () => {
+  test('nothing has run before the scheduler has placed the job', () => {
+    for (const state of [JobState.CREATED, JobState.QUEUED, JobState.SCHEDULING]) {
+      assert.equal(hasLaunched(state), false, `${state} has not launched anything`);
+    }
+  });
+
+  test('everything from STARTING onwards may have produced something', () => {
+    // The rule is deliberately "provably not launched" rather than "definitely
+    // running": a run legitimately reports after it finishes, because a training loop
+    // that buffers its metrics flushes them at the end and the final checkpoint is
+    // confirmed once its upload completes, which is after the pod is gone.
+    for (const state of [
+      JobState.STARTING, JobState.RUNNING, JobState.SUCCEEDED,
+      JobState.FAILED, JobState.RETRYING, JobState.CANCELLING, JobState.CANCELLED,
+    ]) {
+      assert.equal(hasLaunched(state), true, `${state} may have produced output`);
+    }
+  });
+
+  test('every known state is covered', () => {
+    // Guards the negative rule: a state added later defaults to "launched", so this
+    // fails loudly if one is introduced without deciding which side it belongs on.
+    for (const state of ALL_STATES) {
+      assert.equal(typeof hasLaunched(state), 'boolean');
+    }
+  });
+
+  test('an unknown state has launched nothing', () => {
+    assert.equal(hasLaunched('PAUSED'), false);
+  });
+});
+

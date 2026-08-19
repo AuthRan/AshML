@@ -26,6 +26,8 @@ import { registerJobRoutes } from './routes/jobs.js';
 import { registerNodeRoutes } from './routes/nodes.js';
 import { registerDatasetRoutes } from './routes/datasets.js';
 import { registerExperimentRoutes } from './routes/experiments.js';
+import { registerMetricRoutes } from './routes/metrics.js';
+import { registerArtifactRoutes } from './routes/artifacts.js';
 import { createPool } from './db/pool.js';
 import { IllegalTransitionError } from './domain/job-state.js';
 
@@ -127,6 +129,8 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null 
         { name: 'experiments', description: 'Experiments and reproducibility capture' },
         { name: 'jobs', description: 'Training jobs' },
         { name: 'nodes', description: 'Compute nodes, capacity, and GPU inventory' },
+        { name: 'metrics', description: 'Training metrics reported by running jobs' },
+        { name: 'artifacts', description: 'Checkpoints and models produced by runs' },
       ],
     },
   });
@@ -166,6 +170,8 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null 
   await app.register(registerExperimentRoutes);
   await app.register(registerJobRoutes);
   await app.register(registerNodeRoutes);
+  await app.register(registerMetricRoutes);
+  await app.register(registerArtifactRoutes);
 
   return app;
 }

@@ -220,6 +220,24 @@ components:
               type:
                 - "null"
                 - integer
+            observed:
+              type: object
+              description: What the run reported about itself, as against everything above,
+                which is what it was asked for. A record built only from intent
+                is a wish; one built only from observation cannot be
+                re-requested.
+              properties:
+                framework:
+                  type:
+                    - "null"
+                    - string
+                hardware:
+                  type: object
+                  additionalProperties: true
+                sdk_version:
+                  type:
+                    - "null"
+                    - string
         job_count:
           type: integer
           description: Training jobs recorded against this experiment
@@ -470,6 +488,107 @@ components:
             - string
           format: date-time
       title: ComputeNode
+    def-9:
+      type: object
+      required:
+        - name
+        - points
+      properties:
+        name:
+          type: string
+        job_id:
+          type: string
+          format: uuid
+          description: Present on experiment reads, where one metric has a series per run
+        points:
+          type: array
+          items:
+            type: object
+            required:
+              - step
+              - value
+            properties:
+              step:
+                type: integer
+              epoch:
+                type:
+                  - "null"
+                  - integer
+              value:
+                type: number
+              recorded_at:
+                type: string
+                format: date-time
+                description: When the run observed the value, not when the API received it
+      title: MetricSeries
+    def-10:
+      type: object
+      required:
+        - id
+        - kind
+        - name
+        - uri
+        - status
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          description: What this is — `checkpoint`, `model`, or whatever the run calls it
+        name:
+          type: string
+        uri:
+          type: string
+          description: Where the bytes are; object storage, not this API
+        status:
+          type: string
+          enum:
+            - PENDING
+            - READY
+            - FAILED
+          description: PENDING until the upload is confirmed. Only READY means the bytes
+            exist — nothing may resume from or serve an artifact in any other
+            status.
+        digest:
+          type:
+            - "null"
+            - string
+          description: Computed by the run as it wrote
+        size_bytes:
+          type: integer
+        step:
+          type:
+            - "null"
+            - integer
+          description: Training step, for a checkpoint
+        metadata:
+          type: object
+          additionalProperties: true
+        job:
+          type:
+            - "null"
+            - object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+        project:
+          type:
+            - "null"
+            - string
+        experiment_id:
+          type:
+            - "null"
+            - string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+      title: Artifact
 paths:
   /healthz:
     get:
@@ -1059,6 +1178,67 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/def-0"
+  /api/v1/experiments/{id}/report:
+    post:
+      summary: A run reports its own start or finish
+      tags:
+        - experiments
+      description: Called by the training SDK. `started` stamps `started_at` the first
+        time it is reported and records the framework, hardware and SDK the run
+        actually observed; `finished` stamps `ended_at`. These timestamps are
+        not derived from the job, because a container starting is not training
+        starting.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - phase
+              additionalProperties: false
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - started
+                    - finished
+                framework:
+                  type: string
+                  maxLength: 200
+                hardware:
+                  type: object
+                  additionalProperties: true
+                  description: "What the run found itself running on: GPUs, driver, CUDA"
+                sdk_version:
+                  type: string
+                  maxLength: 50
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-5"
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
   /api/v1/jobs:
     post:
       summary: Submit a training job
@@ -1535,6 +1715,557 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/def-8"
+  /api/v1/jobs/{id}/metrics:
+    post:
+      summary: Report training metrics for a job
+      tags:
+        - metrics
+      description: "Called by the training process itself. Metrics are append-only:
+        reporting the same step twice records both points rather than replacing
+        the first. The experiment is taken from the job, not from the request."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - metrics
+              additionalProperties: false
+              properties:
+                metrics:
+                  type: array
+                  minItems: 1
+                  maxItems: 1000
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - value
+                      - step
+                    additionalProperties: false
+                    properties:
+                      name:
+                        type: string
+                        minLength: 1
+                        maxLength: 200
+                      value:
+                        type: number
+                      step:
+                        type: integer
+                        minimum: 0
+                      epoch:
+                        type: integer
+                        minimum: 0
+                      recorded_at:
+                        type: string
+                        format: date-time
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - written
+                  - job_id
+                properties:
+                  written:
+                    type: integer
+                  job_id:
+                    type: string
+                    format: uuid
+                  experiment_id:
+                    type:
+                      - "null"
+                      - string
+                    format: uuid
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    get:
+      summary: Read a job’s metric series
+      tags:
+        - metrics
+      parameters:
+        - schema:
+            type: string
+          in: query
+          name: name
+          required: false
+          description: Return only this metric
+        - schema:
+            type: integer
+            minimum: 0
+          in: query
+          name: since_step
+          required: false
+          description: Only points after this step, for polling a live run
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 20000
+            default: 2000
+          in: query
+          name: limit
+          required: false
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - series
+                properties:
+                  job_id:
+                    type: string
+                    format: uuid
+                  experiment_id:
+                    type: string
+                    format: uuid
+                  series:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-9"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/jobs/{id}/metrics/summary:
+    get:
+      summary: Latest value and point count per metric
+      tags:
+        - metrics
+      description: Answers "how is this run doing" without transferring the series.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - job_id
+                  - metrics
+                properties:
+                  job_id:
+                    type: string
+                    format: uuid
+                  metrics:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        count:
+                          type: integer
+                        first_step:
+                          type: integer
+                        last_step:
+                          type: integer
+                        last_value:
+                          type: number
+                        last_recorded_at:
+                          type:
+                            - "null"
+                            - string
+                          format: date-time
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/experiments/{id}/metrics:
+    get:
+      summary: Read metrics across every run of an experiment
+      tags:
+        - metrics
+      description: "One series per metric per job. Runs are kept apart rather than
+        merged: two runs both report from step 0, and combining them would draw
+        a curve that never existed."
+      parameters:
+        - schema:
+            type: string
+          in: query
+          name: name
+          required: false
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 20000
+            default: 2000
+          in: query
+          name: limit
+          required: false
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - series
+                properties:
+                  job_id:
+                    type: string
+                    format: uuid
+                  experiment_id:
+                    type: string
+                    format: uuid
+                  series:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-9"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/jobs/{id}/artifacts:
+    post:
+      summary: Register an artifact a run is about to write
+      tags:
+        - artifacts
+      description: "Returns a PENDING artifact. Upload the bytes to `uri`, then
+        confirm with POST /api/v1/artifacts/{id}/complete. An artifact cannot be
+        registered as READY: this API cannot see the bytes, so it will not claim
+        they exist."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - kind
+                - name
+                - uri
+              additionalProperties: false
+              properties:
+                kind:
+                  type: string
+                  minLength: 1
+                  maxLength: 50
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                uri:
+                  type: string
+                  minLength: 1
+                  maxLength: 1000
+                step:
+                  type: integer
+                  minimum: 0
+                metadata:
+                  type: object
+                  additionalProperties: true
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-10"
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    get:
+      summary: List what a job produced
+      tags:
+        - artifacts
+      parameters:
+        - schema:
+            type: string
+          in: query
+          name: kind
+          required: false
+        - schema:
+            type: string
+            enum:
+              - PENDING
+              - READY
+              - FAILED
+          in: query
+          name: status
+          required: false
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - artifacts
+                properties:
+                  artifacts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-10"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/artifacts/{id}/complete:
+    post:
+      summary: Confirm an artifact’s bytes have landed
+      tags:
+        - artifacts
+      description: "Moves PENDING to READY. The digest is required: it is the whole of
+        what makes a stored checkpoint trustworthy later."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - digest
+                - size_bytes
+              additionalProperties: false
+              properties:
+                digest:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                size_bytes:
+                  type: integer
+                  minimum: 0
+                metadata:
+                  type: object
+                  additionalProperties: true
+                  description: Merged into what registration recorded, not replacing it
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-10"
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/artifacts/{id}/fail:
+    post:
+      summary: Record that an artifact’s upload was abandoned
+      tags:
+        - artifacts
+      description: Moves PENDING to FAILED. The row is kept, so a checkpoint the run
+        meant to write and did not stays visible rather than looking like it was
+        never tried.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type:
+                - object
+                - "null"
+              additionalProperties: false
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-10"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/artifacts/{id}:
+    get:
+      summary: Get an artifact
+      tags:
+        - artifacts
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-10"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/experiments/{id}/artifacts:
+    get:
+      summary: List what every run of an experiment produced
+      tags:
+        - artifacts
+      parameters:
+        - schema:
+            type: string
+          in: query
+          name: kind
+          required: false
+        - schema:
+            type: string
+            enum:
+              - PENDING
+              - READY
+              - FAILED
+          in: query
+          name: status
+          required: false
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - artifacts
+                properties:
+                  artifacts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-10"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
 servers:
   - url: /
     description: Current host
@@ -1553,3 +2284,7 @@ tags:
     description: Training jobs
   - name: nodes
     description: Compute nodes, capacity, and GPU inventory
+  - name: metrics
+    description: Training metrics reported by running jobs
+  - name: artifacts
+    description: Checkpoints and models produced by runs

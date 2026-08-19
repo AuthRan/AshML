@@ -227,9 +227,13 @@ Jobs carry an optional `experiment_id`, validated to belong to the same project 
 job — quotas and scheduling are per project, so cross-project attribution would corrupt
 both sides' accounting.
 
-`experiments.started_at` / `ended_at` are stamped by the training SDK **[planned:
-Phase 4]**. They are left null until something real can set them; deriving them from job
-timestamps would be a guess presented as a record.
+`experiments.started_at` / `ended_at` are stamped by the run itself, through
+`POST /api/v1/experiments/{id}/report`. They are left null until a run reports; deriving
+them from job timestamps would be a guess presented as a record, because a container
+starting is not training starting — image pull, dataset download and framework init sit
+in between. The same call records what the run *observed* (framework, hardware, SDK
+version) alongside what it was *asked for* (dataset version, hyperparameters, seed);
+spec §34 needs both halves.
 
 ## 10. Storage split
 
@@ -238,11 +242,25 @@ timestamps would be a guess presented as a record.
 
 Blobs never go in Postgres (spec §19). The `artifacts` table stores a URI and a digest.
 
+Because the row and the bytes cannot be written in one transaction, artifacts carry a
+status: a run registers what it is about to write (`PENDING`), uploads, then confirms
+with the digest and size it computed (`READY`). Only `READY` means the bytes exist, and
+nothing may resume from, register, or serve an artifact in any other status. An
+abandoned upload is marked `FAILED` and kept, so the gap stays visible rather than
+looking like it was never attempted.
+
 ## 11. Observability contract
 
 Every component emits structured JSON logs via `pino`, carrying whichever of
 `request_id`, `job_id`, `experiment_id`, `deployment_id`, `node_id` are in scope.
-Metrics are Prometheus; traces are OpenTelemetry. **[planned: Phase 5]**
+Traces are OpenTelemetry **[planned: Phase 5]**.
+
+Metrics are split by what the number describes (ADR 0009). **Training** metrics — loss,
+accuracy, learning rate — are *pushed* by the run to
+`POST /api/v1/jobs/{id}/metrics`, because only the training loop knows what step a value
+belongs to, and a scraper sampling on a timer records the wrong axis. **Infrastructure**
+metrics — GPU utilisation, memory, temperature — are scraped by Prometheus
+**[planned: Phase 5]**, which is what Prometheus is for.
 
 The specific question the observability stack must answer: *why is this job slow, and
 what is the bottleneck?* If a dashboard cannot contribute to that answer, it is decoration.

@@ -149,19 +149,46 @@ and placement starts using it (ADR 0008).
 
 ---
 
-## Phase 4 — ML Lifecycle *(current)*
+## Phase 4 — ML Lifecycle *(current — tracking done, storage and SDK next)*
 
 Spec milestones 6 and 7.
 
-- MinIO artifact storage; checkpoints and final models (metadata in Postgres, blobs in S3)
-- Python SDK: training scripts report metrics/checkpoints back to the control plane
-- Experiment tracking with full reproducibility capture (git SHA, dataset version,
-  hyperparameters, image digest, seed, hardware)
+- ~~Metric ingest: runs report their own numbers; series read back per job and per experiment~~ **done**
+- ~~Artifact lifecycle: register before writing, confirm after, so `READY` means the bytes exist~~ **done**
+- ~~Experiment tracking with full reproducibility capture (git SHA, dataset version,
+  hyperparameters, image digest, seed, hardware)~~ **done** — intent was already captured
+  in Phase 1; the observed half (framework, hardware, SDK, run window) lands here
+- MinIO artifact storage: presigned uploads, so the run writes bytes AshML can serve back
+- Python SDK: the thin client that makes a training script report without ceremony
 - Model registry: models, versions, lifecycle states
 - Real workload: ResNet-18 on CIFAR-10, single GPU
 
 **Exit criteria:** train ResNet on CIFAR-10 through the platform; the run appears as an
 experiment with metrics, a stored checkpoint, and a registered model version.
+
+### How a run reports (ADR 0009)
+
+Training metrics are **pushed** by the run, not scraped. Only the training loop knows
+what step a value belongs to, and a scraper sampling on a timer records "loss was 1.84 at
+14:03:22" — the wrong axis, silently dropping every step between two scrapes. Prometheus
+still arrives in Phase 5 and still scrapes; the split is by what the number describes.
+Infrastructure metrics (GPU utilisation, memory, temperature) are scraped. Training
+metrics are pushed.
+
+The cost is stated plainly in the ADR: a training script cannot be unmodified. AshML sees
+nothing from a job that does not opt in.
+
+### Deferred within this phase
+
+- **Presigned uploads.** `@aws-sdk/client-s3` is a dependency and MinIO runs in
+  `make db-up`, but the artifact endpoints record metadata only — the run uploads to a
+  URI it already has. The lifecycle (`PENDING` → `READY`/`FAILED`) is what makes adding
+  the upload safe later, and it is real now.
+- **Authentication on the ingest path.** The API takes writes from inside the cluster and
+  is unauthenticated, like the rest of v1 (auth is Phase 10). Two things limit the damage
+  and both are deliberate: the experiment id is copied from the job server-side rather
+  than taken from the request, and metrics are refused for a job that has not launched.
+  Neither substitutes for auth.
 
 ---
 

@@ -49,6 +49,23 @@ export function isValidState(state) {
   return Object.hasOwn(TRANSITIONS, state);
 }
 
+/**
+ * States in which no workload has been launched yet, so nothing can have run and
+ * nothing can have been produced.
+ *
+ * Used to refuse metrics and artifacts reported against a job that has not started.
+ * The rule is deliberately negative — "provably not launched" rather than "definitely
+ * running" — because a run legitimately reports *after* it finishes: a training loop
+ * that buffers its metrics flushes them at the end, and the final checkpoint is
+ * confirmed once the upload completes, which may be after the pod is gone.
+ */
+const NOT_YET_LAUNCHED = Object.freeze([JobState.CREATED, JobState.QUEUED, JobState.SCHEDULING]);
+
+/** @returns {boolean} whether a workload has been launched for this job. */
+export function hasLaunched(state) {
+  return isValidState(state) && !NOT_YET_LAUNCHED.includes(state);
+}
+
 /** @returns {boolean} whether `state` admits no further transitions. */
 export function isTerminal(state) {
   return isValidState(state) && TRANSITIONS[state].length === 0;

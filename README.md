@@ -4,14 +4,24 @@ A Kubernetes-native GPU machine learning infrastructure platform — a miniature
 ML cloud. Register datasets, submit training jobs, schedule them onto GPU resources,
 track experiments, version models, deploy inference, and observe all of it.
 
-**Status: Phase 3 (scheduler) complete.** Projects, datasets, experiments and training
-jobs are persisted in PostgreSQL with an append-only event log and a `SKIP LOCKED`
-queue. Submitted jobs **actually run**: AshML's own scheduler decides whether a job may
-run and on which node, the executor creates the Kubernetes Job there, and job state is
-driven from observed Pod status through to `SUCCEEDED`, `FAILED` or `CANCELLED`.
+**Status: Phase 3 (scheduler) complete; Phase 4 (ML lifecycle) in progress.** Projects,
+datasets, experiments and training jobs are persisted in PostgreSQL with an append-only
+event log and a `SKIP LOCKED` queue. Submitted jobs **actually run**: AshML's own
+scheduler decides whether a job may run and on which node, the executor creates the
+Kubernetes Job there, and job state is driven from observed Pod status through to
+`SUCCEEDED`, `FAILED` or `CANCELLED`.
 
 Overfill the cluster and jobs queue rather than over-committing it; `ash job why <id>`
 prints every node the scheduler considered and what was wrong with it.
+
+Running jobs now **report on themselves**: metrics as they train, checkpoints as they
+write them, and what the run actually observed itself running on. `ash job metrics <id>`
+shows the curve, `ash job artifacts <id>` shows what it produced.
+
+**Not yet in Phase 4:** artifacts record metadata only — the run uploads its own bytes to
+a URI it already has, and presigned uploads through MinIO are the next step. The Python
+SDK and the model registry are still to come, so reporting today means calling the API
+directly.
 
 **Not yet:** GPU jobs cannot run on this host — the machine has two RTX 2080 Tis, but
 installing the NVIDIA container toolkit needs root, so no GPU reaches a k3d node and the
@@ -68,6 +78,16 @@ ash job get <id>
 ash job events <id>      # full audit trail
 ash job why <id>         # every node considered, and why it was chosen or rejected
 ash job logs <id> -f     # the container's own output, followed until it finishes
+
+# What the run reported about itself while training.
+ash job metrics <id>              # latest value and point count per metric
+ash job metrics <id> --name loss  # the full series, step by step
+ash job artifacts <id>            # checkpoints and models, and whether their bytes exist
+
+# And rolled up across every run of an experiment, for comparing them.
+ash experiment metrics <experiment-id>
+ash experiment artifacts <experiment-id> --ready
+ash experiment get <experiment-id>   # what was asked for, and what the run observed
 ash job cancel <id>      # stops at CANCELLING until the Pod is really gone
 
 ash node list            # cluster capacity: what is free, what is committed

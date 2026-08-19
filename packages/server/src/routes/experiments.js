@@ -34,6 +34,18 @@ const experimentSchema = {
         },
         hyperparameters: { type: 'object', additionalProperties: true },
         random_seed: { type: ['integer', 'null'] },
+        observed: {
+          type: 'object',
+          description:
+            'What the run reported about itself, as against everything above, which is '
+            + 'what it was asked for. A record built only from intent is a wish; one '
+            + 'built only from observation cannot be re-requested.',
+          properties: {
+            framework: { type: ['string', 'null'] },
+            hardware: { type: 'object', additionalProperties: true },
+            sdk_version: { type: ['string', 'null'] },
+          },
+        },
       },
     },
     job_count: { type: 'integer', description: 'Training jobs recorded against this experiment' },
@@ -145,5 +157,59 @@ export async function registerExperimentRoutes(app) {
       },
     },
     async (request) => experimentService.getExperiment(app.db, request.params.id),
+  );
+
+  app.post(
+    '/api/v1/experiments/:id/report',
+    {
+      schema: {
+        tags: ['experiments'],
+        summary: 'A run reports its own start or finish',
+        description:
+          'Called by the training SDK. `started` stamps `started_at` the first time it '
+          + 'is reported and records the framework, hardware and SDK the run actually '
+          + 'observed; `finished` stamps `ended_at`. These timestamps are not derived '
+          + 'from the job, because a container starting is not training starting.',
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: { id: { type: 'string', format: 'uuid' } },
+        },
+        body: {
+          type: 'object',
+          required: ['phase'],
+          additionalProperties: false,
+          properties: {
+            phase: { type: 'string', enum: ['started', 'finished'] },
+            framework: { type: 'string', maxLength: 200 },
+            hardware: {
+              type: 'object',
+              additionalProperties: true,
+              description: 'What the run found itself running on: GPUs, driver, CUDA',
+            },
+            sdk_version: { type: 'string', maxLength: 50 },
+          },
+        },
+        response: {
+          200: { $ref: 'Experiment#' },
+          400: { $ref: 'Error#' },
+          404: { $ref: 'Error#' },
+        },
+      },
+    },
+    async (request) => {
+      const body = request.body;
+      const experiment = await experimentService.reportRun(app.db, request.params.id, {
+        phase: body.phase,
+        framework: body.framework ?? '',
+        hardware: body.hardware ?? {},
+        sdkVersion: body.sdk_version ?? '',
+      });
+      request.log.info(
+        { experiment_id: experiment.id, phase: body.phase },
+        'experiment run reported',
+      );
+      return experiment;
+    },
   );
 }

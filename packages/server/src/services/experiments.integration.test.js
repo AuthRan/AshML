@@ -223,4 +223,95 @@ describe('experiments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     assert.equal(res.statusCode, 201);
     assert.equal(res.json().reproducibility.random_seed, 0);
   });
+
+  describe('a run reporting on itself', () => {
+    function report(id, payload) {
+      return app.inject({ method: 'POST', url: `/api/v1/experiments/${id}/report`, payload });
+    }
+
+    test('a fresh experiment has started nothing and observed nothing', async () => {
+      const experiment = (await createExperiment()).json();
+      assert.equal(experiment.started_at, null);
+      assert.equal(experiment.ended_at, null);
+      // Deliberately empty rather than guessed from the job: a container starting is
+      // not training starting, and there is nothing here to copy from anyway.
+      assert.deepEqual(experiment.reproducibility.observed, {
+        framework: null, hardware: {}, sdk_version: null,
+      });
+    });
+
+    test('reporting a start stamps the time and records what the run observed', async () => {
+      const experiment = (await createExperiment()).json();
+
+      const res = await report(experiment.id, {
+        phase: 'started',
+        framework: 'pytorch 2.4.1',
+        hardware: { gpus: 1, model: 'NVIDIA GeForce RTX 2080 Ti', cuda: '12.4' },
+        sdk_version: '0.1.0',
+      });
+      assert.equal(res.statusCode, 200, res.payload);
+
+      const reported = res.json();
+      assert.ok(reported.started_at, 'started_at must be stamped by the run');
+      assert.equal(reported.ended_at, null);
+      assert.equal(reported.reproducibility.observed.framework, 'pytorch 2.4.1');
+      assert.equal(reported.reproducibility.observed.sdk_version, '0.1.0');
+      assert.equal(reported.reproducibility.observed.hardware.model, 'NVIDIA GeForce RTX 2080 Ti');
+
+      // What was asked for is untouched by what was observed; both halves are the record.
+      assert.equal(reported.reproducibility.random_seed, null);
+    });
+
+    test('finishing stamps the end without disturbing the start', async () => {
+      const experiment = (await createExperiment()).json();
+      const started = (await report(experiment.id, { phase: 'started' })).json();
+
+      const finished = (await report(experiment.id, { phase: 'finished' })).json();
+      assert.equal(finished.started_at, started.started_at);
+      assert.ok(finished.ended_at);
+      assert.ok(
+        new Date(finished.ended_at) >= new Date(finished.started_at),
+        'a run cannot end before it began',
+      );
+    });
+
+    test('a second run does not reset when the experiment started', async () => {
+      const experiment = (await createExperiment()).json();
+      const first = (await report(experiment.id, {
+        phase: 'started', framework: 'pytorch 2.4.1',
+      })).json();
+
+      // A retry is the ordinary case. The experiment started when its first run did.
+      const second = (await report(experiment.id, {
+        phase: 'started', framework: 'pytorch 2.5.0',
+      })).json();
+
+      assert.equal(second.started_at, first.started_at, 'started_at is COALESCEd, not overwritten');
+      // The observed fields do move: the useful answer to "what did this run on" is
+      // the most recent run, not the first.
+      assert.equal(second.reproducibility.observed.framework, 'pytorch 2.5.0');
+    });
+
+    test('finishing a run whose start was never reported is accepted', async () => {
+      const experiment = (await createExperiment()).json();
+
+      // A crashed reporter, or an SDK upgraded mid-run. Half a record beats none, so
+      // this is stamped rather than refused.
+      const res = await report(experiment.id, { phase: 'finished' });
+      assert.equal(res.statusCode, 200, res.payload);
+      assert.ok(res.json().ended_at);
+      assert.equal(res.json().started_at, null, 'and the gap stays visible');
+    });
+
+    test('a phase the platform does not know is refused', async () => {
+      const experiment = (await createExperiment()).json();
+      const res = await report(experiment.id, { phase: 'paused' });
+      assert.equal(res.statusCode, 400, res.payload);
+    });
+
+    test('reporting against an unknown experiment is a 404', async () => {
+      const res = await report('00000000-0000-0000-0000-000000000000', { phase: 'started' });
+      assert.equal(res.statusCode, 404);
+    });
+  });
 });

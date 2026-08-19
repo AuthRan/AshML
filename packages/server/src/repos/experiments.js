@@ -18,6 +18,7 @@ function iso(value) {
 const EXPERIMENT_COLUMNS = `
   e.id, e.name, e.git_commit, e.image_digest, e.hyperparameters, e.random_seed,
   e.started_at, e.ended_at, e.created_at,
+  e.framework, e.hardware, e.sdk_version,
   p.name  AS project_name,
   d.name  AS dataset_name,
   v.version AS dataset_version,
@@ -45,6 +46,13 @@ function toExperiment(row) {
         : null,
       hyperparameters: row.hyperparameters,
       random_seed: row.random_seed,
+      // What the run reported about itself, as against everything above, which is what
+      // it was asked for. Empty until a run reports (see startExperimentRun).
+      observed: {
+        framework: row.framework || null,
+        hardware: row.hardware,
+        sdk_version: row.sdk_version || null,
+      },
     },
     job_count: row.job_count,
     started_at: iso(row.started_at),
@@ -90,4 +98,39 @@ export async function listExperiments(client, { projectName = null, limit = 50 }
     [projectName, limit],
   );
   return rows.map(toExperiment);
+}
+
+/**
+ * Records that a run of this experiment has begun, and what it observed itself running
+ * on: the framework and version, the hardware it was actually given, the SDK that
+ * reported it.
+ *
+ * `started_at` is COALESCEd rather than overwritten. An experiment can be run more than
+ * once — a retry is the ordinary case — and the experiment started when the first of
+ * those runs did. The observed fields *are* overwritten, because the useful answer to
+ * "what did this run on" is the most recent run, not the first.
+ */
+export async function startExperimentRun(client, id, { framework, hardware, sdkVersion }) {
+  const { rowCount } = await client.query(
+    `UPDATE experiments
+     SET started_at   = COALESCE(started_at, now()),
+         framework    = $2,
+         hardware     = $3,
+         sdk_version  = $4
+     WHERE id = $1`,
+    [id, framework, JSON.stringify(hardware), sdkVersion],
+  );
+  return rowCount === 1;
+}
+
+/**
+ * Stamps the end of a run. The latest report wins: the experiment is over when its last
+ * run finished, so a retry legitimately moves this forward.
+ */
+export async function finishExperimentRun(client, id) {
+  const { rowCount } = await client.query(
+    'UPDATE experiments SET ended_at = now() WHERE id = $1',
+    [id],
+  );
+  return rowCount === 1;
 }

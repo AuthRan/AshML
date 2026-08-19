@@ -52,6 +52,19 @@ function age(isoTimestamp) {
   return `${Math.floor(seconds / 86_400)}d`;
 }
 
+/**
+ * Metrics are floats of wildly different scales — a loss of 2.31, a learning rate of
+ * 3e-05. Fixed decimal places would print the learning rate as 0.00, so significant
+ * digits are used and trailing zeros trimmed.
+ */
+function num(value) {
+  if (!Number.isFinite(value)) return String(value);
+  if (Number.isInteger(value)) return String(value);
+  const abs = Math.abs(value);
+  if (abs !== 0 && (abs < 1e-4 || abs >= 1e7)) return value.toExponential(3);
+  return String(Number(value.toPrecision(6)));
+}
+
 function newTable(head) {
   return new Table({ head, style: { head: [], border: [] } });
 }
@@ -387,6 +400,95 @@ job
   });
 
 job
+  .command('metrics <id>')
+  .description('Show the metrics a run reported')
+  .option('--name <metric>', 'print the full series for one metric instead of the summary')
+  .option('--since-step <n>', 'with --name, only points after this step', (v) => Number.parseInt(v, 10))
+  .option('--limit <n>', 'with --name, cap the points fetched', (v) => Number.parseInt(v, 10), 2000)
+  .option('--json', 'emit raw JSON')
+  .action(async (id, opts) => {
+    // Without --name this asks for the summary, which is a few rows however long the
+    // run was. Pulling a million points to print a last value would be rude to both ends.
+    if (!opts.name) {
+      const body = await api(endpoint(), `/api/v1/jobs/${id}/metrics/summary`);
+      return output(opts, body, ({ metrics }) => {
+        if (metrics.length === 0) {
+          console.log('No metrics reported. A run reports its own numbers — see docs/adr/0009.');
+          return;
+        }
+        const table = newTable(['METRIC', 'POINTS', 'STEPS', 'LATEST', 'AGE']);
+        for (const m of metrics) {
+          table.push([
+            m.name,
+            m.count,
+            `${m.first_step}..${m.last_step}`,
+            num(m.last_value),
+            m.last_recorded_at ? age(m.last_recorded_at) : '-',
+          ]);
+        }
+        console.log(table.toString());
+      });
+    }
+
+    const query = new URLSearchParams({ name: opts.name, limit: String(opts.limit) });
+    if (opts.sinceStep !== undefined) query.set('since_step', String(opts.sinceStep));
+    const body = await api(endpoint(), `/api/v1/jobs/${id}/metrics?${query}`);
+    return output(opts, body, ({ series }) => {
+      const one = series[0];
+      if (!one) {
+        console.log(`No metric named "${opts.name}" was reported by this job.`);
+        return;
+      }
+      const table = newTable(['STEP', 'EPOCH', 'VALUE', 'RECORDED']);
+      for (const point of one.points) {
+        table.push([point.step, point.epoch ?? '-', num(point.value), point.recorded_at]);
+      }
+      console.log(table.toString());
+      console.log(`\n${one.points.length} point(s) of "${one.name}".`);
+    });
+  });
+
+job
+  .command('artifacts <id>')
+  .description('List the checkpoints and models a run produced')
+  .option('--kind <kind>', 'only artifacts of this kind, e.g. checkpoint')
+  .option('--ready', 'only artifacts whose bytes are confirmed to exist')
+  .option('--json', 'emit raw JSON')
+  .action(async (id, opts) => {
+    const query = new URLSearchParams();
+    if (opts.kind) query.set('kind', opts.kind);
+    if (opts.ready) query.set('status', 'READY');
+
+    const body = await api(endpoint(), `/api/v1/jobs/${id}/artifacts?${query}`);
+    output(opts, body, ({ artifacts }) => {
+      if (artifacts.length === 0) {
+        console.log('No artifacts registered for this job.');
+        return;
+      }
+      const table = newTable(['NAME', 'KIND', 'STATUS', 'STEP', 'SIZE', 'URI']);
+      for (const a of artifacts) {
+        table.push([
+          a.name,
+          a.kind,
+          a.status,
+          a.step ?? '-',
+          a.size_bytes ? gib(a.size_bytes) : '-',
+          a.uri,
+        ]);
+      }
+      console.log(table.toString());
+
+      // Only READY means the bytes are there. Printing a PENDING row like any other
+      // would let someone try to resume from a checkpoint that was never written.
+      const unusable = artifacts.filter((a) => a.status !== 'READY');
+      if (unusable.length > 0) {
+        console.log(`\n  NOTE: ${unusable.length} artifact(s) are not READY. Their bytes are`);
+        console.log('  not confirmed to exist — do not resume from or serve them.');
+      }
+    });
+  });
+
+job
   .command('logs <id>')
   .description('Read a job\'s container logs from the cluster')
   .option('-n, --tail <lines>', 'only the most recent N lines', (v) => Number.parseInt(v, 10))
@@ -625,12 +727,92 @@ experiment
       console.log(`seed:      ${r.random_seed ?? '-'}`);
       console.log(`jobs:      ${e.job_count}`);
       console.log(`created:   ${e.created_at}`);
+      console.log(`started:   ${e.started_at ?? '- (no run has reported)'}`);
+      console.log(`ended:     ${e.ended_at ?? '-'}`);
+
+      // The second half of the reproducibility record: what a run observed, as against
+      // everything above, which is what it was asked for. Blank until a run reports.
+      const obs = r.observed ?? {};
+      const hardware = Object.entries(obs.hardware ?? {});
+      if (obs.framework || obs.sdk_version || hardware.length > 0) {
+        console.log('observed by the run:');
+        console.log(`  framework: ${obs.framework || '-'}`);
+        console.log(`  sdk:       ${obs.sdk_version || '-'}`);
+        for (const [key, value] of hardware) {
+          console.log(`  ${key}: ${JSON.stringify(value)}`);
+        }
+      }
 
       const params = Object.entries(r.hyperparameters);
       console.log(`hyperparameters:${params.length ? '' : ' -'}`);
       for (const [key, value] of params) {
         console.log(`  ${key}: ${JSON.stringify(value)}`);
       }
+    });
+  });
+
+experiment
+  .command('metrics <id>')
+  .description('Compare the metrics of every run of an experiment')
+  .option('--name <metric>', 'only this metric')
+  .option('--json', 'emit raw JSON')
+  .action(async (id, opts) => {
+    const query = new URLSearchParams();
+    if (opts.name) query.set('name', opts.name);
+
+    const body = await api(endpoint(), `/api/v1/experiments/${id}/metrics?${query}`);
+    output(opts, body, ({ series }) => {
+      if (series.length === 0) {
+        console.log('No metrics reported by any run of this experiment.');
+        return;
+      }
+      // One row per run per metric. Runs are never merged: two runs both report from
+      // step 0, and a combined curve would be one that never happened.
+      const table = newTable(['METRIC', 'RUN', 'POINTS', 'FIRST', 'LATEST']);
+      for (const s of series) {
+        const first = s.points[0];
+        const last = s.points[s.points.length - 1];
+        table.push([
+          s.name,
+          s.job_id.slice(0, 8),
+          s.points.length,
+          first ? num(first.value) : '-',
+          last ? num(last.value) : '-',
+        ]);
+      }
+      console.log(table.toString());
+    });
+  });
+
+experiment
+  .command('artifacts <id>')
+  .description('List what every run of an experiment produced')
+  .option('--kind <kind>', 'only artifacts of this kind')
+  .option('--ready', 'only artifacts whose bytes are confirmed to exist')
+  .option('--json', 'emit raw JSON')
+  .action(async (id, opts) => {
+    const query = new URLSearchParams();
+    if (opts.kind) query.set('kind', opts.kind);
+    if (opts.ready) query.set('status', 'READY');
+
+    const body = await api(endpoint(), `/api/v1/experiments/${id}/artifacts?${query}`);
+    output(opts, body, ({ artifacts }) => {
+      if (artifacts.length === 0) {
+        console.log('No artifacts registered by any run of this experiment.');
+        return;
+      }
+      const table = newTable(['NAME', 'KIND', 'STATUS', 'RUN', 'SIZE', 'URI']);
+      for (const a of artifacts) {
+        table.push([
+          a.name,
+          a.kind,
+          a.status,
+          a.job ? a.job.id.slice(0, 8) : '-',
+          a.size_bytes ? gib(a.size_bytes) : '-',
+          a.uri,
+        ]);
+      }
+      console.log(table.toString());
     });
   });
 
