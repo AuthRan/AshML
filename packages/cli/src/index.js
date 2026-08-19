@@ -56,6 +56,44 @@ function newTable(head) {
   return new Table({ head, style: { head: [], border: [] } });
 }
 
+/**
+ * Resolves the project for a project-scoped command.
+ *
+ * Falls back to ASHML_PROJECT so a session working in one project does not have to
+ * repeat `-p` on every call.
+ */
+function requireProject(opts) {
+  const project = opts.project ?? process.env.ASHML_PROJECT;
+  if (!project) {
+    throw new Error('no project given: pass --project <name> or set ASHML_PROJECT');
+  }
+  return project;
+}
+
+/**
+ * Collects a repeatable `key=value` flag into an object.
+ *
+ * Values are coerced to numbers and booleans where they clearly are ones, because
+ * hyperparameters are compared across runs and `"0.001"` would not equal `0.001`.
+ */
+function collectParam(raw, into) {
+  const eq = raw.indexOf('=');
+  if (eq < 1) {
+    throw new Error(`--param "${raw}": want key=value`);
+  }
+  const key = raw.slice(0, eq);
+  const value = raw.slice(eq + 1);
+
+  if (value === 'true' || value === 'false') {
+    into[key] = value === 'true';
+  } else if (value !== '' && !Number.isNaN(Number(value))) {
+    into[key] = Number(value);
+  } else {
+    into[key] = value;
+  }
+  return into;
+}
+
 /** Renders `value` as JSON when --json was passed; otherwise runs `render`. */
 function output(opts, value, render) {
   if (opts.json) {
@@ -126,11 +164,15 @@ project
 
 // -------------------------------------------------------------------- jobs
 
+/** States after which no further output will ever appear, so `--follow` can stop. */
+const TERMINAL_STATES = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
+
 const job = program.command('job').description('Manage training jobs');
 
 job
   .command('submit <file>')
   .description('Submit a training job from a YAML or JSON file')
+  .option('--experiment <id>', 'attribute this run to an experiment, overriding the manifest')
   .option('--json', 'emit raw JSON')
   .action(async (file, opts) => {
     const raw = await readFile(file, 'utf8');
@@ -141,11 +183,14 @@ job
       throw new Error(`${file}: ${err.message}`, { cause: err });
     }
 
+    if (opts.experiment) manifest.experiment = opts.experiment;
+
     const submitted = await api(endpoint(), '/api/v1/jobs', { method: 'POST', body: manifest });
     output(opts, submitted, (j) => {
       console.log(`submitted ${j.name} to project ${j.project}`);
       console.log(`  id:    ${j.id}`);
       console.log(`  state: ${j.state}`);
+      if (j.experiment) console.log(`  experiment: ${j.experiment.name} (${j.experiment.id})`);
     });
   });
 
@@ -197,7 +242,9 @@ job
       console.log(`priority:  ${j.priority}`);
       console.log(`resources: ${j.resources.cpu} CPU, ${gib(j.resources.memory_bytes)} RAM, ${j.resources.gpu} GPU`);
       console.log(`image:     ${j.spec?.image ?? '-'}`);
+      if (j.experiment) console.log(`experiment: ${j.experiment.name} (${j.experiment.id})`);
       console.log(`attempt:   ${j.attempt} of ${j.max_retries + 1}`);
+      if (j.k8s_job_name) console.log(`k8s job:   ${j.k8s_job_name}`);
       if (j.placement?.reason) console.log(`placement: ${j.placement.reason}`);
       if (j.failure_reason) console.log(`failure:   ${j.failure_reason}`);
       console.log(`created:   ${j.created_at}`);
@@ -221,6 +268,53 @@ job
   });
 
 job
+  .command('logs <id>')
+  .description('Read a job\'s container logs from the cluster')
+  .option('-n, --tail <lines>', 'only the most recent N lines', (v) => Number.parseInt(v, 10))
+  .option('-p, --previous', 'read the previous container instance, where a crash left its output')
+  .option('-f, --follow', 'poll for new output until the job finishes')
+  .option('--interval <ms>', 'how often --follow polls', (v) => Number.parseInt(v, 10), 2000)
+  .option('--json', 'emit raw JSON')
+  .action(async (id, opts) => {
+    const query = new URLSearchParams();
+    if (opts.tail) query.set('tail', String(opts.tail));
+    if (opts.previous) query.set('previous', 'true');
+    const path = `/api/v1/jobs/${id}/logs?${query}`;
+
+    if (!opts.follow) {
+      const body = await api(endpoint(), path);
+      output(opts, body, () => {
+        // Say why there is nothing rather than printing nothing, which reads as a
+        // job that produced no output when in fact none was ever readable.
+        if (!body.available) {
+          console.error(`no logs: ${body.reason}`);
+          return;
+        }
+        process.stdout.write(body.logs);
+      });
+      return;
+    }
+
+    // Follow by polling rather than holding a stream open: the control plane's own
+    // status loop polls (see services/executor.js), so a stream here would claim a
+    // liveness the platform does not actually have. Only the newly appended tail is
+    // printed each round.
+    let printed = 0;
+    for (;;) {
+      const body = await api(endpoint(), path);
+      if (body.available && body.logs.length > printed) {
+        process.stdout.write(body.logs.slice(printed));
+        printed = body.logs.length;
+      }
+      if (TERMINAL_STATES.has(body.state)) {
+        if (!body.available) console.error(`no logs: ${body.reason}`);
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, opts.interval));
+    }
+  });
+
+job
   .command('cancel <id>')
   .description('Cancel a job')
   .option('-r, --reason <text>', 'why it is being cancelled', 'cancelled by user')
@@ -231,6 +325,194 @@ job
       body: { reason: opts.reason },
     });
     output(opts, j, () => console.log(`job ${j.name} is now ${j.state}`));
+  });
+
+// ---------------------------------------------------------------- datasets
+
+const dataset = program.command('dataset').description('Manage datasets and their versions');
+
+const projectOption = ['-p, --project <name>', 'project the dataset belongs to (or $ASHML_PROJECT)'];
+
+dataset
+  .command('create <name>')
+  .description('Create a dataset')
+  .option(...projectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const created = await api(endpoint(), `/api/v1/projects/${requireProject(opts)}/datasets`, {
+      method: 'POST',
+      body: { name },
+    });
+    output(opts, created, (d) => console.log(`created dataset ${d.project}/${d.name}`));
+  });
+
+dataset
+  .command('list')
+  .description('List a project\'s datasets')
+  .option(...projectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (opts) => {
+    const body = await api(endpoint(), `/api/v1/projects/${requireProject(opts)}/datasets`);
+    output(opts, body, ({ datasets }) => {
+      if (datasets.length === 0) {
+        console.log('No datasets yet. Create one with: ash dataset create <name>');
+        return;
+      }
+      const table = newTable(['NAME', 'VERSIONS', 'LATEST', 'AGE']);
+      for (const d of datasets) {
+        table.push([d.name, d.version_count, d.latest_version ?? '-', age(d.created_at)]);
+      }
+      console.log(table.toString());
+    });
+  });
+
+dataset
+  .command('add-version <dataset> <version>')
+  .description('Register a new, immutable version of a dataset')
+  .requiredOption('--uri <uri>', 'where the bytes live, e.g. s3://bucket/path')
+  .option('--digest <digest>', 'content hash, e.g. sha256:...', '')
+  .option('--size-bytes <n>', 'size in bytes', (v) => Number.parseInt(v, 10), 0)
+  .option(...projectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (datasetName, version, opts) => {
+    const created = await api(
+      endpoint(),
+      `/api/v1/projects/${requireProject(opts)}/datasets/${datasetName}/versions`,
+      {
+        method: 'POST',
+        body: { version, uri: opts.uri, digest: opts.digest, size_bytes: opts.sizeBytes },
+      },
+    );
+    output(opts, created, (v) => console.log(`registered ${v.dataset}:${v.version} -> ${v.uri}`));
+  });
+
+dataset
+  .command('versions <dataset>')
+  .description('List a dataset\'s versions, newest first')
+  .option(...projectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (datasetName, opts) => {
+    const body = await api(
+      endpoint(),
+      `/api/v1/projects/${requireProject(opts)}/datasets/${datasetName}/versions`,
+    );
+    output(opts, body, ({ versions }) => {
+      if (versions.length === 0) {
+        console.log('No versions registered yet.');
+        return;
+      }
+      const table = newTable(['VERSION', 'SIZE', 'DIGEST', 'URI', 'AGE']);
+      for (const v of versions) {
+        table.push([
+          v.version,
+          v.size_bytes ? gib(v.size_bytes) : '-',
+          v.digest ?? '-',
+          v.uri,
+          age(v.created_at),
+        ]);
+      }
+      console.log(table.toString());
+    });
+  });
+
+// ------------------------------------------------------------- experiments
+
+const experiment = program.command('experiment').description('Track experiments and their reproducibility');
+
+experiment
+  .command('create <name>')
+  .description('Create an experiment')
+  .option(...projectOption)
+  .option('--git-commit <sha>', 'commit the training code was at')
+  .option('--image-digest <digest>', 'image digest; a tag pins nothing')
+  .option('--dataset <name>', 'dataset this run consumes')
+  .option('--dataset-version <version>', 'which version of it (required with --dataset)')
+  .option('--seed <n>', 'random seed', (v) => Number.parseInt(v, 10))
+  .option('--param <key=value>', 'hyperparameter, repeatable', collectParam, {})
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const created = await api(endpoint(), '/api/v1/experiments', {
+      method: 'POST',
+      body: {
+        project: requireProject(opts),
+        name,
+        git_commit: opts.gitCommit,
+        image_digest: opts.imageDigest,
+        dataset: opts.dataset,
+        dataset_version: opts.datasetVersion,
+        hyperparameters: opts.param,
+        random_seed: opts.seed,
+      },
+    });
+    output(opts, created, (e) => {
+      console.log(`created experiment ${e.name} (${e.id})`);
+      if (!e.reproducibility.git_commit || !e.reproducibility.dataset) {
+        // Say it now rather than when someone tries to reproduce the run in six months.
+        console.log('  note: this experiment is not fully reproducible —'
+          + ` git_commit=${e.reproducibility.git_commit ?? 'unset'},`
+          + ` dataset=${e.reproducibility.dataset ? 'pinned' : 'unset'}`);
+      }
+    });
+  });
+
+experiment
+  .command('list')
+  .description('List experiments, newest first')
+  .option(...projectOption)
+  .option('-l, --limit <n>', 'maximum rows', (v) => Number.parseInt(v, 10), 50)
+  .option('--json', 'emit raw JSON')
+  .action(async (opts) => {
+    const query = new URLSearchParams();
+    const project = opts.project ?? process.env.ASHML_PROJECT;
+    if (project) query.set('project', project);
+    query.set('limit', String(opts.limit));
+
+    const body = await api(endpoint(), `/api/v1/experiments?${query}`);
+    output(opts, body, ({ experiments }) => {
+      if (experiments.length === 0) {
+        console.log('No experiments found.');
+        return;
+      }
+      const table = newTable(['NAME', 'PROJECT', 'DATASET', 'COMMIT', 'JOBS', 'AGE']);
+      for (const e of experiments) {
+        const data = e.reproducibility.dataset;
+        table.push([
+          e.name,
+          e.project,
+          data ? `${data.name}:${data.version}` : '-',
+          e.reproducibility.git_commit?.slice(0, 8) ?? '-',
+          e.job_count,
+          age(e.created_at),
+        ]);
+      }
+      console.log(table.toString());
+    });
+  });
+
+experiment
+  .command('get <id>')
+  .description('Show an experiment in detail')
+  .option('--json', 'emit raw JSON')
+  .action(async (id, opts) => {
+    const e = await api(endpoint(), `/api/v1/experiments/${id}`);
+    output(opts, e, () => {
+      const r = e.reproducibility;
+      console.log(`name:      ${e.name}`);
+      console.log(`id:        ${e.id}`);
+      console.log(`project:   ${e.project}`);
+      console.log(`commit:    ${r.git_commit ?? '-'}`);
+      console.log(`image:     ${r.image_digest ?? '-'}`);
+      console.log(`dataset:   ${r.dataset ? `${r.dataset.name}:${r.dataset.version}` : '-'}`);
+      console.log(`seed:      ${r.random_seed ?? '-'}`);
+      console.log(`jobs:      ${e.job_count}`);
+      console.log(`created:   ${e.created_at}`);
+
+      const params = Object.entries(r.hyperparameters);
+      console.log(`hyperparameters:${params.length ? '' : ' -'}`);
+      for (const [key, value] of params) {
+        console.log(`  ${key}: ${JSON.stringify(value)}`);
+      }
+    });
   });
 
 // --------------------------------------------------------------------- gpu

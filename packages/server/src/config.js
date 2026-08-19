@@ -26,12 +26,35 @@ export function loadConfig(env = process.env) {
       simDeviceCount: parseCount(env.ASHML_SIM_GPUS, 'ASHML_SIM_GPUS'),
     },
 
+    // Kubernetes execution (Phase 2). Like the GPU provider, the real backend is the
+    // default and `sim` must be opted into explicitly, so a demo can never quietly
+    // present a fabricated run as a real one (spec Rule 5).
+    k8sBackend: env.ASHML_K8S_BACKEND ?? 'kubernetes',
+    k8sNamespace: env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs',
+    // Unset means the standard resolution order: $KUBECONFIG, ~/.kube/config, then
+    // the in-cluster service account.
+    kubeconfig: env.ASHML_KUBECONFIG ?? null,
+
+    // The executor is what makes jobs actually run. It is disabled only for a server
+    // deliberately brought up as a read-only API replica.
+    executorEnabled: parseBool(env.ASHML_EXECUTOR_ENABLED, 'ASHML_EXECUTOR_ENABLED', true),
+    executorIntervalMs: parseCount(env.ASHML_EXECUTOR_INTERVAL_MS, 'ASHML_EXECUTOR_INTERVAL_MS') ?? 2000,
+
     databaseUrl: env.ASHML_DATABASE_URL
       ?? 'postgresql://ashml:ashml@127.0.0.1:5432/ashml',
     databasePoolMax: parseCount(env.ASHML_DB_POOL_MAX, 'ASHML_DB_POOL_MAX') ?? 10,
 
     version: env.ASHML_VERSION ?? '0.1.0-dev',
   };
+}
+
+function parseBool(raw, name, fallback) {
+  if (raw === undefined) return fallback;
+
+  const value = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  throw new Error(`${name}="${raw}": want a boolean (true/false)`);
 }
 
 function parseCount(raw, name) {

@@ -2,10 +2,7 @@
 
 import { withTransaction } from '../db/pool.js';
 import * as projectsRepo from '../repos/projects.js';
-import { ConflictError, NotFoundError } from './jobs.js';
-
-/** Postgres unique-violation SQLSTATE. */
-const UNIQUE_VIOLATION = '23505';
+import { ConflictError, NotFoundError, UNIQUE_VIOLATION } from './errors.js';
 
 export async function createProject(pool, { name, description, quota }) {
   try {

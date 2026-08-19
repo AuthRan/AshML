@@ -15,7 +15,7 @@ of at month nine.
 
 ---
 
-## Phase 0 — Foundation *(current)*
+## Phase 0 — Foundation *(complete)*
 
 **Deliverables**
 - Repository, npm workspaces, CI skeleton, lint config
@@ -33,23 +33,30 @@ No database, no Kubernetes, no scheduler yet.
 
 ---
 
-## Phase 1 — Control Plane *(weeks 1–3)*
+## Phase 1 — Control Plane *(complete)*
 
 Spec milestone 1.
 
 - PostgreSQL wired up (`pg` driver + hand-written SQL), `node-pg-migrate` runner
 - Domain CRUD: Project, Dataset, Experiment, TrainingJob
+- Dataset versions are immutable, and experiments pin one by id — the reproducibility
+  guarantee the whole of Phase 4 rests on (spec §34)
 - Job state transitions **persisted**, with an append-only `job_events` table
 - Job queue in Postgres (`FOR UPDATE SKIP LOCKED`) — no Redis (ADR 0004)
-- CLI: `ash project`, `ash job submit|list|get|cancel`
+- CLI: `ash project`, `ash dataset`, `ash experiment`, `ash job submit|list|get|cancel`
 - Structured JSON logging (`pino`) with `request_id` / `job_id` correlation
 
 **Exit criteria:** submit a job from the CLI, watch it move `CREATED → QUEUED`,
-cancel it, and read the full event history back. Nothing executes yet.
+cancel it, and read the full event history back. Nothing executes yet. **Met** —
+covered by the integration suites, which run against a real PostgreSQL.
+
+Deferred out of this phase: nothing sets `experiments.started_at` / `ended_at` yet.
+Those are stamped by the training SDK in Phase 4, when there is a run to stamp them
+from — inventing them from job timestamps now would be a guess dressed as a record.
 
 ---
 
-## Phase 2 — Kubernetes Execution *(weeks 4–6)*
+## Phase 2 — Kubernetes Execution *(complete)*
 
 Spec milestone 2.
 
@@ -60,11 +67,33 @@ Spec milestone 2.
 - Container images for training workloads
 
 **Exit criteria:** `ash job submit` runs a real container in k3d and the job reaches
-`SUCCEEDED` through observed Pod status, not a timer.
+`SUCCEEDED` through observed Pod status, not a timer. **Met** — `make e2e` asserts it
+against a real cluster, and cross-checks every claim with `kubectl` so a passing run
+cannot be produced by the control plane merely believing itself.
+
+The execution backend sits behind a seam (`src/k8s/backend.js`) in the same shape as the
+GPU provider, with a `sim` implementation for tests and for running the control plane
+without a cluster. As everywhere else, `sim` is opt-in and labels its output as
+fabricated (spec Rule 5).
+
+The status loop **polls rather than watches** — see ADR 0007 for why, and for what that
+costs. A watch belongs with the operator in Phase 6.
+
+Deferred out of this phase:
+
+- **Retries.** `max_retries` is stored and `FAILED → RETRYING → QUEUED` exists in the
+  state machine, but nothing drives it yet. Retry policy belongs with the failure
+  handling in Phase 5, where there is a checkpoint to resume from — retrying from step
+  zero would burn a GPU to produce the same failure.
+- **Placement.** `scheduled_node_id` is still null: choosing a node is Phase 3's job.
+  Kubernetes currently places the Pod, and the node it chose is recorded on the job
+  event rather than invented into the placement column.
+- **GPU scheduling.** Jobs requesting `nvidia.com/gpu` produce a correct manifest, but
+  k3d has no device plugin installed yet, so such a Pod stays Pending. That is Phase 3.
 
 ---
 
-## Phase 3 — Scheduler + GPU *(weeks 7–8)*
+## Phase 3 — Scheduler + GPU *(current)*
 
 Spec milestones 3 and 4. **This is the differentiator — do not let it slip.**
 

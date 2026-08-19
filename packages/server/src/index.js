@@ -1,12 +1,13 @@
 /**
  * Entry point for ashml-server, the AshML control-plane API.
  *
- * Phase 0 scope: health, version, GPU discovery. Domain endpoints arrive in Phase 1
- * once PostgreSQL is wired up. See docs/roadmap.md.
+ * Serves the control-plane API and, unless disabled, runs the executor loop that puts
+ * queued jobs onto Kubernetes and syncs their status back. See docs/roadmap.md.
  */
 
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
+import { startExecutor } from './services/executor.js';
 
 const config = loadConfig();
 
@@ -18,11 +19,39 @@ try {
   process.exit(1);
 }
 
+let executor = null;
+if (config.executorEnabled) {
+  try {
+    // Done before the loop starts, and before the port is bound, so a broken
+    // kubeconfig or an unreachable API server is a startup failure with a clear
+    // message rather than an error logged every two seconds by a server that looks
+    // healthy from the outside.
+    await app.k8s.ensureNamespace();
+  } catch (err) {
+    console.error(
+      `ashml-server: cannot reach the Kubernetes cluster: ${err.message}\n`
+      + 'Check ASHML_KUBECONFIG / your current context, or start the local cluster '
+      + 'with `make cluster`. To run the API without executing jobs, set '
+      + 'ASHML_EXECUTOR_ENABLED=false.',
+    );
+    process.exit(1);
+  }
+
+  executor = startExecutor(app.db, app.k8s, {
+    logger: app.log,
+    intervalMs: config.executorIntervalMs,
+  });
+}
+
 // Terminate cleanly so Kubernetes rollouts and Ctrl-C are not violent.
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.once(signal, async () => {
     app.log.info({ signal }, 'shutting down');
     try {
+      // The executor stops first: it holds database transactions, and closing the
+      // pool underneath an in-flight pass would roll back a state change that has
+      // already happened in the cluster.
+      await executor?.stop();
       await app.close();
       process.exit(0);
     } catch (err) {
@@ -35,7 +64,13 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 try {
   await app.listen({ port: config.port, host: config.host });
   app.log.info(
-    { gpu_provider: config.gpuProvider, version: config.version },
+    {
+      gpu_provider: config.gpuProvider,
+      k8s_backend: config.k8sBackend,
+      k8s_namespace: config.k8sNamespace,
+      executor: config.executorEnabled ? `every ${config.executorIntervalMs}ms` : 'disabled',
+      version: config.version,
+    },
     'ashml-server ready',
   );
 } catch (err) {

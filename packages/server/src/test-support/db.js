@@ -39,7 +39,14 @@ export const SKIP_MESSAGE =
 
 /**
  * Deletes all rows created by tests, leaving the schema and the seeded local user.
- * Cascades handle jobs, events and quotas.
+ * Cascades handle datasets, experiments, jobs, events and quotas.
+ *
+ * This wipes the whole database, so the integration files must not run at the same
+ * time as each other — `npm test` passes `--test-concurrency=1` for exactly that reason.
+ * Scoping the wipe per file would not be enough on its own: the queue tests assert on
+ * global queue state, because `lockNextQueuedJob` deliberately orders across every
+ * project, and narrowing that query to keep tests parallel would be distorting the
+ * production path for the convenience of the tests.
  */
 export async function truncateAll(pool) {
   await pool.query('TRUNCATE projects CASCADE');

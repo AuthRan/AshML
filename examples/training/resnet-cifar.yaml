@@ -7,6 +7,11 @@
 project: vision
 name: resnet-cifar
 
+# Optional. Attributes this run to an experiment, which is what carries the commit,
+# image digest, dataset version and seed. Pass `--experiment <id>` to override it, or
+# create one with: ash experiment create <name> --dataset cifar10 --dataset-version v1
+# experiment: 00000000-0000-0000-0000-000000000000
+
 priority: MEDIUM
 max_retries: 2
 
@@ -17,6 +22,8 @@ resources:
   gpu_memory_min_bytes: 8589934592  # 8 GiB
 
 spec:
+  # A digest, not a tag, is what makes a run reproducible — this tag is a placeholder
+  # until Phase 2 builds real training images.
   image: ash/ml-pytorch:latest
   command:
     - python

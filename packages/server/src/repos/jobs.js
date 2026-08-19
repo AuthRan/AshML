@@ -9,9 +9,21 @@ const JOB_COLUMNS = `
   j.id, j.name, j.state, j.priority,
   j.cpu_request, j.memory_request, j.gpu_request, j.gpu_memory_min,
   j.spec, j.attempt, j.max_retries, j.failure_reason,
-  j.scheduled_node_id, j.placement_reason,
+  j.scheduled_node_id, j.placement_reason, j.k8s_job_name,
   j.queued_at, j.started_at, j.finished_at, j.created_at, j.updated_at,
-  p.name AS project_name
+  p.name AS project_name,
+  j.experiment_id,
+  e.name AS experiment_name
+`;
+
+/**
+ * Every job read joins its project (jobs are always shown by project name, never by
+ * id) and left-joins its experiment, which is optional.
+ */
+const JOB_FROM = `
+  FROM training_jobs j
+  JOIN projects p ON p.id = j.project_id
+  LEFT JOIN experiments e ON e.id = j.experiment_id
 `;
 
 function iso(value) {
@@ -32,8 +44,12 @@ function toJob(row) {
       gpu_memory_min_bytes: row.gpu_memory_min,
     },
     spec: row.spec,
+    experiment: row.experiment_id
+      ? { id: row.experiment_id, name: row.experiment_name }
+      : null,
     attempt: row.attempt,
     max_retries: row.max_retries,
+    k8s_job_name: row.k8s_job_name || null,
     failure_reason: row.failure_reason || null,
     placement: {
       node_id: row.scheduled_node_id,
@@ -50,12 +66,13 @@ function toJob(row) {
 export async function insertJob(client, job) {
   const { rows } = await client.query(
     `INSERT INTO training_jobs
-       (project_id, name, state, priority, spec,
+       (project_id, experiment_id, name, state, priority, spec,
         cpu_request, memory_request, gpu_request, gpu_memory_min, max_retries)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING id`,
     [
       job.projectId,
+      job.experimentId ?? null,
       job.name,
       job.state,
       job.priority,
@@ -73,8 +90,7 @@ export async function insertJob(client, job) {
 export async function getJobById(client, id) {
   const { rows } = await client.query(
     `SELECT ${JOB_COLUMNS}
-     FROM training_jobs j
-     JOIN projects p ON p.id = j.project_id
+     ${JOB_FROM}
      WHERE j.id = $1`,
     [id],
   );
@@ -88,8 +104,7 @@ export async function getJobById(client, id) {
 export async function getJobForUpdate(client, id) {
   const { rows } = await client.query(
     `SELECT ${JOB_COLUMNS}
-     FROM training_jobs j
-     JOIN projects p ON p.id = j.project_id
+     ${JOB_FROM}
      WHERE j.id = $1
      FOR UPDATE OF j`,
     [id],
@@ -100,8 +115,7 @@ export async function getJobForUpdate(client, id) {
 export async function listJobs(client, { projectName = null, state = null, limit = 50 } = {}) {
   const { rows } = await client.query(
     `SELECT ${JOB_COLUMNS}
-     FROM training_jobs j
-     JOIN projects p ON p.id = j.project_id
+     ${JOB_FROM}
      WHERE ($1::text IS NULL OR p.name = $1)
        AND ($2::text IS NULL OR j.state = $2)
      ORDER BY j.created_at DESC
@@ -189,8 +203,7 @@ export async function listJobEvents(client, jobId) {
 export async function lockNextQueuedJob(client) {
   const { rows } = await client.query(
     `SELECT ${JOB_COLUMNS}
-     FROM training_jobs j
-     JOIN projects p ON p.id = j.project_id
+     ${JOB_FROM}
      WHERE j.state = 'QUEUED'
      ORDER BY
        CASE j.priority WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 WHEN 'LOW' THEN 2 ELSE 3 END,
@@ -199,6 +212,44 @@ export async function lockNextQueuedJob(client) {
      FOR UPDATE OF j SKIP LOCKED`,
   );
   return rows.length ? toJob(rows[0]) : null;
+}
+
+/**
+ * Records the name of the Kubernetes Job launched for this attempt.
+ *
+ * Written by the executor immediately after the Job is created, in the same
+ * transaction as the SCHEDULING -> STARTING transition. If the two could be written
+ * separately, a crash between them would leave a running Pod that no database row
+ * points at — a workload nothing can observe or cancel.
+ */
+export async function setK8sJobName(client, id, k8sJobName) {
+  await client.query(
+    `UPDATE training_jobs SET k8s_job_name = $2, updated_at = now() WHERE id = $1`,
+    [id, k8sJobName],
+  );
+}
+
+/**
+ * Lists jobs the executor is responsible for watching: everything that has, or may
+ * have, a workload in the cluster.
+ *
+ * SCHEDULING is included so a launch interrupted by a crash is finished rather than
+ * abandoned — the job has been claimed off the queue, so nothing else will ever pick
+ * it up again.
+ *
+ * Ordered oldest-updated first so a long list of active jobs is reconciled fairly
+ * rather than the most recently touched starving the rest.
+ */
+export async function listJobsToReconcile(client, { limit = 200 } = {}) {
+  const { rows } = await client.query(
+    `SELECT ${JOB_COLUMNS}
+     ${JOB_FROM}
+     WHERE j.state IN ('SCHEDULING', 'STARTING', 'RUNNING', 'CANCELLING')
+     ORDER BY j.updated_at
+     LIMIT $1`,
+    [limit],
+  );
+  return rows.map(toJob);
 }
 
 /** Queue depth by priority. Cheap enough to expose as a metric (spec §23). */

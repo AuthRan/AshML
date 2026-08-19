@@ -14,7 +14,7 @@
   "scripts": {
     "dev": "node --watch packages/server/src/index.js",
     "start": "node packages/server/src/index.js",
-    "test": "node --test",
+    "test": "node --test --test-concurrency=1",
     "openapi": "node packages/server/scripts/dump-openapi.js",
     "migrate": "npm run migrate --workspace @ashml/server",
     "db:up": "docker compose -f deploy/local/docker-compose.yml up -d",

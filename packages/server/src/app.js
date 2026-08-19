@@ -13,11 +13,18 @@ import fastifySwagger from '@fastify/swagger';
 import './gpu/nvidia.js';
 import './gpu/sim.js';
 
+// Same story for the execution backend: importing registers it, config chooses it.
+import './k8s/kubernetes.js';
+import './k8s/sim.js';
+
 import { availableProviders, createProvider, deviceSchema } from './gpu/provider.js';
+import { availableBackends, createBackend } from './k8s/backend.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerGpuRoutes } from './routes/gpus.js';
 import { registerProjectRoutes } from './routes/projects.js';
 import { registerJobRoutes } from './routes/jobs.js';
+import { registerDatasetRoutes } from './routes/datasets.js';
+import { registerExperimentRoutes } from './routes/experiments.js';
 import { createPool } from './db/pool.js';
 import { IllegalTransitionError } from './domain/job-state.js';
 
@@ -47,8 +54,14 @@ export const errorSchema = {
  * @param {boolean} [options.logger] set false in tests
  * @param {import('pg').Pool} [options.pool] inject a pool; otherwise one is created
  *   from config and closed on app.close()
+ * @param {object} [options.k8s] inject an execution backend; otherwise one is built
+ *   from config
+ *
+ * Note this does not start the executor loop — that belongs to index.js, alongside
+ * binding a port, so that building an app for a test never starts claiming jobs off
+ * a shared queue.
  */
-export async function buildApp(config, { logger = true, pool = null } = {}) {
+export async function buildApp(config, { logger = true, pool = null, k8s = null } = {}) {
   const app = Fastify({
     logger: logger === false ? false : { level: config.logLevel },
     // Correlates every log line for a request; carried into job_id/experiment_id
@@ -69,6 +82,20 @@ export async function buildApp(config, { logger = true, pool = null } = {}) {
   }
   app.decorate('gpuProvider', provider);
   app.decorate('ashmlVersion', config.version);
+
+  let backend;
+  try {
+    backend = k8s ?? createBackend(config.k8sBackend, {
+      namespace: config.k8sNamespace,
+      kubeconfig: config.kubeconfig,
+    });
+  } catch (err) {
+    throw new Error(
+      `${err.message}\nSet ASHML_K8S_BACKEND to one of: ${availableBackends().join(', ')}`,
+      { cause: err },
+    );
+  }
+  app.decorate('k8s', backend);
 
   // An injected pool belongs to the caller; one we create is ours to close.
   const ownsPool = pool === null;
@@ -95,6 +122,8 @@ export async function buildApp(config, { logger = true, pool = null } = {}) {
         { name: 'system', description: 'Health and version' },
         { name: 'gpus', description: 'GPU inventory and telemetry' },
         { name: 'projects', description: 'Projects and quotas' },
+        { name: 'datasets', description: 'Datasets and their immutable versions' },
+        { name: 'experiments', description: 'Experiments and reproducibility capture' },
         { name: 'jobs', description: 'Training jobs' },
       ],
     },
@@ -131,6 +160,8 @@ export async function buildApp(config, { logger = true, pool = null } = {}) {
   await app.register(registerHealthRoutes);
   await app.register(registerGpuRoutes);
   await app.register(registerProjectRoutes);
+  await app.register(registerDatasetRoutes);
+  await app.register(registerExperimentRoutes);
   await app.register(registerJobRoutes);
 
   return app;

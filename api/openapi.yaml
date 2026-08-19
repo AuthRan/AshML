@@ -118,6 +118,131 @@ components:
         - id
         - name
         - project
+        - version_count
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        project:
+          type: string
+        version_count:
+          type: integer
+        latest_version:
+          type:
+            - "null"
+            - string
+        created_at:
+          type: string
+          format: date-time
+      title: Dataset
+    def-4:
+      type: object
+      required:
+        - id
+        - dataset
+        - project
+        - version
+        - uri
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        dataset:
+          type: string
+        project:
+          type: string
+        version:
+          type: string
+        uri:
+          type: string
+          description: Where the bytes live; never Postgres (ADR 0001)
+        digest:
+          type:
+            - "null"
+            - string
+          description: Content hash, e.g. sha256:…
+        size_bytes:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+      title: DatasetVersion
+    def-5:
+      type: object
+      required:
+        - id
+        - name
+        - project
+        - reproducibility
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        project:
+          type: string
+        reproducibility:
+          type: object
+          description: Everything needed to rerun this experiment and get the same result
+            (spec §34)
+          properties:
+            git_commit:
+              type:
+                - "null"
+                - string
+            image_digest:
+              type:
+                - "null"
+                - string
+              description: Immutable image digest; a tag would not pin anything
+            dataset:
+              type:
+                - "null"
+                - object
+              properties:
+                name:
+                  type: string
+                version:
+                  type: string
+                version_id:
+                  type: string
+                  format: uuid
+            hyperparameters:
+              type: object
+              additionalProperties: true
+            random_seed:
+              type:
+                - "null"
+                - integer
+        job_count:
+          type: integer
+          description: Training jobs recorded against this experiment
+        started_at:
+          type:
+            - "null"
+            - string
+          format: date-time
+        ended_at:
+          type:
+            - "null"
+            - string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+      title: Experiment
+    def-6:
+      type: object
+      required:
+        - id
+        - name
+        - project
         - state
         - priority
         - resources
@@ -163,10 +288,26 @@ components:
         spec:
           type: object
           additionalProperties: true
+        experiment:
+          type:
+            - "null"
+            - object
+          description: The reproducibility record this run belongs to, if any
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
         attempt:
           type: integer
         max_retries:
           type: integer
+        k8s_job_name:
+          type:
+            - "null"
+            - string
+          description: Name of the Kubernetes Job running this attempt, once launched
         failure_reason:
           type:
             - "null"
@@ -206,7 +347,7 @@ components:
             - string
           format: date-time
       title: TrainingJob
-    def-4:
+    def-7:
       type: object
       required:
         - id
@@ -422,13 +563,366 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/datasets:
+    post:
+      summary: Create a dataset
+      tags:
+        - datasets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-3"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    get:
+      summary: List a project's datasets
+      tags:
+        - datasets
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - datasets
+                properties:
+                  datasets:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-3"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/datasets/{dataset}:
+    get:
+      summary: Get a dataset
+      tags:
+        - datasets
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: dataset
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-3"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/datasets/{dataset}/versions:
+    post:
+      summary: Register a dataset version
+      tags:
+        - datasets
+      description: Versions are immutable. Re-registering an existing version is a 409
+        rather than an update, so an experiment pinned to a version always
+        describes the same data (spec §34).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - version
+                - uri
+              additionalProperties: false
+              properties:
+                version:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                uri:
+                  type: string
+                  minLength: 1
+                  maxLength: 2048
+                digest:
+                  type: string
+                  maxLength: 200
+                size_bytes:
+                  type: integer
+                  minimum: 0
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: dataset
+          required: true
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-4"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    get:
+      summary: List a dataset's versions, newest first
+      tags:
+        - datasets
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: dataset
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - versions
+                properties:
+                  versions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-4"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/datasets/{dataset}/versions/{version}:
+    get:
+      summary: Get one dataset version
+      tags:
+        - datasets
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: dataset
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: version
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-4"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/experiments:
+    post:
+      summary: Create an experiment
+      tags:
+        - experiments
+      description: Captures the reproducibility record for a run. `dataset` and
+        `dataset_version` must be supplied together and must already be
+        registered.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - project
+                - name
+              additionalProperties: false
+              properties:
+                project:
+                  type: string
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                git_commit:
+                  type: string
+                  maxLength: 40
+                image_digest:
+                  type: string
+                  maxLength: 200
+                dataset:
+                  type: string
+                dataset_version:
+                  type: string
+                hyperparameters:
+                  type: object
+                  additionalProperties: true
+                random_seed:
+                  type: integer
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-5"
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    get:
+      summary: List experiments, newest first
+      tags:
+        - experiments
+      parameters:
+        - schema:
+            type: string
+          in: query
+          name: project
+          required: false
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+          in: query
+          name: limit
+          required: false
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - experiments
+                properties:
+                  experiments:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-5"
+  /api/v1/experiments/{id}:
+    get:
+      summary: Get an experiment
+      tags:
+        - experiments
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-5"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
   /api/v1/jobs:
     post:
       summary: Submit a training job
       tags:
         - jobs
-      description: Creates the job and admits it to the queue in one transaction.
-        Nothing executes until Phase 2 wires up Kubernetes.
+      description: Creates the job and admits it to the queue in one transaction. The
+        executor claims it from there and runs it as a Kubernetes Job.
       requestBody:
         required: true
         content:
@@ -443,6 +937,11 @@ paths:
               properties:
                 project:
                   type: string
+                experiment:
+                  type: string
+                  format: uuid
+                  description: Optional experiment to attribute this run to; must be in the same
+                    project
                 name:
                   type: string
                   minLength: 1
@@ -507,7 +1006,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-3"
+                $ref: "#/components/schemas/def-6"
         "400":
           description: Default Response
           content:
@@ -567,7 +1066,7 @@ paths:
                   jobs:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-3"
+                      $ref: "#/components/schemas/def-6"
   /api/v1/jobs/{id}:
     get:
       summary: Get a job
@@ -586,7 +1085,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-3"
+                $ref: "#/components/schemas/def-6"
         "404":
           description: Default Response
           content:
@@ -620,7 +1119,7 @@ paths:
                   events:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-4"
+                      $ref: "#/components/schemas/def-7"
         "404":
           description: Default Response
           content:
@@ -658,7 +1157,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-3"
+                $ref: "#/components/schemas/def-6"
         "404":
           description: Default Response
           content:
@@ -666,6 +1165,86 @@ paths:
               schema:
                 $ref: "#/components/schemas/def-0"
         "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/jobs/{id}/logs:
+    get:
+      summary: Read a job's container logs
+      tags:
+        - jobs
+      description: "Returns the training container's stdout/stderr as read from
+        Kubernetes. Logs live in the cluster, not in AshML: once the Pod is
+        garbage-collected they are gone, which is why the response says whether
+        they are still available rather than returning an empty string."
+      parameters:
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+          in: query
+          name: tail
+          required: false
+          description: Return only the most recent N lines
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: previous
+          required: false
+          description: Read the previous container instance instead of the current one —
+            where the output of a crashed run is found
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - job_id
+                  - available
+                  - logs
+                properties:
+                  job_id:
+                    type: string
+                    format: uuid
+                  state:
+                    type: string
+                    enum:
+                      - CREATED
+                      - QUEUED
+                      - SCHEDULING
+                      - STARTING
+                      - RUNNING
+                      - FAILED
+                      - RETRYING
+                      - CANCELLING
+                      - SUCCEEDED
+                      - CANCELLED
+                  k8s_job_name:
+                    type:
+                      - "null"
+                      - string
+                  available:
+                    type: boolean
+                    description: False when no Pod exists to read logs from
+                  reason:
+                    type:
+                      - "null"
+                      - string
+                    description: Why logs are unavailable, when they are not
+                  logs:
+                    type: string
+        "404":
           description: Default Response
           content:
             application/json:
@@ -681,5 +1260,9 @@ tags:
     description: GPU inventory and telemetry
   - name: projects
     description: Projects and quotas
+  - name: datasets
+    description: Datasets and their immutable versions
+  - name: experiments
+    description: Experiments and reproducibility capture
   - name: jobs
     description: Training jobs
