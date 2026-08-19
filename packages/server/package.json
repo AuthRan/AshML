@@ -12,6 +12,8 @@
     "migrate": "node scripts/migrate.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1113.0",
+    "@aws-sdk/s3-request-presigner": "^3.1113.0",
     "@fastify/swagger": "^9.4.2",
     "@kubernetes/client-node": "^2.0.0",
     "fastify": "^5.2.1",
