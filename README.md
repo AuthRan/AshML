@@ -18,10 +18,13 @@ Running jobs now **report on themselves**: metrics as they train, checkpoints as
 write them, and what the run actually observed itself running on. `ash job metrics <id>`
 shows the curve, `ash job artifacts <id>` shows what it produced.
 
-**Not yet in Phase 4:** artifacts record metadata only — the run uploads its own bytes to
-a URI it already has, and presigned uploads through MinIO are the next step. The Python
-SDK and the model registry are still to come, so reporting today means calling the API
-directly.
+Checkpoints go straight from the training pod to MinIO over a presigned upload, and
+AshML **asks the bucket** whether they arrived before marking one usable: an upload that
+never landed is refused, and one stored somewhere AshML cannot check is labelled `NO` in
+the CHECKED column rather than passing for a verified checkpoint.
+
+**Not yet in Phase 4:** the Python SDK and the model registry, so reporting today means
+calling the API directly.
 
 **Not yet:** GPU jobs cannot run on this host — the machine has two RTX 2080 Tis, but
 installing the NVIDIA container toolkit needs root, so no GPU reaches a k3d node and the
@@ -83,6 +86,8 @@ ash job logs <id> -f     # the container's own output, followed until it finishe
 ash job metrics <id>              # latest value and point count per metric
 ash job metrics <id> --name loss  # the full series, step by step
 ash job artifacts <id>            # checkpoints and models, and whether their bytes exist
+ash artifact get <artifact-id>            # including whether AshML verified them itself
+ash artifact download <artifact-id> -o model.pt   # straight from object storage
 
 # And rolled up across every run of an experiment, for comparing them.
 ash experiment metrics <experiment-id>
@@ -147,6 +152,13 @@ from anywhere and importing nothing.
 | `ASHML_EXECUTOR_ENABLED` | `true` | Set false for a read-only API replica that runs nothing |
 | `ASHML_EXECUTOR_INTERVAL_MS` | `2000` | Status-sync interval; sets the floor on scheduling latency (ADR 0007) |
 | `ASHML_DISCOVERY_INTERVAL_MS` | `15000` | How often node and GPU inventory is refreshed |
+| `ASHML_ARTIFACT_STORE` | `s3` | `s3` (MinIO or AWS) or `none` — no bucket; artifacts may still be registered against a caller-supplied URI, and complete as unverified |
+| `ASHML_S3_BUCKET` | `ashml` | Bucket checkpoints and models are written to |
+| `ASHML_S3_ENDPOINT` | `http://127.0.0.1:9000` | The dev MinIO. **Unset it for real AWS**, where the SDK resolves the host itself |
+| `ASHML_S3_REGION` | `us-east-1` | |
+| `ASHML_S3_ACCESS_KEY` / `ASHML_S3_SECRET_KEY` | dev MinIO credentials | Unset both to use the SDK credential chain (an IAM role in a cluster) |
+| `ASHML_S3_FORCE_PATH_STYLE` | `true` | MinIO serves buckets as a path; set false for AWS |
+| `ASHML_S3_PRESIGN_TTL` | `3600` | Seconds an upload or download URL stays valid |
 | `ASHML_ENDPOINT` | `http://127.0.0.1:8080` | API endpoint the CLI targets |
 | `ASHML_PROJECT` | — | Default project for project-scoped `ash` commands |
 

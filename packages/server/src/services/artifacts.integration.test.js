@@ -1,9 +1,13 @@
 /**
- * Integration tests for the artifact lifecycle.
+ * Integration tests for the artifact lifecycle, with **no artifact store configured**.
  *
- * What is being protected here is a single guarantee: READY means the bytes exist. Most
- * of these tests are about the ways a caller might get an artifact to READY without
- * that being true, and the fact that none of them work.
+ * This is the `none` store: a run that has arranged its own storage registers the URI it
+ * already has, and AshML records the lifecycle without ever being able to check the
+ * bytes. Everything here therefore completes as `verified: false`, which is the point —
+ * an unverifiable artifact must not be able to look like a verified one.
+ *
+ * The other half, where AshML owns the bucket and really does check, is
+ * `artifacts-storage.integration.test.js`, which needs MinIO.
  */
 
 import { test, describe, before, after, beforeEach } from 'node:test';
@@ -12,6 +16,7 @@ import assert from 'node:assert/strict';
 import { buildApp } from '../app.js';
 import { loadConfig } from '../config.js';
 import { createSimBackend } from '../k8s/sim.js';
+import { createNoneStore } from '../storage/none.js';
 import { Phase } from '../k8s/backend.js';
 import { JobState } from '../domain/job-state.js';
 import { ArtifactStatus } from '../domain/artifact-status.js';
@@ -38,7 +43,7 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
       ASHML_VERSION: '0.0.0-test',
     });
     backend = createSimBackend({ namespace: 'ashml-test', autoAdvance: false });
-    app = await buildApp(config, { logger: false, pool, k8s: backend });
+    app = await buildApp(config, { logger: false, pool, k8s: backend, store: createNoneStore() });
     await app.ready();
     await discoverCluster(pool, backend, app.gpuProvider);
   });
@@ -133,7 +138,7 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
 
     const res = await register(job.id);
     assert.equal(res.statusCode, 201, res.payload);
-    const artifact = res.json();
+    const artifact = res.json().artifact;
 
     // Nothing has been uploaded yet, and the row says so rather than implying otherwise.
     assert.equal(artifact.status, ArtifactStatus.PENDING);
@@ -147,7 +152,7 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
 
   test('confirming the upload makes it READY and records what was written', async () => {
     const job = await runningJob();
-    const artifact = (await register(job.id)).json();
+    const artifact = (await register(job.id)).json().artifact;
 
     const res = await complete(artifact.id, { digest: 'sha256:deadbeef', size_bytes: 1_048_576 });
     assert.equal(res.statusCode, 200, res.payload);
@@ -157,10 +162,66 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
     assert.equal(ready.digest, 'sha256:deadbeef');
     assert.equal(ready.size_bytes, 1_048_576);
 
+    // With no store configured there is nothing to ask, so the size is the run's own
+    // claim — and the artifact says as much rather than passing for a checked one.
+    assert.equal(ready.verified, false);
+    assert.match(ready.metadata.verification_note, /no artifact store is configured/);
+
     // And the change is durable, not just what the response said.
     const reread = await app.inject({ method: 'GET', url: `/api/v1/artifacts/${artifact.id}` });
     assert.equal(reread.json().status, ArtifactStatus.READY);
     assert.equal(reread.json().digest, 'sha256:deadbeef');
+    assert.equal(reread.json().verified, false);
+  });
+
+  test('with no store, AshML cannot allocate a location and says so', async () => {
+    const job = await runningJob();
+
+    // `uri` is optional in the schema because a configured store fills it in. Without
+    // one there is nowhere to put the bytes, and guessing a URI would invent a location
+    // nothing writes to.
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/jobs/${job.id}/artifacts`,
+      payload: { kind: 'checkpoint', name: 'epoch-1' },
+    });
+    assert.equal(res.statusCode, 400, res.payload);
+    assert.equal(res.json().error.code, 'URI_REQUIRED');
+  });
+
+  test('a caller-supplied URI comes back with no presigned upload', async () => {
+    const job = await runningJob();
+    const res = await register(job.id);
+
+    // The run arranged its own storage; there is nothing for AshML to sign.
+    assert.equal(res.json().upload, null);
+  });
+
+  test('an unverifiable artifact cannot be downloaded through AshML', async () => {
+    const job = await runningJob();
+    const artifact = (await register(job.id)).json().artifact;
+    await complete(artifact.id);
+
+    // AshML has no credentials for wherever this URI points. Signing it would produce a
+    // URL that does not work, which is worse than saying so.
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/artifacts/${artifact.id}/download`,
+    });
+    assert.equal(res.statusCode, 400, res.payload);
+    assert.equal(res.json().error.code, 'ARTIFACT_NOT_IN_STORE');
+  });
+
+  test('a PENDING artifact is never signed for download', async () => {
+    const job = await runningJob();
+    const artifact = (await register(job.id)).json().artifact;
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/artifacts/${artifact.id}/download`,
+    });
+    assert.equal(res.statusCode, 409, res.payload);
+    assert.equal(res.json().error.code, 'ARTIFACT_NOT_READY');
   });
 
   test('an artifact cannot be registered as already READY', async () => {
@@ -174,12 +235,12 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
     // and the artifact comes back PENDING like any other.
     const res = await register(job.id, { status: ArtifactStatus.READY });
     assert.equal(res.statusCode, 201, res.payload);
-    assert.equal(res.json().status, ArtifactStatus.PENDING);
+    assert.equal(res.json().artifact.status, ArtifactStatus.PENDING);
   });
 
   test('a settled artifact cannot be settled again', async () => {
     const job = await runningJob();
-    const artifact = (await register(job.id)).json();
+    const artifact = (await register(job.id)).json().artifact;
     assert.equal((await complete(artifact.id)).statusCode, 200);
 
     // A second confirm with a different digest would silently rewrite what the stored
@@ -194,7 +255,7 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
 
   test('an abandoned upload is recorded, not deleted', async () => {
     const job = await runningJob();
-    const artifact = (await register(job.id)).json();
+    const artifact = (await register(job.id)).json().artifact;
 
     const res = await fail(artifact.id, { reason: 'pod evicted mid-write' });
     assert.equal(res.statusCode, 200, res.payload);
@@ -210,7 +271,7 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
 
   test('a failed upload cannot later be confirmed', async () => {
     const job = await runningJob();
-    const artifact = (await register(job.id)).json();
+    const artifact = (await register(job.id)).json().artifact;
     assert.equal((await fail(artifact.id)).statusCode, 200);
 
     const res = await complete(artifact.id);
@@ -220,7 +281,7 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
 
   test('failing takes no body', async () => {
     const job = await runningJob();
-    const artifact = (await register(job.id)).json();
+    const artifact = (await register(job.id)).json().artifact;
 
     // The reason is useful but not required; a reporter that has crashed may have none.
     const res = await fail(artifact.id, undefined);
@@ -232,17 +293,16 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
     const job = await runningJob();
     const artifact = (await register(job.id, {
       metadata: { framework: 'pytorch', optimizer: 'adamw' },
-    })).json();
+    })).json().artifact;
 
     const res = await complete(artifact.id, { metadata: { compression: 'zstd' } });
     assert.equal(res.statusCode, 200, res.payload);
 
     // The uploading side does not get to discard what the registering side knew.
-    assert.deepEqual(res.json().metadata, {
-      framework: 'pytorch',
-      optimizer: 'adamw',
-      compression: 'zstd',
-    });
+    const metadata = res.json().metadata;
+    assert.equal(metadata.framework, 'pytorch');
+    assert.equal(metadata.optimizer, 'adamw');
+    assert.equal(metadata.compression, 'zstd');
   });
 
   test('a job that has not launched cannot have produced an artifact', async () => {
@@ -257,7 +317,7 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
   test('a finished run may still confirm its final checkpoint', async () => {
     const job = await submit();
     const launched = await runToRunning(job);
-    const artifact = (await register(job.id, { kind: 'model', name: 'final' })).json();
+    const artifact = (await register(job.id, { kind: 'model', name: 'final' })).json().artifact;
 
     backend._setPhase('ashml-test', launched.k8s_job_name, Phase.SUCCEEDED);
     await runOnce(pool, backend);
@@ -285,9 +345,9 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
 
   test('listing filters by kind and by status', async () => {
     const job = await runningJob();
-    const ckpt = (await register(job.id, { name: 'epoch-1', step: 100 })).json();
+    const ckpt = (await register(job.id, { name: 'epoch-1', step: 100 })).json().artifact;
     await register(job.id, { name: 'epoch-2', step: 200 });
-    const model = (await register(job.id, { kind: 'model', name: 'final', step: null })).json();
+    const model = (await register(job.id, { kind: 'model', name: 'final', step: null })).json().artifact;
     await complete(ckpt.id);
     await complete(model.id);
 
@@ -310,7 +370,7 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
       const experiment = await createExperiment();
       const job = await runningJob({ experiment: experiment.id });
 
-      const artifact = (await register(job.id)).json();
+      const artifact = (await register(job.id)).json().artifact;
       assert.equal(artifact.experiment_id, experiment.id);
 
       const res = await app.inject({
@@ -325,11 +385,11 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
       const experiment = await createExperiment();
 
       const first = await runningJob({ experiment: experiment.id });
-      const a = (await register(first.id, { name: 'run1-final', kind: 'model' })).json();
+      const a = (await register(first.id, { name: 'run1-final', kind: 'model' })).json().artifact;
       await complete(a.id);
 
       const second = await runningJob({ experiment: experiment.id });
-      const b = (await register(second.id, { name: 'run2-final', kind: 'model' })).json();
+      const b = (await register(second.id, { name: 'run2-final', kind: 'model' })).json().artifact;
 
       const res = await app.inject({
         method: 'GET',

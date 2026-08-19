@@ -56,3 +56,34 @@ export async function truncateAll(pool) {
 export function uniqueName(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
+
+/**
+ * Returns a real S3 store if MinIO is reachable, otherwise null.
+ *
+ * Same contract as connectOrNull above, for the same reason: the artifact tests that
+ * need a bucket skip visibly on a machine without one rather than failing, but they are
+ * never quietly replaced by a fake — verifying that an upload landed is the one thing a
+ * fake store could not tell the truth about (spec Rule 5).
+ */
+export async function connectStoreOrNull() {
+  const { createS3Store } = await import('../storage/s3.js');
+  const store = createS3Store({
+    bucket: process.env.ASHML_TEST_S3_BUCKET ?? 'ashml-test',
+    endpoint: process.env.ASHML_S3_ENDPOINT ?? 'http://127.0.0.1:9000',
+    accessKeyId: process.env.ASHML_S3_ACCESS_KEY ?? 'ashml',
+    secretAccessKey: process.env.ASHML_S3_SECRET_KEY ?? 'ashml-dev-secret',
+    forcePathStyle: true,
+  });
+
+  try {
+    await store.ensureBucket();
+    return store;
+  } catch {
+    await store.close().catch(() => {});
+    return null;
+  }
+}
+
+export const STORE_SKIP_MESSAGE =
+  `MinIO not reachable at ${process.env.ASHML_S3_ENDPOINT ?? 'http://127.0.0.1:9000'} — `
+  + 'run `npm run db:up` to include these tests';

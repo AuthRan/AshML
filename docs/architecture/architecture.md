@@ -249,6 +249,18 @@ nothing may resume from, register, or serve an artifact in any other status. An
 abandoned upload is marked `FAILED` and kept, so the gap stays visible rather than
 looking like it was never attempted.
 
+Uploads are **presigned**: registration returns a PUT URL and the pod writes straight to
+the bucket. Blobs never traverse the control plane, so the API's memory limit is not in
+the path of every model size.
+
+Completion is **verified against the store** — AshML issues a HEAD and refuses an object
+that is not there or whose size disagrees with what the run claimed. Storage sits behind
+a seam (`src/storage/store.js`) in the same shape as the GPU provider and the execution
+backend, with `s3` (real: MinIO locally, S3 unchanged in a cluster) and `none`. `none` is
+not a simulation: it is a control plane with no bucket, where artifacts may still be
+registered against a URI the caller supplies and completion is recorded as
+`verified: false` rather than being allowed to resemble a checked one.
+
 ## 11. Observability contract
 
 Every component emits structured JSON logs via `pino`, carrying whichever of

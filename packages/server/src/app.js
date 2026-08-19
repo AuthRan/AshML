@@ -17,8 +17,13 @@ import './gpu/sim.js';
 import './k8s/kubernetes.js';
 import './k8s/sim.js';
 
+// And for artifact storage.
+import './storage/s3.js';
+import './storage/none.js';
+
 import { availableProviders, createProvider, deviceSchema } from './gpu/provider.js';
 import { availableBackends, createBackend } from './k8s/backend.js';
+import { availableStores, createStore } from './storage/store.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerGpuRoutes } from './routes/gpus.js';
 import { registerProjectRoutes } from './routes/projects.js';
@@ -59,12 +64,14 @@ export const errorSchema = {
  *   from config and closed on app.close()
  * @param {object} [options.k8s] inject an execution backend; otherwise one is built
  *   from config
+ * @param {object} [options.store] inject an artifact store; otherwise one is built
+ *   from config
  *
  * Note this does not start the executor loop — that belongs to index.js, alongside
  * binding a port, so that building an app for a test never starts claiming jobs off
  * a shared queue.
  */
-export async function buildApp(config, { logger = true, pool = null, k8s = null } = {}) {
+export async function buildApp(config, { logger = true, pool = null, k8s = null, store = null } = {}) {
   const app = Fastify({
     logger: logger === false ? false : { level: config.logLevel },
     // Correlates every log line for a request; carried into job_id/experiment_id
@@ -100,11 +107,25 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null 
   }
   app.decorate('k8s', backend);
 
-  // An injected pool belongs to the caller; one we create is ours to close.
+  let artifactStore;
+  try {
+    artifactStore = store ?? createStore(config.artifactStore, config.artifactStoreOptions);
+  } catch (err) {
+    throw new Error(
+      `${err.message}\nSet ASHML_ARTIFACT_STORE to one of: ${availableStores().join(', ')}`,
+      { cause: err },
+    );
+  }
+  app.decorate('artifactStore', artifactStore);
+
+  // An injected pool belongs to the caller; one we create is ours to close. Same rule
+  // for the artifact store, whose S3 client holds sockets open.
   const ownsPool = pool === null;
+  const ownsStore = store === null;
   app.decorate('db', pool ?? createPool(config));
   app.addHook('onClose', async (instance) => {
     if (ownsPool) await instance.db.end();
+    if (ownsStore) await instance.artifactStore.close();
   });
 
   app.addSchema(errorSchema);

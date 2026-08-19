@@ -44,6 +44,26 @@ export function loadConfig(env = process.env) {
     // seconds; neither is worth a `LIST nodes` and an `nvidia-smi` fork on every job pass.
     discoveryIntervalMs: parseCount(env.ASHML_DISCOVERY_INTERVAL_MS, 'ASHML_DISCOVERY_INTERVAL_MS') ?? 15_000,
 
+    // Artifact storage (Phase 4). `s3` is real and is the default, in the same spirit
+    // as the GPU provider and the execution backend; `none` is the honest description of
+    // a control plane with no bucket, not a simulation of one.
+    artifactStore: env.ASHML_ARTIFACT_STORE ?? 's3',
+    artifactStoreOptions: {
+      bucket: env.ASHML_S3_BUCKET ?? 'ashml',
+      // Defaults match deploy/local/docker-compose.yml, exactly as databaseUrl below
+      // defaults to the compose Postgres. Unset the endpoint for real AWS, where the
+      // SDK resolves the host and the credential chain by itself.
+      endpoint: env.ASHML_S3_ENDPOINT ?? 'http://127.0.0.1:9000',
+      region: env.ASHML_S3_REGION ?? 'us-east-1',
+      accessKeyId: env.ASHML_S3_ACCESS_KEY ?? 'ashml',
+      secretAccessKey: env.ASHML_S3_SECRET_KEY ?? 'ashml-dev-secret',
+      // MinIO serves buckets as a path; AWS serves them as a subdomain.
+      forcePathStyle: parseBool(env.ASHML_S3_FORCE_PATH_STYLE, 'ASHML_S3_FORCE_PATH_STYLE', true),
+      // Long enough for a large checkpoint on a slow link, short enough that a URL
+      // leaked into a log is not a standing grant.
+      presignTtlSeconds: parseCount(env.ASHML_S3_PRESIGN_TTL, 'ASHML_S3_PRESIGN_TTL') ?? 3600,
+    },
+
     databaseUrl: env.ASHML_DATABASE_URL
       ?? 'postgresql://ashml:ashml@127.0.0.1:5432/ashml',
     databasePoolMax: parseCount(env.ASHML_DB_POOL_MAX, 'ASHML_DB_POOL_MAX') ?? 10,

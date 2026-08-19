@@ -8,6 +8,8 @@
  */
 
 import { readFile } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 
 import { Command } from 'commander';
 import Table from 'cli-table3';
@@ -42,6 +44,25 @@ function gib(bytes) {
   return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 }
 
+/**
+ * A byte count at whatever scale it happens to be.
+ *
+ * `gib` is right for node memory, which is always gigabytes. Artifacts are not: a
+ * checkpoint may be 300 KB or 30 GB, and rendering the first as "0.0 GiB" tells the
+ * reader nothing except that something is probably broken.
+ */
+function size(bytes) {
+  if (!bytes) return '-';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`;
+}
+
 /** Compact relative age, e.g. "3m" — job lists are read at a glance. */
 function age(isoTimestamp) {
   if (!isoTimestamp) return '-';
@@ -63,6 +84,18 @@ function num(value) {
   const abs = Math.abs(value);
   if (abs !== 0 && (abs < 1e-4 || abs >= 1e7)) return value.toExponential(3);
   return String(Number(value.toPrecision(6)));
+}
+
+/**
+ * Whether AshML checked the bytes are there, as against the run having said so.
+ *
+ * Three distinct answers, never collapsed into two: not completed yet, completed and
+ * checked, completed but uncheckable (spec Rule 5).
+ */
+function verifiedLabel(artifact) {
+  if (artifact.verified === true) return 'yes';
+  if (artifact.verified === false) return 'NO';
+  return '-';
 }
 
 function newTable(head) {
@@ -465,14 +498,15 @@ job
         console.log('No artifacts registered for this job.');
         return;
       }
-      const table = newTable(['NAME', 'KIND', 'STATUS', 'STEP', 'SIZE', 'URI']);
+      const table = newTable(['NAME', 'KIND', 'STATUS', 'CHECKED', 'STEP', 'SIZE', 'URI']);
       for (const a of artifacts) {
         table.push([
           a.name,
           a.kind,
           a.status,
+          verifiedLabel(a),
           a.step ?? '-',
-          a.size_bytes ? gib(a.size_bytes) : '-',
+          size(a.size_bytes),
           a.uri,
         ]);
       }
@@ -484,6 +518,13 @@ job
       if (unusable.length > 0) {
         console.log(`\n  NOTE: ${unusable.length} artifact(s) are not READY. Their bytes are`);
         console.log('  not confirmed to exist — do not resume from or serve them.');
+      }
+
+      // A different and weaker caveat: READY, but AshML never saw the bytes itself.
+      const unchecked = artifacts.filter((a) => a.status === 'READY' && a.verified === false);
+      if (unchecked.length > 0) {
+        console.log(`\n  NOTE: ${unchecked.length} READY artifact(s) were NOT verified by AshML.`);
+        console.log('  They live outside its store, so their size and digest are the run\'s own claim.');
       }
     });
   });
@@ -801,19 +842,83 @@ experiment
         console.log('No artifacts registered by any run of this experiment.');
         return;
       }
-      const table = newTable(['NAME', 'KIND', 'STATUS', 'RUN', 'SIZE', 'URI']);
+      const table = newTable(['NAME', 'KIND', 'STATUS', 'CHECKED', 'RUN', 'SIZE', 'URI']);
       for (const a of artifacts) {
         table.push([
           a.name,
           a.kind,
           a.status,
+          verifiedLabel(a),
           a.job ? a.job.id.slice(0, 8) : '-',
-          a.size_bytes ? gib(a.size_bytes) : '-',
+          size(a.size_bytes),
           a.uri,
         ]);
       }
       console.log(table.toString());
     });
+  });
+
+// --------------------------------------------------------------- artifact
+
+const artifact = program.command('artifact').description('Inspect and fetch run artifacts');
+
+artifact
+  .command('get <id>')
+  .description('Show an artifact in detail')
+  .option('--json', 'emit raw JSON')
+  .action(async (id, opts) => {
+    const a = await api(endpoint(), `/api/v1/artifacts/${id}`);
+    output(opts, a, () => {
+      console.log(`name:      ${a.name}`);
+      console.log(`id:        ${a.id}`);
+      console.log(`kind:      ${a.kind}`);
+      console.log(`status:    ${a.status}`);
+      console.log(`uri:       ${a.uri}`);
+      console.log(`digest:    ${a.digest ?? '-'}`);
+      console.log(`size:      ${size(a.size_bytes)}`);
+      console.log(`step:      ${a.step ?? '-'}`);
+      console.log(`job:       ${a.job ? `${a.job.name} (${a.job.id})` : '-'}`);
+      console.log(`created:   ${a.created_at}`);
+
+      // Said in words, not just a column: this is the difference between a checkpoint
+      // and a claim about one.
+      if (a.verified === true) {
+        console.log('verified:  yes — AshML found these bytes in its store');
+      } else if (a.verified === false) {
+        console.log('verified:  NO — outside AshML\'s store; size and digest are the run\'s claim');
+        if (a.metadata?.verification_note) {
+          console.log(`           (${a.metadata.verification_note})`);
+        }
+      } else {
+        console.log('verified:  - (not completed)');
+      }
+    });
+  });
+
+artifact
+  .command('download <id>')
+  .description('Get a time-limited URL to fetch an artifact\'s bytes')
+  .option('-o, --output <file>', 'write the bytes to this file instead of printing the URL')
+  .option('--json', 'emit raw JSON')
+  .action(async (id, opts) => {
+    const body = await api(endpoint(), `/api/v1/artifacts/${id}/download`);
+
+    if (!opts.output) {
+      return output(opts, body, () => {
+        console.log(body.url);
+        console.log(`\nexpires: ${body.expires_at}`);
+      });
+    }
+
+    // Streamed to disk rather than buffered: a model checkpoint is exactly the kind of
+    // thing that does not fit in memory, and the bytes come from the store directly.
+    const res = await fetch(body.url);
+    if (!res.ok) {
+      throw new Error(`fetching ${body.uri} failed: ${res.status} ${res.statusText}`);
+    }
+    await pipeline(res.body, createWriteStream(opts.output));
+    console.log(`wrote ${opts.output}`);
+    return undefined;
   });
 
 // --------------------------------------------------------------------- gpu

@@ -566,6 +566,13 @@ components:
         metadata:
           type: object
           additionalProperties: true
+        verified:
+          type:
+            - "null"
+            - boolean
+          description: Whether AshML asked the store and found the bytes. false means it
+            could not ask — no store configured, or a URI outside it — not that
+            the check failed. null until the artifact is completed.
         job:
           type:
             - "null"
@@ -1976,8 +1983,9 @@ paths:
       summary: Register an artifact a run is about to write
       tags:
         - artifacts
-      description: "Returns a PENDING artifact. Upload the bytes to `uri`, then
-        confirm with POST /api/v1/artifacts/{id}/complete. An artifact cannot be
+      description: "Returns a PENDING artifact and, unless the caller supplied its own
+        `uri`, a presigned PUT to write the bytes with. Upload, then confirm
+        with POST /api/v1/artifacts/{id}/complete. An artifact cannot be
         registered as READY: this API cannot see the bytes, so it will not claim
         they exist."
       requestBody:
@@ -1989,7 +1997,6 @@ paths:
               required:
                 - kind
                 - name
-                - uri
               additionalProperties: false
               properties:
                 kind:
@@ -2004,6 +2011,8 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 1000
+                  description: Only when the run has arranged its own storage. Omit it and AshML
+                    allocates a location and returns a presigned upload.
                 step:
                   type: integer
                   minimum: 0
@@ -2023,7 +2032,27 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-10"
+                type: object
+                required:
+                  - artifact
+                properties:
+                  artifact:
+                    $ref: "#/components/schemas/def-10"
+                  upload:
+                    type:
+                      - "null"
+                      - object
+                    description: How to write the bytes. Null when the caller supplied its own
+                      `uri`. The URL is time-limited and is not stored —
+                      register again to get a fresh one.
+                    properties:
+                      method:
+                        type: string
+                      url:
+                        type: string
+                      expires_at:
+                        type: string
+                        format: date-time
         "400":
           description: Default Response
           content:
@@ -2092,8 +2121,11 @@ paths:
       summary: Confirm an artifact’s bytes have landed
       tags:
         - artifacts
-      description: "Moves PENDING to READY. The digest is required: it is the whole of
-        what makes a stored checkpoint trustworthy later."
+      description: "Moves PENDING to READY. AshML asks the store whether the object is
+        actually there and how big it is: an upload that never landed is
+        refused, and so is a size that disagrees with what is stored. Where the
+        URI is outside the configured store the artifact still completes, marked
+        `verified: false`."
       requestBody:
         required: true
         content:
@@ -2183,6 +2215,60 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/def-10"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/artifacts/{id}/download:
+    get:
+      summary: Get a time-limited URL to read an artifact
+      tags:
+        - artifacts
+      description: "The bytes are served by object storage, not by this API. Only
+        READY artifacts can be signed for: a link to a PENDING one would resolve
+        to nothing, or worse, to a partial checkpoint that loads."
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - url
+                  - expires_at
+                properties:
+                  artifact_id:
+                    type: string
+                    format: uuid
+                  uri:
+                    type: string
+                  url:
+                    type: string
+                  expires_at:
+                    type: string
+                    format: date-time
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
         "404":
           description: Default Response
           content:

@@ -149,7 +149,7 @@ and placement starts using it (ADR 0008).
 
 ---
 
-## Phase 4 — ML Lifecycle *(current — tracking done, storage and SDK next)*
+## Phase 4 — ML Lifecycle *(current — tracking and storage done, SDK and registry next)*
 
 Spec milestones 6 and 7.
 
@@ -158,7 +158,7 @@ Spec milestones 6 and 7.
 - ~~Experiment tracking with full reproducibility capture (git SHA, dataset version,
   hyperparameters, image digest, seed, hardware)~~ **done** — intent was already captured
   in Phase 1; the observed half (framework, hardware, SDK, run window) lands here
-- MinIO artifact storage: presigned uploads, so the run writes bytes AshML can serve back
+- ~~MinIO artifact storage: presigned uploads, so the run writes bytes AshML can serve back~~ **done**
 - Python SDK: the thin client that makes a training script report without ceremony
 - Model registry: models, versions, lifecycle states
 - Real workload: ResNet-18 on CIFAR-10, single GPU
@@ -178,12 +178,30 @@ metrics are pushed.
 The cost is stated plainly in the ADR: a training script cannot be unmodified. AshML sees
 nothing from a job that does not opt in.
 
+### What "READY" is worth
+
+Artifact bytes go straight from the training pod to object storage over a presigned PUT;
+they never pass through the control plane, because a 2 GB checkpoint proxied through a
+Fastify handler would occupy an event loop that has a scheduler to run.
+
+On completion AshML **asks the store** whether the object is there and how big it is. An
+upload that never landed is refused, and so is a size that disagrees with what is stored.
+A run cannot talk its checkpoint into existence.
+
+Where the store cannot be asked — no bucket configured, or a URI the run brought from
+storage AshML knows nothing about — the artifact still completes, but is recorded and
+displayed as `verified: false`. The two cases must never look alike, so `ash job
+artifacts` prints a CHECKED column and says plainly which is which (spec Rule 5).
+
 ### Deferred within this phase
 
-- **Presigned uploads.** `@aws-sdk/client-s3` is a dependency and MinIO runs in
-  `make db-up`, but the artifact endpoints record metadata only — the run uploads to a
-  URI it already has. The lifecycle (`PENDING` → `READY`/`FAILED`) is what makes adding
-  the upload safe later, and it is real now.
+- **Digest verification.** The size is checked against the store; the digest is the run's
+  own and is stored unchecked. Verifying it means reading the object back, which for a
+  30 GB checkpoint costs more than it proves — S3's ETag is kept alongside as the store's
+  own answer. A `--verify-digest` path belongs with the checkpoint-resume work in Phase 5,
+  where something actually loads the bytes.
+- **Garbage collection.** A PENDING artifact whose run died leaves a row and possibly a
+  partial object. Nothing sweeps them yet.
 - **Authentication on the ingest path.** The API takes writes from inside the cluster and
   is unauthenticated, like the rest of v1 (auth is Phase 10). Two things limit the damage
   and both are deliberate: the experiment id is copied from the job server-side rather

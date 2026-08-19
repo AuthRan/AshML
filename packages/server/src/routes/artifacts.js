@@ -34,6 +34,13 @@ const artifactSchema = {
     size_bytes: { type: 'integer' },
     step: { type: ['integer', 'null'], description: 'Training step, for a checkpoint' },
     metadata: { type: 'object', additionalProperties: true },
+    verified: {
+      type: ['boolean', 'null'],
+      description:
+        'Whether AshML asked the store and found the bytes. false means it could not '
+        + 'ask — no store configured, or a URI outside it — not that the check failed. '
+        + 'null until the artifact is completed.',
+    },
     job: {
       type: ['object', 'null'],
       properties: {
@@ -77,24 +84,50 @@ export async function registerArtifactRoutes(app) {
         tags: ['artifacts'],
         summary: 'Register an artifact a run is about to write',
         description:
-          'Returns a PENDING artifact. Upload the bytes to `uri`, then confirm with '
+          'Returns a PENDING artifact and, unless the caller supplied its own `uri`, a '
+          + 'presigned PUT to write the bytes with. Upload, then confirm with '
           + 'POST /api/v1/artifacts/{id}/complete. An artifact cannot be registered as '
           + 'READY: this API cannot see the bytes, so it will not claim they exist.',
         params: idParam,
         body: {
           type: 'object',
-          required: ['kind', 'name', 'uri'],
+          required: ['kind', 'name'],
           additionalProperties: false,
           properties: {
             kind: { type: 'string', minLength: 1, maxLength: 50 },
             name: { type: 'string', minLength: 1, maxLength: 200 },
-            uri: { type: 'string', minLength: 1, maxLength: 1000 },
+            uri: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 1000,
+              description:
+                'Only when the run has arranged its own storage. Omit it and AshML '
+                + 'allocates a location and returns a presigned upload.',
+            },
             step: { type: 'integer', minimum: 0 },
             metadata: { type: 'object', additionalProperties: true },
           },
         },
         response: {
-          201: { $ref: 'Artifact#' },
+          201: {
+            type: 'object',
+            required: ['artifact'],
+            properties: {
+              artifact: { $ref: 'Artifact#' },
+              upload: {
+                type: ['object', 'null'],
+                description:
+                  'How to write the bytes. Null when the caller supplied its own `uri`. '
+                  + 'The URL is time-limited and is not stored — register again to get '
+                  + 'a fresh one.',
+                properties: {
+                  method: { type: 'string' },
+                  url: { type: 'string' },
+                  expires_at: { type: 'string', format: 'date-time' },
+                },
+              },
+            },
+          },
           400: { $ref: 'Error#' },
           404: { $ref: 'Error#' },
           409: { $ref: 'Error#' },
@@ -103,18 +136,30 @@ export async function registerArtifactRoutes(app) {
     },
     async (request, reply) => {
       const body = request.body;
-      const artifact = await artifactService.registerArtifact(app.db, request.params.id, {
-        kind: body.kind,
-        name: body.name,
-        uri: body.uri,
-        step: body.step ?? null,
-        metadata: body.metadata ?? {},
-      });
+      const result = await artifactService.registerArtifact(
+        app.db,
+        app.artifactStore,
+        request.params.id,
+        {
+          kind: body.kind,
+          name: body.name,
+          uri: body.uri ?? null,
+          step: body.step ?? null,
+          metadata: body.metadata ?? {},
+        },
+      );
       request.log.info(
-        { artifact_id: artifact.id, job_id: request.params.id, kind: artifact.kind },
+        {
+          artifact_id: result.artifact.id,
+          job_id: request.params.id,
+          kind: result.artifact.kind,
+          presigned: result.upload !== null,
+        },
         'artifact registered',
       );
-      return reply.status(201).send(artifact);
+      // The upload URL is deliberately absent from every other representation: it is a
+      // credential, and it does not belong in a list anyone can read.
+      return reply.status(201).send({ artifact: result.artifact, upload: result.upload });
     },
   );
 
@@ -125,8 +170,10 @@ export async function registerArtifactRoutes(app) {
         tags: ['artifacts'],
         summary: 'Confirm an artifact’s bytes have landed',
         description:
-          'Moves PENDING to READY. The digest is required: it is the whole of what '
-          + 'makes a stored checkpoint trustworthy later.',
+          'Moves PENDING to READY. AshML asks the store whether the object is actually '
+          + 'there and how big it is: an upload that never landed is refused, and so is '
+          + 'a size that disagrees with what is stored. Where the URI is outside the '
+          + 'configured store the artifact still completes, marked `verified: false`.',
         params: idParam,
         body: {
           type: 'object',
@@ -151,13 +198,18 @@ export async function registerArtifactRoutes(app) {
       },
     },
     async (request) => {
-      const artifact = await artifactService.completeArtifact(app.db, request.params.id, {
-        digest: request.body.digest,
-        sizeBytes: request.body.size_bytes,
-        metadata: request.body.metadata ?? {},
-      });
+      const artifact = await artifactService.completeArtifact(
+        app.db,
+        app.artifactStore,
+        request.params.id,
+        {
+          digest: request.body.digest,
+          sizeBytes: request.body.size_bytes,
+          metadata: request.body.metadata ?? {},
+        },
+      );
       request.log.info(
-        { artifact_id: artifact.id, size_bytes: artifact.size_bytes },
+        { artifact_id: artifact.id, size_bytes: artifact.size_bytes, verified: artifact.verified },
         'artifact ready',
       );
       return artifact;
@@ -189,6 +241,37 @@ export async function registerArtifactRoutes(app) {
     async (request) => artifactService.failArtifact(app.db, request.params.id, {
       reason: request.body?.reason ?? 'upload abandoned',
     }),
+  );
+
+  app.get(
+    '/api/v1/artifacts/:id/download',
+    {
+      schema: {
+        tags: ['artifacts'],
+        summary: 'Get a time-limited URL to read an artifact',
+        description:
+          'The bytes are served by object storage, not by this API. Only READY '
+          + 'artifacts can be signed for: a link to a PENDING one would resolve to '
+          + 'nothing, or worse, to a partial checkpoint that loads.',
+        params: idParam,
+        response: {
+          200: {
+            type: 'object',
+            required: ['url', 'expires_at'],
+            properties: {
+              artifact_id: { type: 'string', format: 'uuid' },
+              uri: { type: 'string' },
+              url: { type: 'string' },
+              expires_at: { type: 'string', format: 'date-time' },
+            },
+          },
+          400: { $ref: 'Error#' },
+          404: { $ref: 'Error#' },
+          409: { $ref: 'Error#' },
+        },
+      },
+    },
+    async (request) => artifactService.presignDownload(app.db, app.artifactStore, request.params.id),
   );
 
   app.get(

@@ -34,6 +34,10 @@ function toArtifact(row) {
     size_bytes: row.size_bytes,
     step: row.step,
     metadata: row.metadata,
+    // Surfaced out of metadata rather than buried in it: whether AshML asked the store
+    // if these bytes exist is the difference between a checkpoint and a claim. null
+    // means the artifact has not been completed yet.
+    verified: typeof row.metadata?.verified === 'boolean' ? row.metadata.verified : null,
     job: row.job_id ? { id: row.job_id, name: row.job_name } : null,
     project: row.project_name ?? null,
     experiment_id: row.experiment_id,
