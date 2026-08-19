@@ -1,0 +1,16 @@
+# The trainer image is built from the repository root so it can carry the Python SDK
+# alongside the workload. Without this, the build context would include node_modules and
+# the git history — hundreds of megabytes shipped to the daemon to produce a 60 MB image.
+node_modules
+**/node_modules
+.git
+.github
+coverage
+*.log
+
+# Nothing in the control plane belongs in a training image.
+packages
+db
+api
+docs
+deploy/local

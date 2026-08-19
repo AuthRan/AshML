@@ -1,0 +1,30 @@
+# Exercises the Phase 4 reporting contract inside the cluster: metrics pushed from the
+# container, checkpoints uploaded to object storage, the experiment stamped by the run.
+#
+#   ash experiment create sdk-smoke --project vision
+#   ash job submit examples/training/sdk-smoke.yaml --experiment <experiment-id>
+#
+# This trains nothing. The numbers are synthetic and are labelled as such all the way
+# to the artifact metadata (spec Rule 5) — the real workload is ResNet-18 on CIFAR-10.
+#
+# The control plane must be reachable from the pod (ASHML_API_ADVERTISE_URL) and the
+# artifact store's presigned URLs must be too: they are fetched by the *container*, not
+# by the control plane, so ASHML_S3_ENDPOINT of 127.0.0.1 resolves to the pod itself.
+
+project: vision
+name: sdk-smoke
+
+priority: MEDIUM
+max_retries: 0
+
+resources:
+  cpu: 1
+  memory_bytes: 536870912   # 512 MiB
+
+spec:
+  image: ashml/trainer:v1
+  command:
+    - python
+    - sdk_smoke.py
+  env:
+    SMOKE_STEPS: "30"

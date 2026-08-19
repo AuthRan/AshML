@@ -79,11 +79,11 @@ function resourceRequirements(resources) {
  *
  * The `ASHML_*` variables are the platform's half of the contract: they are what lets
  * a training script report metrics and checkpoints back against the right run without
- * being told twice (the Phase 4 SDK reads exactly these). User-supplied `spec.env`
+ * being told twice (the Python SDK reads exactly these). User-supplied `spec.env`
  * is applied first so it can never overwrite them — a job that shadowed
  * `ASHML_JOB_ID` would report its results onto another job's record.
  */
-function containerEnv(job) {
+function containerEnv(job, { apiUrl = null } = {}) {
   const env = Object.entries(job.spec.env ?? {}).map(([name, value]) => ({
     name,
     value: String(value),
@@ -95,6 +95,12 @@ function containerEnv(job) {
     ASHML_PROJECT: job.project,
     ASHML_ATTEMPT: String(job.attempt ?? 0),
   };
+  // Omitted rather than guessed when unconfigured: a wrong endpoint makes every report
+  // fail with a connection error inside the pod, which is far harder to diagnose than
+  // an SDK that says plainly it was not told where to report.
+  if (apiUrl) {
+    reserved.ASHML_ENDPOINT = apiUrl;
+  }
   if (job.experiment?.id) {
     reserved.ASHML_EXPERIMENT_ID = job.experiment.id;
   }
@@ -133,7 +139,7 @@ function podPlacement(nodeName) {
  * @param {string} [options.nodeName] the node AshML's scheduler chose, if any
  * @returns {object} a Kubernetes batch/v1 Job
  */
-export function buildJobManifest(job, { namespace = 'ashml-jobs', nodeName = null } = {}) {
+export function buildJobManifest(job, { namespace = 'ashml-jobs', nodeName = null, apiUrl = null } = {}) {
   if (!job.spec?.image) {
     throw new Error(`job ${job.id}: spec.image is required to build a Kubernetes Job`);
   }
@@ -166,7 +172,7 @@ export function buildJobManifest(job, { namespace = 'ashml-jobs', nodeName = nul
     name: 'training',
     image: job.spec.image,
     imagePullPolicy: job.spec.image_pull_policy ?? 'IfNotPresent',
-    env: containerEnv(job),
+    env: containerEnv(job, { apiUrl }),
     resources: resourceRequirements(job.resources),
   };
   if (Array.isArray(job.spec.command) && job.spec.command.length > 0) {

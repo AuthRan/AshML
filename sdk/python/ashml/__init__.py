@@ -1,0 +1,125 @@
+"""AshML's training SDK: the client half of the reporting contract.
+
+A run reports its own metrics and checkpoints rather than being scraped (ADR 0009),
+which means a training script has to say something. This package exists to make that
+"something" as close to one line as it can be::
+
+    import ashml
+
+    with ashml.init() as run:
+        for step, batch in enumerate(loader):
+            loss = train_step(batch)
+            run.log_metrics({"loss": loss.item()}, step=step)
+        run.log_artifact("checkpoints/final.pt", kind="model")
+
+``init()`` takes its identity from the environment AshML injects into every training
+container — ``ASHML_ENDPOINT``, ``ASHML_JOB_ID``, ``ASHML_EXPERIMENT_ID`` — so the same
+script runs unchanged under the platform and, with those set by hand, outside it.
+
+No third-party dependencies, on purpose: a training image is a fragile enough
+dependency graph already.
+"""
+
+from __future__ import annotations
+
+import os
+
+from ._client import ApiError, Client
+from ._run import Artifact, Run
+
+__version__ = "0.1.0"
+
+__all__ = ["init", "Run", "Artifact", "ApiError", "detect_hardware", "detect_framework", "__version__"]
+
+
+def init(
+    *,
+    endpoint: str | None = None,
+    job_id: str | None = None,
+    experiment_id: str | None = None,
+    report_start: bool = True,
+    strict: bool = False,
+    timeout: float = 10.0,
+    **run_options,
+) -> Run:
+    """Starts reporting for the current job.
+
+    Every argument defaults to the environment AshML sets in the container, so under the
+    platform this is called with no arguments at all. Passing them explicitly is for
+    running the same script outside a job.
+
+    :param report_start: also stamps the experiment's start and records the framework
+        and hardware this run observed. Turn it off for a script that attaches to an
+        already-running experiment.
+    :param strict: raise instead of logging when reporting fails. The default is false
+        because losing a metric must not lose a training run; set it true in tests,
+        where a silent drop is exactly what you want to hear about.
+
+    :raises RuntimeError: if there is no job id or no endpoint. Guessing either would
+        mean reporting into the void, or worse, onto another run's record.
+    """
+    endpoint = endpoint or os.environ.get("ASHML_ENDPOINT")
+    job_id = job_id or os.environ.get("ASHML_JOB_ID")
+    experiment_id = experiment_id or os.environ.get("ASHML_EXPERIMENT_ID") or None
+
+    if not job_id:
+        raise RuntimeError(
+            "ashml.init(): no job id. Inside a training job AshML sets ASHML_JOB_ID; "
+            "outside one, pass job_id= explicitly."
+        )
+    if not endpoint:
+        raise RuntimeError(
+            "ashml.init(): no endpoint. AshML sets ASHML_ENDPOINT in the container when "
+            "the control plane is configured with an advertised URL "
+            "(ASHML_API_ADVERTISE_URL); outside a job, pass endpoint= explicitly."
+        )
+
+    run = Run(
+        Client(endpoint, timeout=timeout),
+        job_id,
+        experiment_id=experiment_id,
+        strict=strict,
+        **run_options,
+    )
+
+    if report_start:
+        run.report_started(framework=detect_framework(), hardware=detect_hardware())
+
+    return run
+
+
+def detect_framework() -> str:
+    """``"pytorch 2.4.1"``, or an empty string if there is nothing to detect.
+
+    Empty rather than a guess: an experiment record saying the run used a framework it
+    did not is worse than one saying nothing (spec Rule 5).
+    """
+    try:
+        import torch
+    except ImportError:
+        return ""
+    return f"pytorch {torch.__version__}"
+
+
+def detect_hardware() -> dict:
+    """What this process can actually see of the machine it landed on.
+
+    Reports only what the framework tells it. There is no fallback that infers a GPU
+    from an environment variable or a device file — an experiment's hardware record is
+    read later as evidence, and a plausible guess is the one thing it must never contain.
+    """
+    try:
+        import torch
+    except ImportError:
+        return {}
+
+    if not torch.cuda.is_available():
+        return {"gpus": 0, "cuda": None}
+
+    devices = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
+    return {
+        "gpus": len(devices),
+        "devices": devices,
+        "cuda": torch.version.cuda,
+        "torch": torch.__version__,
+    }

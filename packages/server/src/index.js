@@ -55,6 +55,8 @@ if (config.executorEnabled) {
   executor = startExecutor(app.db, app.k8s, {
     logger: app.log,
     intervalMs: config.executorIntervalMs,
+    // What training pods are told to report back to (see config.apiAdvertiseUrl).
+    apiUrl: config.apiAdvertiseUrl,
   });
 }
 

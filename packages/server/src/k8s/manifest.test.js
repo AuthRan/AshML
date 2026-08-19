@@ -138,6 +138,33 @@ describe('buildJobManifest', () => {
     assert.ok(!env.some((e) => e.name === 'ASHML_EXPERIMENT_ID'));
   });
 
+  test('tells the container where to report, when configured', () => {
+    const env = Object.fromEntries(
+      buildJobManifest(makeJob(), { apiUrl: 'http://ashml.ashml.svc:8080' })
+        .spec.template.spec.containers[0].env.map((e) => [e.name, e.value]),
+    );
+    assert.equal(env.ASHML_ENDPOINT, 'http://ashml.ashml.svc:8080');
+  });
+
+  test('omits the endpoint rather than guessing one', () => {
+    // A wrong endpoint makes every report inside the pod fail with a connection error,
+    // which is much harder to diagnose than an SDK saying it was never told where to
+    // report. The API binds 0.0.0.0, which is not an address anything else can reach.
+    const env = buildJobManifest(makeJob()).spec.template.spec.containers[0].env;
+    assert.ok(!env.some((e) => e.name === 'ASHML_ENDPOINT'));
+  });
+
+  test('a user env var cannot shadow ASHML_ENDPOINT and redirect the run’s reports', () => {
+    const job = makeJob({
+      spec: { image: 'busybox', env: { ASHML_ENDPOINT: 'http://attacker.example' } },
+    });
+    const entries = buildJobManifest(job, { apiUrl: 'http://ashml.ashml.svc:8080' })
+      .spec.template.spec.containers[0].env.filter((e) => e.name === 'ASHML_ENDPOINT');
+
+    assert.equal(entries.length, 1, 'a duplicate name would let the last one win');
+    assert.equal(entries[0].value, 'http://ashml.ashml.svc:8080');
+  });
+
   test('a user env var cannot shadow ASHML_JOB_ID and misattribute the run', () => {
     const job = makeJob({
       spec: { image: 'busybox', env: { ASHML_JOB_ID: 'someone-elses-job', DATASET: 'cifar10' } },

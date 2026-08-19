@@ -23,8 +23,21 @@ AshML **asks the bucket** whether they arrived before marking one usable: an upl
 never landed is refused, and one stored somewhere AshML cannot check is labelled `NO` in
 the CHECKED column rather than passing for a verified checkpoint.
 
-**Not yet in Phase 4:** the Python SDK and the model registry, so reporting today means
-calling the API directly.
+A training script reports through the **Python SDK** (`sdk/python`, no dependencies):
+
+```python
+import ashml
+
+with ashml.init() as run:                      # identity comes from the container's env
+    for step, batch in enumerate(loader):
+        run.log_metrics({"loss": train_step(batch)}, step=step)
+    run.log_artifact("checkpoints/final.pt", kind="model")
+```
+
+`examples/training/sdk_smoke.py` exercises that whole path in the cluster — it trains
+nothing and says so, which is the point: it proves the reporting, not a model.
+
+**Not yet in Phase 4:** the model registry, and the real ResNet-18/CIFAR-10 workload.
 
 **Not yet:** GPU jobs cannot run on this host — the machine has two RTX 2080 Tis, but
 installing the NVIDIA container toolkit needs root, so no GPU reaches a k3d node and the
@@ -154,7 +167,8 @@ from anywhere and importing nothing.
 | `ASHML_DISCOVERY_INTERVAL_MS` | `15000` | How often node and GPU inventory is refreshed |
 | `ASHML_ARTIFACT_STORE` | `s3` | `s3` (MinIO or AWS) or `none` — no bucket; artifacts may still be registered against a caller-supplied URI, and complete as unverified |
 | `ASHML_S3_BUCKET` | `ashml` | Bucket checkpoints and models are written to |
-| `ASHML_S3_ENDPOINT` | `http://127.0.0.1:9000` | The dev MinIO. **Unset it for real AWS**, where the SDK resolves the host itself |
+| `ASHML_S3_ENDPOINT` | `http://127.0.0.1:9000` | The dev MinIO. **Unset it for real AWS**, where the SDK resolves the host itself. Must be reachable *from a training pod* — see below |
+| `ASHML_API_ADVERTISE_URL` | `http://host.k3d.internal:8080` | What training pods are told to report to, injected as `ASHML_ENDPOINT`. In a cluster, the Service URL |
 | `ASHML_S3_REGION` | `us-east-1` | |
 | `ASHML_S3_ACCESS_KEY` / `ASHML_S3_SECRET_KEY` | dev MinIO credentials | Unset both to use the SDK credential chain (an IAM role in a cluster) |
 | `ASHML_S3_FORCE_PATH_STYLE` | `true` | MinIO serves buckets as a path; set false for AWS |
@@ -163,6 +177,28 @@ from anywhere and importing nothing.
 | `ASHML_PROJECT` | — | Default project for project-scoped `ash` commands |
 
 `config.js` is the only module that reads the environment.
+
+### Two addresses that are not the control plane's own
+
+A training pod has to reach two things, and neither is at an address the control plane
+can infer from its own bind address (`0.0.0.0` is not somewhere else's route to you):
+
+- **The API**, to report metrics. Set `ASHML_API_ADVERTISE_URL`; it is injected into
+  every container as `ASHML_ENDPOINT`. Left unset, the SDK says it was never told where
+  to report, which is a much better failure than a connection error from inside a pod.
+- **Object storage**, to upload checkpoints. Presigned URLs are fetched **by the
+  container**, so `ASHML_S3_ENDPOINT` must resolve there — `127.0.0.1:9000` resolves to
+  the pod itself and the upload will hang or refuse.
+
+Running the control plane on the workstation against k3d, both want the host's LAN
+address rather than loopback:
+
+```bash
+HOST_IP=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
+ASHML_API_ADVERTISE_URL=http://$HOST_IP:8080 ASHML_S3_ENDPOINT=http://$HOST_IP:9000 npm start
+```
+
+Deployed inside the cluster, both are ordinary Service URLs and this note stops applying.
 
 ## Development
 

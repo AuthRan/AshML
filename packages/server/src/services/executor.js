@@ -31,12 +31,16 @@ import { scheduleJob, Placement } from './scheduler.js';
  *
  * @returns {Promise<object>} the job, now STARTING
  */
-export async function launchJob(pool, backend, job, { logger = null } = {}) {
+export async function launchJob(pool, backend, job, { logger = null, apiUrl = null } = {}) {
   const namespace = backend.namespace;
   // The node is passed through so the Pod lands where AshML decided, not where
   // Kubernetes would have chosen. Without this the scheduler's decision is a record of
   // an intention rather than a cause (see ADR 0003).
-  const manifest = buildJobManifest(job, { namespace, nodeName: job.placement?.node_name ?? null });
+  const manifest = buildJobManifest(job, {
+    namespace,
+    nodeName: job.placement?.node_name ?? null,
+    apiUrl,
+  });
   const name = manifest.metadata.name;
 
   await backend.createJob(manifest);
@@ -81,7 +85,7 @@ export async function cancelWorkload(pool, backend, job, { logger = null } = {})
  *
  * @returns {Promise<string|null>} the new state, or null if it went back to the queue
  */
-export async function placeAndLaunch(pool, backend, job, { logger = null } = {}) {
+export async function placeAndLaunch(pool, backend, job, { logger = null, apiUrl = null } = {}) {
   if (!job.placement?.node_id) {
     const result = await scheduleJob(pool, job.id, { logger });
 
@@ -94,7 +98,7 @@ export async function placeAndLaunch(pool, backend, job, { logger = null } = {})
     job = await jobService.getJob(pool, job.id);
   }
 
-  await launchJob(pool, backend, job, { logger });
+  await launchJob(pool, backend, job, { logger, apiUrl });
   return JobState.STARTING;
 }
 
@@ -103,7 +107,7 @@ export async function placeAndLaunch(pool, backend, job, { logger = null } = {})
  *
  * @returns {Promise<string|null>} the new state, or null if nothing changed
  */
-export async function reconcileJob(pool, backend, job, { logger = null } = {}) {
+export async function reconcileJob(pool, backend, job, { logger = null, apiUrl = null } = {}) {
   if (job.state === JobState.CANCELLING) {
     await cancelWorkload(pool, backend, job, { logger });
     return JobState.CANCELLED;
@@ -112,7 +116,7 @@ export async function reconcileJob(pool, backend, job, { logger = null } = {}) {
   // Claimed but not yet launched. It may not have been placed yet either — a job that
   // was requeued and re-claimed, or one interrupted mid-launch by a restart.
   if (job.state === JobState.SCHEDULING) {
-    return placeAndLaunch(pool, backend, job, { logger });
+    return placeAndLaunch(pool, backend, job, { logger, apiUrl });
   }
 
   const observation = await backend.observeJob(backend.namespace, job.k8s_job_name);
@@ -151,13 +155,13 @@ export async function reconcileJob(pool, backend, job, { logger = null } = {}) {
  * @param {number} [options.maxLaunches] how many queued jobs to admit this pass
  * @returns {Promise<{reconciled: number, launched: number, requeued: number, errors: number}>}
  */
-export async function runOnce(pool, backend, { logger = null, maxLaunches = 10 } = {}) {
+export async function runOnce(pool, backend, { logger = null, maxLaunches = 10, apiUrl = null } = {}) {
   const summary = { reconciled: 0, launched: 0, requeued: 0, errors: 0 };
 
   const active = await jobService.listJobsToReconcile(pool);
   for (const job of active) {
     try {
-      const changed = await reconcileJob(pool, backend, job, { logger });
+      const changed = await reconcileJob(pool, backend, job, { logger, apiUrl });
       if (changed) summary.reconciled += 1;
     } catch (err) {
       summary.errors += 1;
@@ -188,7 +192,7 @@ export async function runOnce(pool, backend, { logger = null, maxLaunches = 10 }
     if (!job) break; // Queue empty, or everything left in it was already refused.
 
     try {
-      const state = await placeAndLaunch(pool, backend, job, { logger });
+      const state = await placeAndLaunch(pool, backend, job, { logger, apiUrl });
       if (state === null) {
         // Nothing fit, or the project is over quota. The job is back in the queue with
         // a recorded reason; move on to whatever is behind it.
@@ -219,7 +223,7 @@ export async function runOnce(pool, backend, { logger = null, maxLaunches = 10 }
  *
  * @returns {{ stop: () => Promise<void> }}
  */
-export function startExecutor(pool, backend, { logger = null, intervalMs = 2000, maxLaunches = 10 } = {}) {
+export function startExecutor(pool, backend, { logger = null, intervalMs = 2000, maxLaunches = 10, apiUrl = null } = {}) {
   let stopped = false;
   let timer = null;
   let settled = Promise.resolve();
@@ -227,7 +231,7 @@ export function startExecutor(pool, backend, { logger = null, intervalMs = 2000,
   async function tick() {
     if (stopped) return;
     try {
-      const summary = await runOnce(pool, backend, { logger, maxLaunches });
+      const summary = await runOnce(pool, backend, { logger, maxLaunches, apiUrl });
       if (summary.launched > 0 || summary.reconciled > 0 || summary.errors > 0 || summary.requeued > 0) {
         logger?.debug({ ...summary, backend: backend.name }, 'executor pass');
       }

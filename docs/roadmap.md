@@ -149,7 +149,7 @@ and placement starts using it (ADR 0008).
 
 ---
 
-## Phase 4 — ML Lifecycle *(current — tracking and storage done, SDK and registry next)*
+## Phase 4 — ML Lifecycle *(current — reporting, storage and SDK done; registry and the real workload next)*
 
 Spec milestones 6 and 7.
 
@@ -159,7 +159,8 @@ Spec milestones 6 and 7.
   hyperparameters, image digest, seed, hardware)~~ **done** — intent was already captured
   in Phase 1; the observed half (framework, hardware, SDK, run window) lands here
 - ~~MinIO artifact storage: presigned uploads, so the run writes bytes AshML can serve back~~ **done**
-- Python SDK: the thin client that makes a training script report without ceremony
+- ~~Python SDK: the thin client that makes a training script report without ceremony~~ **done** —
+  `sdk/python`, zero dependencies, proven end to end from a real pod in k3d
 - Model registry: models, versions, lifecycle states
 - Real workload: ResNet-18 on CIFAR-10, single GPU
 

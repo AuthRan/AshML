@@ -44,6 +44,13 @@ export function loadConfig(env = process.env) {
     // seconds; neither is worth a `LIST nodes` and an `nvidia-smi` fork on every job pass.
     discoveryIntervalMs: parseCount(env.ASHML_DISCOVERY_INTERVAL_MS, 'ASHML_DISCOVERY_INTERVAL_MS') ?? 15_000,
 
+    // The address a training pod should call the control plane on. It is not
+    // `host`/`port`: the API binds 0.0.0.0 inside its own network namespace, which is
+    // not an address anything else can reach. In development the control plane runs on
+    // the workstation and k3d resolves `host.k3d.internal` to it; in a cluster this is
+    // the Service URL. Injected into every training container as ASHML_ENDPOINT.
+    apiAdvertiseUrl: env.ASHML_API_ADVERTISE_URL ?? 'http://host.k3d.internal:8080',
+
     // Artifact storage (Phase 4). `s3` is real and is the default, in the same spirit
     // as the GPU provider and the execution backend; `none` is the honest description of
     // a control plane with no bucket, not a simulation of one.

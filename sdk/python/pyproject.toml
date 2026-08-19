@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ashml"
+version = "0.1.0"
+description = "Training SDK for AshML — report metrics, checkpoints, and run metadata from inside a training job"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Ashutosh Ranjan" }]
+keywords = ["machine-learning", "mlops", "training", "kubernetes"]
+
+# Deliberately empty, and worth keeping that way.
+#
+# This package is installed into training images that already carry PyTorch, CUDA and a
+# resolved dependency graph that took someone a long afternoon. Every pin added here is
+# one that can conflict with theirs. Everything the SDK needs is in the standard library.
+dependencies = []
+
+[project.optional-dependencies]
+# Nothing is required to run the tests either: they use unittest and a stdlib HTTP
+# server. This exists only so `pip install -e .[dev]` is not a surprise.
+dev = []
+
+[tool.setuptools.packages.find]
+include = ["ashml*"]

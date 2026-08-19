@@ -48,7 +48,9 @@ cluster-status: ## Nodes, and every AshML workload in the cluster
 
 .PHONY: image
 image: ## Build the smoke workload image and load it into the cluster
-	docker build -t $(TRAINER_IMAGE) deploy/images/trainer
+	# Built from the repository root so the image can carry the Python SDK; see
+	# .dockerignore for what is kept out of the context.
+	docker build -t $(TRAINER_IMAGE) -f deploy/images/trainer/Dockerfile .
 	# k3d nodes have their own containerd; an image built on the host is invisible to
 	# them until it is imported. Without this every Pod sits in ErrImagePull.
 	k3d image import $(TRAINER_IMAGE) -c $(CLUSTER)
@@ -76,6 +78,10 @@ dev: ## Run the control plane against the local cluster
 .PHONY: test
 test: ## Unit and integration tests
 	npm test
+
+.PHONY: test-sdk
+test-sdk: ## Python SDK tests (add ASHML_ENDPOINT to include the live suite)
+	python3 -m unittest discover -s sdk/python/tests -v
 
 .PHONY: e2e
 e2e: ## End-to-end: submit a job, run it on k3d, assert it SUCCEEDED
