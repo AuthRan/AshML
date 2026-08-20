@@ -12,6 +12,7 @@ AGENTS       ?= 1
 TRAINER_IMAGE ?= ashml/trainer:v1
 RESNET_IMAGE ?= ashml/resnet-trainer:v1
 DATA_DIR     ?= data
+TEST_DATABASE_URL ?= postgresql://ashml:ashml@127.0.0.1:5432/ashml_test
 NAMESPACE    ?= ashml-jobs
 
 .PHONY: help
@@ -85,6 +86,13 @@ db-down: ## Stop PostgreSQL and MinIO
 .PHONY: migrate
 migrate: ## Apply database migrations
 	npm run migrate
+
+.PHONY: db-test
+db-test: ## Create and migrate the dedicated test database (integration tests wipe it)
+	# The integration suites TRUNCATE every table, so they get their own database and
+	# refuse to touch the development one. This is the command that makes that database.
+	node scripts/create-test-db.mjs
+	ASHML_DATABASE_URL=$${ASHML_TEST_DATABASE_URL:-$(TEST_DATABASE_URL)} npm run migrate up
 
 # ------------------------------------------------------------------ running
 

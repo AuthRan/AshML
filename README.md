@@ -242,7 +242,8 @@ Deployed inside the cluster, both are ordinary Service URLs and this note stops 
 ## Development
 
 ```bash
-npm test              # unit tests always; integration tests when Postgres is up
+make db-test          # once: create and migrate the dedicated test database
+npm test              # unit tests always; integration tests when that database is up
 npm run dev           # server with --watch
 npm run migrate up    # apply migrations
 npm run migrate down  # roll back one migration
@@ -253,6 +254,20 @@ Integration tests skip with a visible message when PostgreSQL is unreachable, ra
 than passing silently. They run against real Postgres, not a fake — the behaviour that
 matters (`SKIP LOCKED`, transaction isolation, unique violations) is exactly what a fake
 would get wrong.
+
+**They also delete every row, so they get their own database.** `ASHML_TEST_DATABASE_URL`
+(default `…/ashml_test`) is the only thing they will touch; they do not fall back to
+`ASHML_DATABASE_URL`, and `truncateAll` refuses outright to wipe a database whose name
+does not end in `test`. This is not hypothetical caution — the fallback used to exist,
+and a `npm test` run against a configured development database truncated a finished
+training run's experiment, metrics, artifacts and registered model version. The artifact
+*bytes* survived only because the store half of the same helper already defaulted to a
+separate `ashml-test` bucket; the asymmetry between the two is what hid the problem.
+
+The separation has a second benefit: because the suites no longer share a database with
+a running control plane, `npm test` no longer needs the server stopped. A live scheduler
+polling the same queue used to claim the queue tests' jobs out from under them through
+the same `SKIP LOCKED` path, which failed as `Cannot read properties of null`.
 
 ## Reproducibility
 

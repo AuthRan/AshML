@@ -10,10 +10,23 @@ import pg from 'pg';
 
 const { Pool } = pg;
 
+/**
+ * The database these tests are allowed to destroy.
+ *
+ * This deliberately does **not** fall back to `ASHML_DATABASE_URL`. It used to, and the
+ * consequence was exactly what it sounds like: running `npm test` with the development
+ * database configured truncated it, and a finished training run's experiment, metrics,
+ * artifacts and registered model version went with it. The bytes in object storage
+ * survived only because `connectStoreOrNull` below already defaulted to a *separate*
+ * bucket — the asymmetry between the two is what made the footgun invisible.
+ *
+ * So the rule matches the store's: tests get their own database, named for what it is,
+ * and a machine that has not created one skips these tests visibly rather than
+ * borrowing whatever database happens to be configured.
+ */
 export const TEST_DATABASE_URL =
   process.env.ASHML_TEST_DATABASE_URL
-  ?? process.env.ASHML_DATABASE_URL
-  ?? 'postgresql://ashml:ashml@127.0.0.1:5432/ashml';
+  ?? 'postgresql://ashml:ashml@127.0.0.1:5432/ashml_test';
 
 /**
  * Returns a pool if Postgres is reachable and migrated, otherwise null.
@@ -35,7 +48,9 @@ export async function connectOrNull() {
 
 export const SKIP_MESSAGE =
   `PostgreSQL not reachable or not migrated at ${TEST_DATABASE_URL} — `
-  + 'run `npm run db:up && npm run migrate` to include these tests';
+  + 'run `make db-test` to create and migrate a dedicated test database, or set '
+  + 'ASHML_TEST_DATABASE_URL, to include these tests. These tests TRUNCATE every table, '
+  + 'so they will not run against your development database.';
 
 /**
  * Deletes all rows created by tests, leaving the schema and the seeded local user.
@@ -49,7 +64,41 @@ export const SKIP_MESSAGE =
  * production path for the convenience of the tests.
  */
 export async function truncateAll(pool) {
+  assertDestroyable(TEST_DATABASE_URL);
   await pool.query('TRUNCATE projects CASCADE');
+}
+
+/**
+ * Refuses to wipe a database that is not obviously a test database.
+ *
+ * Defence in depth behind the default above: pointing `ASHML_TEST_DATABASE_URL` at a
+ * database with real data in it is a single mistyped variable away, and the failure is
+ * silent and total — `TRUNCATE projects CASCADE` takes experiments, jobs, artifacts and
+ * model versions with it, and nothing about a green test run hints that it happened.
+ *
+ * A name ending in `test` is the signal, which covers `ashml_test`, `ashml-test` and
+ * plain `test`. Anything else needs the override, which exists so that a CI environment
+ * with a differently-named ephemeral database is not forced to rename it — but has to
+ * say so out loud.
+ */
+export function assertDestroyable(url) {
+  if (process.env.ASHML_TEST_DATABASE_ALLOW_DESTRUCTIVE === 'true') return;
+
+  let name;
+  try {
+    name = decodeURIComponent(new URL(url).pathname.replace(/^\//, ''));
+  } catch {
+    throw new Error(`refusing to TRUNCATE: ${url} is not a parsable database URL`);
+  }
+
+  if (!/(^|[-_])test$/i.test(name)) {
+    throw new Error(
+      `refusing to TRUNCATE database "${name}": these tests delete every row, and the `
+      + 'name does not end in "test" so it may not be a test database. Point '
+      + 'ASHML_TEST_DATABASE_URL at a dedicated database (see README), or set '
+      + 'ASHML_TEST_DATABASE_ALLOW_DESTRUCTIVE=true if you really mean this one.',
+    );
+  }
 }
 
 /** Unique project name per test, so tests do not collide on the name unique index. */
