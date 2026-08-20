@@ -131,6 +131,12 @@ chaos-resume: ## Chaos: kill a training pod, assert the retry resumes from its c
 	# when a test calls into it. See the header of the script for the two addresses.
 	node scripts/chaos-resume.mjs
 
+.PHONY: chaos-serving
+chaos-serving: ## Chaos: kill the pod serving a model, assert it returns serving the same one
+	# Needs a deployment that is already serving (`ash model deploy`) and a control plane
+	# running its deployment sync loop -- what is observed is that loop noticing.
+	node scripts/chaos-serving.mjs
+
 .PHONY: chaos-resume-resnet
 chaos-resume-resnet: ## The same chaos, against ResNet-18: weights, optimizer and schedule
 	# Minutes rather than seconds, and it needs `make resnet-image`. Worth both: the
