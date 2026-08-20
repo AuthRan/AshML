@@ -149,7 +149,7 @@ and placement starts using it (ADR 0008).
 
 ---
 
-## Phase 4 — ML Lifecycle *(current — everything but the real workload)*
+## Phase 4 — ML Lifecycle *(complete)*
 
 Spec milestones 6 and 7.
 
@@ -162,10 +162,48 @@ Spec milestones 6 and 7.
 - ~~Python SDK: the thin client that makes a training script report without ceremony~~ **done** —
   `sdk/python`, zero dependencies, proven end to end from a real pod in k3d
 - ~~Model registry: models, versions, lifecycle states~~ **done**
-- Real workload: ResNet-18 on CIFAR-10, single GPU
+- ~~Real workload: ResNet-18 on CIFAR-10~~ **done** — on CPU, not a GPU; see below
 
 **Exit criteria:** train ResNet on CIFAR-10 through the platform; the run appears as an
-experiment with metrics, a stored checkpoint, and a registered model version.
+experiment with metrics, a stored checkpoint, and a registered model version. **Met** —
+job `085cade3`, one full epoch, **65.59% top-1 on the full 10 000-image test set**.
+
+### The run, and what its number is worth
+
+One complete pass over the 50 000 training images — 390 steps at batch 128 — in 790
+seconds, evaluated on the entire test set. Not a truncated demo: the workload supports
+a `MAX_STEPS` bound and it was not used, so nothing here is an extrapolation from a
+partial epoch.
+
+**65.59% is undertrained and should never be quoted as a CIFAR-10 result.** The
+literature reaches ~95% with this architecture by training 100–200 epochs; this is one.
+The number is here to prove the platform carried a real workload end to end, not to say
+anything about ResNet-18. The run states that caveat in its own logs, and
+`caveat_metadata` attaches it to every artifact, because a checkpoint outlives the log
+that explained it (spec Rule 5).
+
+It trained on **CPU**. The GPU deferral from Phase 3 still holds — no `nvidia` container
+runtime, so no device reaches a k3d node (ADR 0008) — and the run reported the hardware
+it actually got rather than the hardware the manifest wished for: `pytorch 2.13.0+cpu`,
+`gpus: 0`, `cuda: null`, all captured on the experiment.
+
+What was checked rather than believed, in the spirit of the earlier phases:
+
+- **The dataset** is the published CIFAR-10 archive, verified against its sha256 before
+  extraction; that same digest is what `cifar10:v1` pins, so the experiment's dataset
+  reference is a hash of bytes that were checked.
+- **The placement** was AshML's: `kubectl` confirms the pod ran on `k3d-ashml-server-0`,
+  the node the scheduler chose and recorded a reason for.
+- **The artifacts** were confirmed against object storage — both `READY` and `CHECKED`,
+  85.3 MiB resumable checkpoint and 42.7 MiB weights-only model.
+- **The accuracy** was reproduced independently. The model artifact was pulled back out
+  of MinIO, loaded with `strict=True` into a freshly built architecture, and evaluated
+  over all 10 000 test images: 0.6559 accuracy and 0.9687 loss, matching what the run
+  reported to the metric API exactly. The registered version is bytes that demonstrably
+  produce the accuracy attached to them.
+
+`resnet18-cifar10` **v1** is registered from that verified artifact and promoted to
+`PRODUCTION`, carrying the run's metrics with it.
 
 ### How a run reports (ADR 0009)
 
@@ -232,7 +270,7 @@ whether that version serves traffic.
 
 ---
 
-## Phase 5 — Serve, Observe, Recover *(weeks 11–12)*
+## Phase 5 — Serve, Observe, Recover *(current — weeks 11–12)*
 
 Spec milestones 8, 9, 10.
 

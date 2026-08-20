@@ -4,7 +4,7 @@ A Kubernetes-native GPU machine learning infrastructure platform — a miniature
 ML cloud. Register datasets, submit training jobs, schedule them onto GPU resources,
 track experiments, version models, deploy inference, and observe all of it.
 
-**Status: Phase 3 (scheduler) complete; Phase 4 (ML lifecycle) in progress.** Projects,
+**Status: Phase 4 (ML lifecycle) complete; Phase 5 (serve, observe, recover) next.** Projects,
 datasets, experiments and training jobs are persisted in PostgreSQL with an append-only
 event log and a `SKIP LOCKED` queue. Submitted jobs **actually run**: AshML's own
 scheduler decides whether a job may run and on which node, the executor creates the
@@ -51,7 +51,32 @@ ash model promote fraud-detector 1
 ash model production fraud-detector                          # what is serving, and is it verified
 ```
 
-**Not yet in Phase 4:** the real ResNet-18/CIFAR-10 workload.
+### The workload this was built for
+
+ResNet-18 on CIFAR-10 has now run through all of it — scheduled by AshML, executed in
+k3d, reporting its own metrics and checkpoints:
+
+```bash
+make resnet-image                                        # fetch + verify CIFAR-10, build, import
+ash experiment create resnet18-cifar10-1epoch --project vision \
+    --dataset cifar10 --dataset-version v1 --seed 1337
+ash job submit examples/training/resnet-cifar.yaml --experiment <id>
+```
+
+One full epoch — 390 steps over all 50 000 training images, no `MAX_STEPS` truncation —
+in 790 seconds, then **65.59% top-1 on the complete 10 000-image test set**.
+
+**That number is undertrained and is not a CIFAR-10 result.** This architecture reaches
+~95% when trained the 100–200 epochs the literature uses; this is one epoch, on a CPU.
+It is here to show the platform carried a real workload end to end, and the run says so
+itself — in its logs at start and finish, and in the metadata attached to every artifact
+it produced, because a checkpoint outlives the log that explained it (spec Rule 5).
+
+The claim was checked rather than trusted: the model artifact was pulled back out of
+object storage, loaded into a freshly built architecture, and re-evaluated over the full
+test set, reproducing 0.6559 accuracy and 0.9687 loss exactly. `kubectl` confirms the pod
+ran on the node the scheduler chose. The dataset is verified against its published
+sha256 before it is extracted, and that digest is what `cifar10:v1` pins.
 
 **Not yet:** GPU jobs cannot run on this host — the machine has two RTX 2080 Tis, but
 installing the NVIDIA container toolkit needs root, so no GPU reaches a k3d node and the
