@@ -6,6 +6,8 @@
  * for a fake — or later for an operator — touches nothing above it.
  */
 
+import https from 'node:https';
+
 import * as k8s from '@kubernetes/client-node';
 
 import { Phase, registerBackend, observationFromJobStatus } from './backend.js';
@@ -170,6 +172,10 @@ export function createKubernetesBackend({ namespace = 'ashml-jobs', kubeconfig =
       core: kc.makeApiClient(k8s.CoreV1Api),
       batch: kc.makeApiClient(k8s.BatchV1Api),
       apps: kc.makeApiClient(k8s.AppsV1Api),
+      // Kept alongside the generated clients because `callService` needs the config
+      // itself, not an API client: the generated proxy method cannot carry a request
+      // body, so that one request is built by hand against the same credentials.
+      config: kc,
     };
     return clients;
   }
@@ -501,6 +507,72 @@ export function createKubernetesBackend({ namespace = 'ashml-jobs', kubeconfig =
         // listed on every sync, and this loop runs for as long as the deployment exists.
         pendingReason: ready >= desired ? null : await reasonFromDeploymentPods(ns, deployment),
       };
+    },
+
+    /**
+     * Makes one HTTP request to a Service inside the cluster, through the API server.
+     *
+     * A deployment's Service is a ClusterIP, which is right for serving and useless from
+     * here: the control plane usually runs outside the cluster, and `127.0.0.1` in a
+     * kubeconfig is not a route to a pod network. The alternatives are a port-forward
+     * (needs kubectl, and a process to hold it open) or making every Service reachable
+     * from outside (a NodePort per model, addresses that depend on which node answered).
+     * The API server already proxies to Services and this process already holds
+     * credentials for it, so nothing new has to be exposed or installed.
+     *
+     * **This is not the serving path, and must not become one.** It exists so a human can
+     * ask a deployment a question — `ash predict`, a smoke test, a demo — from a laptop.
+     * Real traffic goes to `endpoint_url` from inside the cluster, because every request
+     * routed through here occupies the event loop that also runs the scheduler, and
+     * because a control plane that is down should not take inference down with it.
+     */
+    async callService(ns, name, { path = '/', method = 'GET', body = null, timeoutMs = 15_000, port = 80 } = {}) {
+      const { config } = connect();
+      const cluster = config.getCurrentCluster();
+      if (!cluster) throw new Error('no current cluster in the kubeconfig');
+
+      const options = {};
+      await config.applyToHTTPSOptions(options);
+
+      const url = new URL(
+        `${cluster.server}/api/v1/namespaces/${ns}/services/${name}:${port}/proxy${path}`,
+      );
+      const payload = body === null ? null : Buffer.from(JSON.stringify(body));
+
+      return new Promise((resolve, reject) => {
+        const request = https.request(url, {
+          ...options,
+          method,
+          headers: {
+            ...(options.headers ?? {}),
+            ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}),
+          },
+          timeout: timeoutMs,
+        }, (response) => {
+          const chunks = [];
+          response.on('data', (chunk) => chunks.push(chunk));
+          response.on('end', () => {
+            const text = Buffer.concat(chunks).toString();
+            let parsed = null;
+            try {
+              parsed = text ? JSON.parse(text) : null;
+            } catch {
+              // A proxy error page, or a service that does not speak JSON. The status
+              // and the raw text are still what the caller needs to explain it.
+            }
+            resolve({ status: response.statusCode, body: parsed, text });
+          });
+        });
+
+        request.on('timeout', () => {
+          // `destroy` does not itself reject; the error handler below does, and this
+          // message names the timeout rather than surfacing a bare socket hang up.
+          request.destroy(new Error(`no answer from ${name} within ${timeoutMs}ms`));
+        });
+        request.on('error', reject);
+        if (payload) request.write(payload);
+        request.end();
+      });
     },
 
     /**
