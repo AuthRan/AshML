@@ -1,37 +1,59 @@
-# A training job manifest. Submit with:
-#   ash job submit examples/training/resnet-cifar.yaml
+# ResNet-18 on CIFAR-10 — the Phase 4 exit criterion, as actually run.
 #
-# Sized for a single RTX 2080 Ti (11 GB). The platform is what is being tested
-# here, not the model (spec §35).
+#   ash experiment create resnet-cifar --project vision --dataset cifar10 --dataset-version v1
+#   ash job submit examples/training/resnet-cifar.yaml --experiment <experiment-id>
+#
+# This manifest describes a **CPU** run, because that is what this host can actually
+# execute: there are two RTX 2080 Tis in the machine, but Docker here has no `nvidia`
+# container runtime and installing the toolkit needs root, so no GPU reaches a k3d node
+# and the cluster advertises `nvidia.com/gpu: 0` (ADR 0008). Asking for `gpu: 1` here
+# would produce a job that queues forever with a correct explanation — which the
+# scheduler e2e already proves — rather than a trained model.
+#
+# For a host that *does* have GPU passthrough, the GPU variant is this file with:
+#
+#   resources: { gpu: 1, gpu_memory_min_bytes: 8589934592 }   # 8 GiB
+#   env:       { EPOCHS: "50" }
+#
+# and no other change: the workload calls `.to(device)` on whatever it is given and
+# reports which one it got.
+#
+# The control plane must be reachable from the pod (ASHML_API_ADVERTISE_URL) and the
+# artifact store's presigned URLs must be too: they are fetched by the *container*, not
+# by the control plane, so ASHML_S3_ENDPOINT of 127.0.0.1 resolves to the pod itself.
 
 project: vision
 name: resnet-cifar
 
-# Optional. Attributes this run to an experiment, which is what carries the commit,
-# image digest, dataset version and seed. Pass `--experiment <id>` to override it, or
-# create one with: ash experiment create <name> --dataset cifar10 --dataset-version v1
-# experiment: 00000000-0000-0000-0000-000000000000
-
 priority: MEDIUM
-max_retries: 2
+max_retries: 0
 
+# Fits inside one k3d node (8 CPU, ~7.7 GiB allocatable) with room for the dataloader
+# workers. CPU is a *request*, not a limit — see manifest.js — so OMP_NUM_THREADS below
+# is what actually holds the run to the size it asked for.
 resources:
-  cpu: 8
-  memory_bytes: 34359738368      # 32 GiB
-  gpu: 1
-  gpu_memory_min_bytes: 8589934592  # 8 GiB
+  cpu: 4
+  memory_bytes: 4294967296       # 4 GiB
 
 spec:
-  # A digest, not a tag, is what makes a run reproducible — this tag is a placeholder
-  # until Phase 2 builds real training images.
-  image: ash/ml-pytorch:latest
+  # Built by `make resnet-image`. A tag rather than a digest for a locally-imported
+  # image: k3d resolves it from the node's own containerd, and the experiment record
+  # captures what actually ran.
+  image: ashml/resnet-trainer:v1
   command:
     - python
-    - train.py
-  args:
-    - --epochs=50
-    - --batch-size=128
-    - --lr=0.001
+    - resnet_cifar.py
   env:
-    DATASET: cifar10
-    DATASET_VERSION: v3
+    # One complete pass over the 50 000 training images, evaluated on the full 10 000
+    # image test set. One epoch is far short of the 100–200 the CIFAR literature uses,
+    # so the result is undertrained and says so — but it is a real epoch, not a run
+    # truncated by MAX_STEPS.
+    EPOCHS: "1"
+    BATCH_SIZE: "128"
+    LR: "0.1"
+    SEED: "1337"
+    LOG_EVERY: "10"
+    DATALOADER_WORKERS: "2"
+    # Torch otherwise sizes its thread pool from the node's core count, not from what
+    # this job asked for, and would quietly take all 8.
+    OMP_NUM_THREADS: "4"

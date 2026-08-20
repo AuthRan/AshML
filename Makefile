@@ -10,6 +10,8 @@ K3S_IMAGE    ?= rancher/k3s:v1.35.5-k3s1
 API_PORT     ?= 6550
 AGENTS       ?= 1
 TRAINER_IMAGE ?= ashml/trainer:v1
+RESNET_IMAGE ?= ashml/resnet-trainer:v1
+DATA_DIR     ?= data
 NAMESPACE    ?= ashml-jobs
 
 .PHONY: help
@@ -54,6 +56,21 @@ image: ## Build the smoke workload image and load it into the cluster
 	# k3d nodes have their own containerd; an image built on the host is invisible to
 	# them until it is imported. Without this every Pod sits in ErrImagePull.
 	k3d image import $(TRAINER_IMAGE) -c $(CLUSTER)
+
+.PHONY: cifar10
+cifar10: ## Fetch and checksum the CIFAR-10 dataset into $(DATA_DIR)
+	scripts/fetch-cifar10.sh $(DATA_DIR)
+
+.PHONY: resnet-image
+resnet-image: cifar10 ## Build the ResNet-18/CIFAR-10 image and load it into the cluster
+	# The dataset arrives as a named build context rather than through the repository
+	# root, so 178 MB of CIFAR never enters the context of the other image builds.
+	docker build -t $(RESNET_IMAGE) \
+		-f deploy/images/resnet-trainer/Dockerfile \
+		--build-context cifar=$(DATA_DIR) .
+	# ~2 GB, mostly PyTorch, so this import takes a few minutes where the smoke image
+	# takes seconds. Same reason as `image`: k3d nodes cannot see the host's daemon.
+	k3d image import $(RESNET_IMAGE) -c $(CLUSTER)
 
 # ------------------------------------------------------------------ database
 
