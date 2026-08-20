@@ -156,6 +156,9 @@ export function createSimBackend({
         available: record.ready,
         updated: record.desired,
         reason: null,
+        // The real backend derives this from the pods; there are none here, and saying
+        // so is better than a plausible sentence a test could come to depend on.
+        pendingReason: record.ready >= record.desired ? null : 'simulated: no pods to ask',
         simulated: true,
       };
     },

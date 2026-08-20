@@ -98,6 +98,38 @@ ARCHITECTURES = {
 }
 
 
+#: How many times to try loading the model, and how long to wait between tries. The
+#: budget is generous because the cost of giving up is a pod that serves nothing until a
+#: human notices, and the cost of waiting is a pod that is not ready yet — which is
+#: already visible, already excluded from the Service, and already the normal state
+#: during a cold start.
+LOAD_ATTEMPTS = env_int("ASHML_LOAD_ATTEMPTS", 12)
+LOAD_BACKOFF_BASE = float(os.environ.get("ASHML_LOAD_BACKOFF_BASE", "2"))
+LOAD_BACKOFF_MAX = float(os.environ.get("ASHML_LOAD_BACKOFF_MAX", "30"))
+
+
+class _Permanent(Exception):
+    """A load failure that asking again cannot fix."""
+
+
+def _classify(err):
+    """Re-raises a fetch failure as `_Permanent` when a retry could not change it.
+
+    4xx is the server saying the request is wrong: the artifact does not exist, or is
+    not READY, or this is not a thing that can be downloaded. Repeating it produces the
+    same answer. 5xx, 429 and any transport failure are a bad moment, which is the case
+    this whole retry exists for.
+    """
+    if isinstance(err, urllib.error.HTTPError) and 400 <= err.code < 500 and err.code != 429:
+        detail = ""
+        try:
+            detail = f": {json.loads(err.read())['error']['message']}"
+        except Exception:  # noqa: BLE001 - the status is the useful part either way
+            pass
+        return _Permanent(f"HTTP {err.code} fetching the model{detail}")
+    return err
+
+
 class ModelHolder:
     """Holds the model, and the single boolean that readiness actually depends on."""
 
@@ -111,41 +143,88 @@ class ModelHolder:
         self.gate = threading.Semaphore(MAX_CONCURRENCY)
 
     def load(self):
-        try:
-            if ARCH not in ARCHITECTURES:
-                raise RuntimeError(
-                    f"unknown architecture {ARCH!r}; this server can serve: "
-                    f"{', '.join(sorted(ARCHITECTURES))}"
+        """Loads the model, retrying while the failure is one that might pass.
+
+        Written after a real outage: object storage went down, a pod happened to restart
+        into it, the load failed with a connection refused, and the pod stayed not-ready
+        for ever afterwards — long after the store came back — because nothing tried
+        again. Its liveness probe correctly kept it alive (restarting would have
+        reproduced the same failure at the time) and its readiness probe correctly kept
+        traffic off it, so the outage was contained and *permanent*.
+
+        So the same distinction the job retry policy makes applies here. A store that
+        refused a connection may accept one in ten seconds. A 404, an artifact that is
+        not READY, an architecture this server cannot build, a state dict that does not
+        fit — none of those change by being asked again, and retrying them just writes
+        the same line to the log for ever.
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                self._load_once()
+                return
+            except _Permanent as err:
+                self.error = str(err)
+                print(f"[serve] FAILED to load model, and will not retry: {self.error}", flush=True)
+                return
+            except Exception as err:  # noqa: BLE001 - reported, not swallowed
+                self.error = f"{type(err).__name__}: {err}"
+                if attempt >= LOAD_ATTEMPTS:
+                    print(
+                        f"[serve] FAILED to load model after {attempt} attempts: {self.error}",
+                        flush=True,
+                    )
+                    return
+                delay = min(LOAD_BACKOFF_MAX, LOAD_BACKOFF_BASE * (2 ** (attempt - 1)))
+                print(
+                    f"[serve] load attempt {attempt} failed ({self.error}); "
+                    f"retrying in {delay:.0f}s",
+                    flush=True,
                 )
-            factory, classes = ARCHITECTURES[ARCH]
+                time.sleep(delay)
 
-            url, uri = resolve_model_url()
-            blob = fetch(url)
-            payload = torch.load(io.BytesIO(blob), map_location="cpu")
-            state = payload.get("model", payload)
+    def _load_once(self):
+        """One attempt. Raises `_Permanent` for what a second attempt cannot change."""
+        if ARCH not in ARCHITECTURES:
+            raise _Permanent(
+                f"unknown architecture {ARCH!r}; this server can serve: "
+                f"{', '.join(sorted(ARCHITECTURES))}"
+            )
+        factory, classes = ARCHITECTURES[ARCH]
 
-            model = factory()
+        # Anything raised in here that is not already `_Permanent` — a refused
+        # connection, a timeout, a 5xx, a truncated body that torch will not unpickle —
+        # is a bad moment rather than a wrong model, and is retried.
+        url, uri = resolve_model_url()
+        blob = fetch(url)
+        payload = torch.load(io.BytesIO(blob), map_location="cpu")
+        state = payload.get("model", payload)
+
+        model = factory()
+        try:
             # strict=True on purpose: a key that does not fit is a different model, and
             # a server that tolerates it serves a partly-initialised network at full
-            # confidence.
+            # confidence. Permanent, and only this call is: the bytes downloaded fine
+            # and describe some other network, which no number of retries will change.
             model.load_state_dict(state, strict=True)
-            model.eval()
+        except (RuntimeError, TypeError, AttributeError) as err:
+            raise _Permanent(f"the downloaded weights are not {ARCH}: {err}") from err
+        model.eval()
 
-            # Prove a forward pass before claiming readiness. Loading weights is not the
-            # same as being able to run them, and the first failure should happen here
-            # rather than on a user's request.
-            with torch.no_grad():
-                model(torch.zeros(1, 3, 32, 32))
+        # Prove a forward pass before claiming readiness. Loading weights is not the
+        # same as being able to run them, and the first failure should happen here
+        # rather than on a user's request.
+        with torch.no_grad():
+            model(torch.zeros(1, 3, 32, 32))
 
-            self.model = model
-            self.classes = classes
-            self.source_uri = uri
-            self.loaded_at = time.time()
-            self.ready = True
-            print(f"[serve] ready: {ARCH} from {uri}", flush=True)
-        except Exception as err:  # noqa: BLE001 - reported, not swallowed
-            self.error = f"{type(err).__name__}: {err}"
-            print(f"[serve] FAILED to load model: {self.error}", flush=True)
+        self.model = model
+        self.classes = classes
+        self.source_uri = uri
+        self.loaded_at = time.time()
+        self.ready = True
+        self.error = None
+        print(f"[serve] ready: {ARCH} from {uri}", flush=True)
 
     @torch.no_grad()
     def predict(self, batch):
@@ -169,7 +248,7 @@ def resolve_model_url():
     if MODEL_URL:
         return MODEL_URL, MODEL_URL
     if not ENDPOINT or not ARTIFACT_ID:
-        raise RuntimeError(
+        raise _Permanent(
             "set ASHML_ENDPOINT and ASHML_ARTIFACT_ID (or ASHML_MODEL_URL): this server "
             "was not told which model to serve"
         )
@@ -178,12 +257,34 @@ def resolve_model_url():
         f"{ENDPOINT}/api/v1/artifacts/{ARTIFACT_ID}/download",
         headers={"accept": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-        body = json.loads(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            body = json.loads(response.read())
+    except urllib.error.HTTPError as err:
+        raise _classify(err) from err
     return body["url"], body.get("uri", body["url"])
 
 
 def fetch(url):
+    try:
+        with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
+            return response.read()
+    except urllib.error.HTTPError as err:
+        # Not classified the same way as the control plane's answer: a presigned URL
+        # that has expired returns 403, and that *is* worth another attempt, because the
+        # next one mints a fresh signature.
+        if err.code in (400, 403):
+            return _refetch_with_new_signature(err)
+        raise _classify(err) from err
+
+
+def _refetch_with_new_signature(err):
+    """One retry with a freshly signed URL, for the case a signature went stale."""
+    if MODEL_URL:
+        # There is nothing to re-sign: the URL was handed to us directly.
+        raise _Permanent(f"HTTP {err.code} fetching the model from the URL given") from err
+    print(f"[serve] download refused ({err.code}); asking for a fresh signature", flush=True)
+    url, _ = resolve_model_url()
     with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
         return response.read()
 

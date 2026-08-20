@@ -192,6 +192,54 @@ export function createKubernetesBackend({ namespace = 'ashml-jobs', kubeconfig =
     ));
   }
 
+  /**
+   * Why a deployment is short of ready replicas, in words an operator can act on.
+   *
+   * The Deployment's own status says "0 of 1 ready" and nothing else until its progress
+   * deadline expires ten minutes later — so for those ten minutes an operator looking at
+   * AshML would see DEGRADED with no explanation and have to reach for kubectl, which is
+   * the thing this platform exists to make unnecessary. The Pod knows more, exactly as it
+   * does for a Job (`reasonFromPod`).
+   *
+   * A pod that is Running but not Ready is the interesting case and the one this was
+   * written for: nothing is wrong from Kubernetes' point of view, the container simply
+   * has not passed its readiness probe. For a model server that means the weights are not
+   * loaded, and the pod's own `/readyz` says why — so the reason points there rather than
+   * guessing at it.
+   */
+  async function reasonFromDeploymentPods(ns, deployment) {
+    const selector = deployment.spec?.selector?.matchLabels ?? {};
+    const labelSelector = Object.entries(selector).map(([k, v]) => `${k}=${v}`).join(',');
+    if (!labelSelector) return null;
+
+    let pods;
+    try {
+      const listed = await core().listNamespacedPod({ namespace: ns, labelSelector });
+      pods = listed.items ?? [];
+    } catch {
+      // Diagnosis must never be the reason the status loop fails. Without the reason the
+      // status is still correct, just less useful.
+      return null;
+    }
+
+    if (pods.length === 0) return 'no pods exist for this deployment yet';
+
+    for (const pod of pods) {
+      const reason = reasonFromPod(pod);
+      if (reason) return reason;
+    }
+
+    const notReady = pods.find((pod) => !(pod.status?.containerStatuses ?? []).every((c) => c.ready));
+    if (notReady) {
+      return `pod ${notReady.metadata?.name} is ${pod0Phase(notReady)} but has not become ready; `
+        + 'ask the pod itself (/readyz) or read its logs';
+    }
+    return null;
+  }
+
+  const pod0Phase = (pod) => (pod.status?.phase ?? 'present').toLowerCase();
+  const core = () => connect().core;
+
   return {
     name: 'kubernetes',
     namespace,
@@ -440,12 +488,18 @@ export function createKubernetesBackend({ namespace = 'ashml-jobs', kubeconfig =
       const progressing = conditions.find((c) => c.type === 'Progressing');
       const failure = progressing?.status === 'False' ? (progressing.message ?? progressing.reason) : null;
 
+      const desired = deployment.spec?.replicas ?? 0;
+      const ready = status.readyReplicas ?? 0;
+
       return {
-        desired: deployment.spec?.replicas ?? 0,
-        ready: status.readyReplicas ?? 0,
+        desired,
+        ready,
         available: status.availableReplicas ?? 0,
         updated: status.updatedReplicas ?? 0,
         reason: failure,
+        // Only asked for when it is needed. A healthy deployment does not need its pods
+        // listed on every sync, and this loop runs for as long as the deployment exists.
+        pendingReason: ready >= desired ? null : await reasonFromDeploymentPods(ns, deployment),
       };
     },
 

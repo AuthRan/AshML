@@ -61,6 +61,41 @@ describe('mapping a cluster observation onto a deployment status', () => {
     assert.equal(next.status, DeploymentStatus.DEGRADED);
   });
 
+  test('a degraded deployment says why it is short, not merely that it is', () => {
+    // The reason lives on the Pod: the Deployment's own status says "0 of 1 ready" and
+    // nothing more until its progress deadline expires ten minutes later. Without this,
+    // AshML reports DEGRADED with an empty explanation and the operator reaches for
+    // kubectl for something the platform already knew.
+    const next = statusFromObservation(
+      {
+        desired: 1,
+        ready: 0,
+        reason: null,
+        pendingReason: 'pod ashml-svc-x is running but has not become ready',
+      },
+      { previousStatus: DeploymentStatus.READY },
+    );
+    assert.equal(next.status, DeploymentStatus.DEGRADED);
+    assert.match(next.lastError, /has not become ready/);
+  });
+
+  test('a cold start is not an error, and does not fill in last_error', () => {
+    // Same observation, different history. "Has not become ready yet" is what every
+    // rollout looks like for its first seconds; recording it as an error would teach an
+    // operator to ignore the field that matters during a real outage.
+    const next = statusFromObservation(
+      {
+        desired: 1,
+        ready: 0,
+        reason: null,
+        pendingReason: 'pod ashml-svc-x is running but has not become ready',
+      },
+      { previousStatus: DeploymentStatus.PROGRESSING },
+    );
+    assert.equal(next.status, DeploymentStatus.PROGRESSING);
+    assert.equal(next.lastError, null);
+  });
+
   test('a stalled rollout is FAILED and carries the cluster’s own reason', () => {
     const next = statusFromObservation(
       { desired: 1, ready: 0, reason: 'ProgressDeadlineExceeded: ReplicaSet has timed out' },

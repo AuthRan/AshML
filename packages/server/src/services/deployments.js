@@ -272,7 +272,7 @@ export function statusFromObservation(observation, { previousStatus } = {}) {
     };
   }
 
-  const { desired, ready, reason } = observation;
+  const { desired, ready, reason, pendingReason = null } = observation;
 
   if (ready >= desired && desired > 0) {
     return { status: DeploymentStatus.READY, readyReplicas: ready, lastError: null };
@@ -288,10 +288,17 @@ export function statusFromObservation(observation, { previousStatus } = {}) {
     return { status: DeploymentStatus.FAILED, readyReplicas: ready, lastError: reason };
   }
 
+  // The reason is carried on DEGRADED and withheld on PROGRESSING, and the asymmetry is
+  // deliberate. A deployment short of replicas *before* it ever served is starting up:
+  // "has not become ready yet" is the normal state of a cold start, and putting it in
+  // `last_error` would train an operator to ignore the field. A deployment that was
+  // serving and is now short is an outage, and the first question is why — leaving it
+  // null there means AshML says DEGRADED and sends the operator to kubectl for the half
+  // of the answer it already has.
   return {
     status: wasServing ? DeploymentStatus.DEGRADED : DeploymentStatus.PROGRESSING,
     readyReplicas: ready,
-    lastError: null,
+    lastError: wasServing ? pendingReason : null,
   };
 }
 

@@ -131,6 +131,12 @@ chaos-resume: ## Chaos: kill a training pod, assert the retry resumes from its c
 	# when a test calls into it. See the header of the script for the two addresses.
 	node scripts/chaos-resume.mjs
 
+.PHONY: chaos-restart
+chaos-restart: ## Chaos: SIGKILL the control plane mid-run, assert nothing was lost
+	# This one *starts* the control plane, because killing it is the experiment. It
+	# refuses to run if one is already answering, so stop yours first.
+	node scripts/chaos-restart.mjs
+
 .PHONY: chaos-serving
 chaos-serving: ## Chaos: kill the pod serving a model, assert it returns serving the same one
 	# Needs a deployment that is already serving (`ash model deploy`) and a control plane
