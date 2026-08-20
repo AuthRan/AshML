@@ -279,7 +279,7 @@ Spec milestones 8, 9, 10.
 - Prometheus + Grafana + DCGM-exporter; Loki for logs; OTel traces
 - Dashboards: cluster/GPU, job pipeline, training curves, inference latency
 - ~~Failure recovery: retry policy, checkpoint resume~~ **done**; GPU-unhealthy handling
-- Chaos scripts: ~~kill training pod~~ **done**; kill inference pod, restart scheduler
+- ~~Chaos scripts: kill training pod, kill inference pod, restart scheduler~~ **done**
 - **Benchmarks with measured numbers** (spec §37) — never invented
 
 **Exit criteria:** the full §50 user journey runs start to finish, including a killed
@@ -400,6 +400,57 @@ buffered metrics before uploading, which bounds what an interruption costs the r
 what it costs the training: the work since the last checkpoint. Steps after the checkpoint
 may legitimately be reported twice, because they are genuinely trained twice and metrics
 are append-only; steps before it must never be.
+
+### What the chaos scripts break, and what has to survive it
+
+Four of them. None drives the code it is testing: each breaks something and then watches,
+because a script that calls the recovery path proves the recovery path can be called.
+
+| `make …` | breaks | must survive |
+|---|---|---|
+| `chaos-resume` | the training pod, mid-run | the retry resumes from the last confirmed checkpoint (10/10) |
+| `chaos-resume-resnet` | the same, on ResNet-18 | weights, optimizer *and* schedule restored (10/10) |
+| `chaos-serving` | the pod behind a live deployment | DEGRADED reported, then the same model back, to the digit (6/6) |
+| `chaos-restart` | the control plane itself, SIGKILL | the pod keeps training; the record comes back identical (6/6) |
+
+`chaos-restart` is the one that checks the claim underneath all the others: **AshML keeps
+no state that exists only in its own process** (ADR 0001). Across a 12-second outage the
+training pod did not notice, the job came back with the same attempt, the same Kubernetes
+Job and the same placement, and the event log gained nothing — no second `STARTING`
+written by a control plane re-deriving state from the cluster, which is what would turn
+the event log from a history of what happened into a log of what was noticed. The run
+finished, having lost 63 metric points to the outage and reported exactly 63, because a
+curve with a hole in it looks like a training problem until you know it was a network one.
+
+### The outage nobody scheduled
+
+Docker was reinstalled on this host mid-phase while a model was serving. Everything came
+back except MinIO, and a serving pod happened to restart into that window. Most of what
+followed was the design working:
+
+- liveness on `/healthz` meant nothing killed the pod — correct, since restarting would
+  have reproduced the same failure while the store was down;
+- readiness on `/readyz` stayed 503, so the Service kept traffic off it;
+- AshML reported `DEGRADED` with 0/1 rather than claiming health.
+
+The outage was contained. It was also **permanent**: the model server loaded once, and
+once was all it ever tried, so MinIO returning changed nothing and the pod stayed
+not-ready until a human deleted it. Containment without recovery is half the job.
+
+The loader now retries on the same distinction the job retry policy makes — a refused
+connection may be accepted in ten seconds, while a 404, an artifact that is not `READY`,
+an unknown architecture or a state dict that does not fit are the same answer however
+often you ask. Reproduced deliberately with the store stopped: five attempts over 60
+seconds, MinIO started, pod ready by itself.
+
+The second finding was AshML's own. It said `DEGRADED` and `last_error: null`, because a
+Deployment carries no reason of its own until its progress deadline expires ten minutes
+later — so for ten minutes the platform reported an outage with no explanation and sent
+the operator to `kubectl`, which is the thing `reasonFromPod` was written to prevent for
+jobs and had never been applied to deployments. It now asks the pods when replicas are
+short. The reason is carried on `DEGRADED` and withheld on `PROGRESSING`: "has not become
+ready yet" is what every cold start looks like, and recording that as an error teaches an
+operator to ignore the field on the day it matters.
 
 ### Deferred within this phase, so far
 

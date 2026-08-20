@@ -121,7 +121,13 @@ back as a second attempt that starts where the first one stopped:
 ```bash
 make chaos-resume          # kills a training pod; asserts the retry resumes from step N
 make chaos-resume-resnet   # the same, against ResNet-18: weights, optimizer, schedule
+make chaos-serving         # kills the pod behind a live deployment
+make chaos-restart         # SIGKILLs the control plane itself, mid-run
 ```
+
+None of them drives the code it is testing: each breaks something with `kubectl` and then
+watches, because a script that calls the recovery path only proves the recovery path can
+be called.
 
 Killed at step 13 of 40, resumed from the checkpoint confirmed at step 10, finished, and
 registered a verified model. The script does not drive the executor — it breaks something
@@ -142,6 +148,13 @@ with ashml.init() as run:
     if resume:
         state = torch.load(resume, weights_only=True)
 ```
+
+`chaos-restart` checks the claim the other three rest on: **AshML keeps no state that
+exists only in its own process**. Across a 12-second outage the training pod did not
+notice, the job came back with the same attempt, Kubernetes Job and placement, and the
+event log gained nothing — a control plane that re-derived state from the cluster on
+startup would write a second `STARTING`, and the log would stop being a history. The run
+finished, having lost 63 metric points and reported exactly 63.
 
 What a resumed ResNet restores is the model, the optimizer's moments *and* the
 learning-rate schedule. The third is the one that hides: without it the run trains,
