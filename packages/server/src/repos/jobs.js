@@ -9,6 +9,7 @@ const JOB_COLUMNS = `
   j.id, j.name, j.state, j.priority,
   j.cpu_request, j.memory_request, j.gpu_request, j.gpu_memory_min,
   j.spec, j.attempt, j.max_retries, j.failure_reason, j.pending_reason,
+  j.retry_decision, j.retry_decided_at, j.resume_artifact_id,
   j.scheduled_node_id, j.placement_reason, j.k8s_job_name,
   j.queued_at, j.started_at, j.finished_at, j.created_at, j.updated_at,
   p.name AS project_name,
@@ -54,6 +55,14 @@ function toJob(row) {
     k8s_job_name: row.k8s_job_name || null,
     failure_reason: row.failure_reason || null,
     pending_reason: row.pending_reason || null,
+    retry: {
+      decision: row.retry_decision ?? null,
+      decided_at: iso(row.retry_decided_at),
+      // The checkpoint the next attempt will resume from. Null means the attempt would
+      // start over — which is a materially different thing to promise, so it is not
+      // collapsed into the decision.
+      resume_artifact_id: row.resume_artifact_id ?? null,
+    },
     placement: {
       node_id: row.scheduled_node_id,
       node_name: row.node_name ?? null,
@@ -292,4 +301,112 @@ export async function queueDepth(client) {
     depth.total += row.count;
   }
   return depth;
+}
+
+/**
+ * Failed jobs on which no retry decision has been recorded.
+ *
+ * The executor's queue for the retry driver. Ordered oldest-first so a backlog after a
+ * node failure is worked through in the order things broke, rather than newest-first,
+ * which would leave the earliest casualties waiting longest.
+ */
+export async function listJobsAwaitingRetryDecision(client, { limit = 50 } = {}) {
+  const { rows } = await client.query(
+    `SELECT ${JOB_COLUMNS}
+     ${JOB_FROM}
+     WHERE j.state = 'FAILED' AND j.retry_decided_at IS NULL
+     ORDER BY j.finished_at
+     LIMIT $1`,
+    [limit],
+  );
+  return rows.map(toJob);
+}
+
+/**
+ * Records that a decision was reached, whatever it was.
+ *
+ * Written for every outcome including "no", because it is what stops the executor
+ * reconsidering the same failed job on every pass for the rest of the platform's life.
+ */
+export async function setResumeArtifact(client, id, artifactId) {
+  await client.query(
+    'UPDATE training_jobs SET resume_artifact_id = $2, updated_at = now() WHERE id = $1',
+    [id, artifactId],
+  );
+}
+
+/**
+ * Records a *final* decision: this job will not run again.
+ *
+ * Only refusals are final. Issuing a retry deliberately leaves `retry_decided_at` null,
+ * because the new attempt can fail too and must be ruled on in its turn.
+ */
+export async function recordRetryDecision(client, id, { decision, resumeArtifactId = null }) {
+  await client.query(
+    `UPDATE training_jobs
+     SET retry_decision = $2, retry_decided_at = now(), resume_artifact_id = $3,
+         updated_at = now()
+     WHERE id = $1`,
+    [id, decision, resumeArtifactId],
+  );
+}
+
+/**
+ * Resets the per-attempt fields so the next attempt starts clean.
+ *
+ * Everything cleared here describes the attempt that just failed, and leaving any of it
+ * behind makes the new attempt read as the old one:
+ *
+ * - `k8s_job_name` is derived from the attempt number, so the next attempt gets a new
+ *   Job and the old one is not mistaken for it by the status loop;
+ * - `scheduled_node_id` and `placement_reason`, because placement is decided fresh —
+ *   the node that failed may be exactly the node not to use;
+ * - `failure_reason` and `pending_reason`, which explained a run that is over. The
+ *   event log keeps them; the row describes the present.
+ *
+ * `attempt` is incremented here rather than at launch so that the number is already
+ * correct when the manifest is built.
+ */
+export async function prepareRetry(client, id) {
+  const { rows } = await client.query(
+    `UPDATE training_jobs
+     SET attempt = attempt + 1,
+         -- The verdict described the attempt that just failed. Leaving it set would
+         -- keep this job out of the awaiting-decision sweep for ever, so a second
+         -- failure of the same job would never be ruled on -- it would sit FAILED with
+         -- a stale RETRY on it and the remaining budget unspent.
+         retry_decision = NULL,
+         retry_decided_at = NULL,
+         k8s_job_name = '',
+         scheduled_node_id = NULL,
+         placement_reason = '',
+         failure_reason = '',
+         pending_reason = '',
+         finished_at = NULL,
+         updated_at = now()
+     WHERE id = $1
+     RETURNING attempt`,
+    [id],
+  );
+  return rows[0]?.attempt ?? null;
+}
+
+/**
+ * The most recent checkpoint a job can resume from.
+ *
+ * READY only: resuming from bytes nobody confirmed exist is how a retry turns one
+ * failure into two. Ordered by step rather than by time, because that is the axis the
+ * training loop resumes on, and a checkpoint uploaded late is still the checkpoint for
+ * its step.
+ */
+export async function latestResumableCheckpoint(client, jobId) {
+  const { rows } = await client.query(
+    `SELECT id, name, uri, step, size_bytes
+     FROM artifacts
+     WHERE job_id = $1 AND kind = 'checkpoint' AND status = 'READY'
+     ORDER BY step DESC NULLS LAST, created_at DESC
+     LIMIT 1`,
+    [jobId],
+  );
+  return rows[0] ?? null;
 }

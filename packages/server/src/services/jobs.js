@@ -7,6 +7,7 @@
  */
 
 import { JobState, transition, IllegalTransitionError } from '../domain/job-state.js';
+import { decideRetry, RetryDecision } from '../domain/retry-policy.js';
 import { withTransaction } from '../db/pool.js';
 import * as jobsRepo from '../repos/jobs.js';
 import * as projectsRepo from '../repos/projects.js';
@@ -401,3 +402,109 @@ export async function listJobs(pool, filters) {
 }
 
 export { IllegalTransitionError };
+
+/**
+ * Decides what happens to one failed job, and does it.
+ *
+ * The whole decision and its consequences run in a single transaction, holding the job
+ * row locked. That is not incidental: without it two executor passes could both read a
+ * FAILED job with one retry left and both issue it, producing two attempts against a
+ * budget of one — and `max_retries` would mean nothing, which is the same class of bug
+ * as the queue handing the same job to two schedulers.
+ *
+ * Every outcome writes a decision, including "no". An unrecorded refusal would be
+ * reconsidered on the next pass, and the next, writing an identical event every couple
+ * of seconds for as long as the platform runs.
+ *
+ * @returns {Promise<object>} the decision, with `applied` saying whether a retry was issued
+ */
+export async function considerRetry(pool, jobId, { logger = null } = {}) {
+  return withTransaction(pool, async (client) => {
+    const job = await jobsRepo.getJobForUpdate(client, jobId);
+    if (!job) throw new NotFoundError(`job ${jobId} not found`);
+
+    // Another pass may have decided while this one waited for the lock.
+    if (job.retry?.decided_at) {
+      return { decision: job.retry.decision, applied: false, alreadyDecided: true };
+    }
+
+    const checkpoint = await jobsRepo.latestResumableCheckpoint(client, jobId);
+    const verdict = decideRetry(job, { canResume: checkpoint !== null });
+
+    if (verdict.decision !== RetryDecision.RETRY) {
+      await jobsRepo.recordRetryDecision(client, jobId, { decision: verdict.decision });
+      // A JOB_RETRY_DECLINED event rather than silence: "this job failed and stayed
+      // failed" is a decision the platform made, and the reason it made it is the thing
+      // an operator needs when asking why their job did not come back.
+      await jobsRepo.insertJobEvent(client, {
+        jobId,
+        eventType: 'JOB_RETRY_DECLINED',
+        message: verdict.message,
+        details: {
+          decision: verdict.decision,
+          category: verdict.category,
+          attempt: verdict.attempt,
+          max_retries: job.max_retries,
+        },
+      });
+      logger?.info(
+        { job_id: jobId, decision: verdict.decision, category: verdict.category },
+        'job will not be retried',
+      );
+      return { ...verdict, applied: false };
+    }
+
+    // FAILED -> RETRYING -> QUEUED. Both edges are walked rather than jumping straight
+    // to QUEUED: RETRYING is in the state machine precisely so the event log shows that
+    // a requeue was a retry and not a fresh submission, and a reader of `to_state`
+    // values can see the loop.
+    await applyTransition(client, jobId, JobState.RETRYING, {
+      message: verdict.message,
+      details: {
+        decision: verdict.decision,
+        category: verdict.category,
+        attempt: verdict.attempt,
+        resume_artifact_id: checkpoint?.id ?? null,
+        resume_step: checkpoint?.step ?? null,
+      },
+    });
+
+    const attempt = await jobsRepo.prepareRetry(client, jobId);
+    // Only the checkpoint is carried forward. No `retry_decided_at` is written: a retry
+    // is not a final decision, and marking one would exclude this job from the driver's
+    // next sweep — so if the new attempt also failed, its remaining budget would never
+    // be spent. The guard against deciding twice on the *same* failure is the state
+    // check above, since a requeued job is QUEUED rather than FAILED.
+    await jobsRepo.setResumeArtifact(client, jobId, checkpoint?.id ?? null);
+
+    await applyTransition(client, jobId, JobState.QUEUED, {
+      message: checkpoint
+        ? `requeued as attempt ${attempt}, resuming from ${checkpoint.name} at step ${checkpoint.step}`
+        : `requeued as attempt ${attempt}, starting from the beginning`,
+      details: { attempt, resume_artifact_id: checkpoint?.id ?? null },
+    });
+
+    logger?.info(
+      {
+        job_id: jobId,
+        attempt,
+        category: verdict.category,
+        resume_artifact_id: checkpoint?.id ?? null,
+        resume_step: checkpoint?.step ?? null,
+      },
+      'job requeued for retry',
+    );
+
+    return { ...verdict, applied: true, attempt, resume: checkpoint ?? null };
+  });
+}
+
+/** Failed jobs the retry driver has not ruled on yet. */
+export async function listJobsAwaitingRetryDecision(pool, options) {
+  return jobsRepo.listJobsAwaitingRetryDecision(pool, options);
+}
+
+/** The checkpoint a job would resume from, or null. */
+export async function getResumeCheckpoint(pool, jobId) {
+  return jobsRepo.latestResumableCheckpoint(pool, jobId);
+}

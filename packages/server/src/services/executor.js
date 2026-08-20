@@ -153,10 +153,10 @@ export async function reconcileJob(pool, backend, job, { logger = null, apiUrl =
  *
  * @param {object} [options]
  * @param {number} [options.maxLaunches] how many queued jobs to admit this pass
- * @returns {Promise<{reconciled: number, launched: number, requeued: number, errors: number}>}
+ * @returns {Promise<{reconciled: number, launched: number, requeued: number, retried: number, errors: number}>}
  */
 export async function runOnce(pool, backend, { logger = null, maxLaunches = 10, apiUrl = null } = {}) {
-  const summary = { reconciled: 0, launched: 0, requeued: 0, errors: 0 };
+  const summary = { reconciled: 0, launched: 0, requeued: 0, retried: 0, errors: 0 };
 
   const active = await jobService.listJobsToReconcile(pool);
   for (const job of active) {
@@ -166,6 +166,24 @@ export async function runOnce(pool, backend, { logger = null, maxLaunches = 10, 
     } catch (err) {
       summary.errors += 1;
       logger?.error({ err, job_id: job.id, state: job.state }, 'reconcile failed');
+    }
+  }
+
+  // Then rule on anything that failed. This sits between reconciling and launching on
+  // purpose: a retry issued now is in the queue before this same pass gets to it, so a
+  // job that failed on a lost node is back in flight within one tick rather than
+  // waiting for the next one.
+  for (const failed of await jobService.listJobsAwaitingRetryDecision(pool)) {
+    try {
+      const outcome = await jobService.considerRetry(pool, failed.id, { logger });
+      if (outcome.applied) summary.retried += 1;
+    } catch (err) {
+      summary.errors += 1;
+      // Deliberately not fatal to the pass, and deliberately not a second attempt at
+      // deciding: the job stays FAILED with no decision recorded, so the next pass tries
+      // again. A retry driver that gave up permanently on a transient database error
+      // would strand the job in exactly the state retrying exists to rescue it from.
+      logger?.error({ err, job_id: failed.id }, 'retry decision failed');
     }
   }
 
@@ -232,7 +250,8 @@ export function startExecutor(pool, backend, { logger = null, intervalMs = 2000,
     if (stopped) return;
     try {
       const summary = await runOnce(pool, backend, { logger, maxLaunches, apiUrl });
-      if (summary.launched > 0 || summary.reconciled > 0 || summary.errors > 0 || summary.requeued > 0) {
+      if (summary.launched > 0 || summary.reconciled > 0 || summary.errors > 0
+        || summary.requeued > 0 || summary.retried > 0) {
         logger?.debug({ ...summary, backend: backend.name }, 'executor pass');
       }
     } catch (err) {

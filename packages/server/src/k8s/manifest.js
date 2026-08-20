@@ -104,6 +104,15 @@ function containerEnv(job, { apiUrl = null } = {}) {
   if (job.experiment?.id) {
     reserved.ASHML_EXPERIMENT_ID = job.experiment.id;
   }
+  // Present only on a retry that has something to resume from, and it is an artifact
+  // *id* rather than a URL for the same reason the model server is handed one: the
+  // download has to be signed when the container asks, not when the manifest was
+  // written. A workload that does not implement resuming simply ignores it and starts
+  // over, which is why this is an addition to the environment rather than a change to
+  // the command — the platform offers a checkpoint, it does not impose one.
+  if (job.retry?.resume_artifact_id) {
+    reserved.ASHML_RESUME_FROM = job.retry.resume_artifact_id;
+  }
 
   const userSupplied = env.filter((entry) => !Object.hasOwn(reserved, entry.name));
   return [
