@@ -16,6 +16,10 @@
  *     observeJob(namespace, name): Promise<Observation|null>,
  *     deleteJob(namespace, name): Promise<void>,
  *     readLogs(namespace, name, options): Promise<string>,
+ *     applyDeployment(manifest): Promise<void>,
+ *     applyService(manifest): Promise<void>,
+ *     observeDeployment(namespace, name): Promise<DeploymentObservation|null>,
+ *     deleteDeployment(namespace, name): Promise<void>,
  *     close(): Promise<void>,
  *   }
  *
@@ -30,6 +34,18 @@
  *
  * `observeJob` returns null when the Job is not in the cluster at all, which the
  * executor must treat as a distinct case from "not finished yet".
+ *
+ * A `DeploymentObservation` is the serving equivalent, and keeps desired and ready
+ * apart rather than reducing them to a single health flag:
+ *
+ *   { desired: number, ready: number, available: number, updated: number,
+ *     reason: string|null }
+ *
+ * `ready` counts pods that passed their readiness probe — which for a model server
+ * means the weights are loaded — not pods that merely exist. A deployment with three
+ * desired and one ready is neither healthy nor failed, and that middle state is the
+ * one an operator most needs to see. `observeDeployment` returns null when the
+ * Deployment is absent, with the same meaning as for Jobs.
  *
  * A `NodeInfo` is what the scheduler needs to know about a machine, already converted
  * out of Kubernetes' quantity strings into plain numbers:

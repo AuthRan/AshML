@@ -8,6 +8,7 @@
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { startExecutor } from './services/executor.js';
+import { startDeploymentSync } from './services/deployments.js';
 import { startDiscovery, discoverCluster } from './services/nodes.js';
 
 const config = loadConfig();
@@ -22,6 +23,7 @@ try {
 
 let executor = null;
 let discovery = null;
+let deploymentSync = null;
 if (config.executorEnabled) {
   try {
     // Done before the loop starts, and before the port is bound, so a broken
@@ -58,6 +60,11 @@ if (config.executorEnabled) {
     // What training pods are told to report back to (see config.apiAdvertiseUrl).
     apiUrl: config.apiAdvertiseUrl,
   });
+
+  deploymentSync = startDeploymentSync(app.db, app.k8s, {
+    logger: app.log,
+    intervalMs: config.deploymentSyncIntervalMs,
+  });
 }
 
 // Terminate cleanly so Kubernetes rollouts and Ctrl-C are not violent.
@@ -69,6 +76,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
       // pool underneath an in-flight pass would roll back a state change that has
       // already happened in the cluster.
       await executor?.stop();
+      await deploymentSync?.stop();
       await discovery?.stop();
       await app.close();
       process.exit(0);

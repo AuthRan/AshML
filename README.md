@@ -4,12 +4,12 @@ A Kubernetes-native GPU machine learning infrastructure platform — a miniature
 ML cloud. Register datasets, submit training jobs, schedule them onto GPU resources,
 track experiments, version models, deploy inference, and observe all of it.
 
-**Status: Phase 4 (ML lifecycle) complete; Phase 5 (serve, observe, recover) next.** Projects,
-datasets, experiments and training jobs are persisted in PostgreSQL with an append-only
-event log and a `SKIP LOCKED` queue. Submitted jobs **actually run**: AshML's own
-scheduler decides whether a job may run and on which node, the executor creates the
-Kubernetes Job there, and job state is driven from observed Pod status through to
-`SUCCEEDED`, `FAILED` or `CANCELLED`.
+**Status: Phases 0–4 complete; Phase 5 (serve, observe, recover) in progress — model
+serving is done.** Projects, datasets, experiments and training jobs are persisted in
+PostgreSQL with an append-only event log and a `SKIP LOCKED` queue. Submitted jobs
+**actually run**: AshML's own scheduler decides whether a job may run and on which node,
+the executor creates the Kubernetes Job there, and job state is driven from observed Pod
+status through to `SUCCEEDED`, `FAILED` or `CANCELLED`.
 
 Overfill the cluster and jobs queue rather than over-committing it; `ash job why <id>`
 prints every node the scheduler considered and what was wrong with it.
@@ -64,7 +64,12 @@ ash job submit examples/training/resnet-cifar.yaml --experiment <id>
 ```
 
 One full epoch — 390 steps over all 50 000 training images, no `MAX_STEPS` truncation —
-in 790 seconds, then **65.59% top-1 on the complete 10 000-image test set**.
+in 691 seconds, then **65.59% top-1 on the complete 10 000-image test set**.
+
+That run has been executed twice from the same seed and the same image digest. Both
+produced 0.6559 accuracy and 0.9687 loss, matching step by step from the first logged
+loss to the last. Recording a seed is only worth doing if it buys
+something, and this is the evidence that it does.
 
 **That number is undertrained and is not a CIFAR-10 result.** This architecture reaches
 ~95% when trained the 100–200 epochs the literature uses; this is one epoch, on a CPU.
@@ -77,6 +82,36 @@ object storage, loaded into a freshly built architecture, and re-evaluated over 
 test set, reproducing 0.6559 accuracy and 0.9687 loss exactly. `kubectl` confirms the pod
 ran on the node the scheduler chose. The dataset is verified against its published
 sha256 before it is extracted, and that digest is what `cifar10:v1` pins.
+
+### Serving what was trained
+
+A registered version becomes something that answers requests:
+
+```bash
+ash model deploy resnet18-cifar10 --replicas 2   # serves the PRODUCTION version
+ash deployment get resnet18-cifar10              # what the cluster reports back
+```
+
+Proven end to end on k3d: the ResNet-18 version above served **1 000 real CIFAR-10 test
+images at 66.0% top-1**, 8.7 ms per image on CPU — consistent with the 65.59% recorded
+for that artifact over the full test set, which is what shows the served model is the
+model that was evaluated.
+
+The inference image is generic. It is handed an **artifact id**, not a URL and not a
+baked-in model, and exchanges it for a time-limited download at startup through the same
+endpoint the training SDK uses — a presigned URL in the manifest would expire, and a pod
+restarting hours later would crash-loop on a dead signature.
+
+`/healthz` answers as soon as the process binds; `/readyz` answers only once the weights
+are loaded and a forward pass has run. They are wired to different probes deliberately:
+readiness on `/healthz` would route traffic to a pod with no model in it, and liveness on
+`/readyz` would kill a pod that is still downloading one — restarting it, and starting
+the download over.
+
+Status is observed, never assumed. Creating the objects reports `PROGRESSING`; only the
+sync loop reading `readyReplicas` back from the cluster may say `READY`. `DEGRADED` —
+was serving, now short of replicas — is kept distinct from `PROGRESSING`, because one
+word for both hides an outage inside something that sounds like startup.
 
 **Not yet:** GPU jobs cannot run on this host — the machine has two RTX 2080 Tis, but
 installing the NVIDIA container toolkit needs root, so no GPU reaches a k3d node and the
@@ -97,6 +132,7 @@ make db-up           # PostgreSQL + MinIO
 make migrate         # apply schema
 make cluster         # create the local k3d cluster
 make image           # build the smoke workload image and load it into the cluster
+make db-test         # a separate database for the tests, which truncate everything
 make test
 
 npm start            # start the control plane (API + executor)
@@ -207,6 +243,7 @@ from anywhere and importing nothing.
 | `ASHML_ARTIFACT_STORE` | `s3` | `s3` (MinIO or AWS) or `none` — no bucket; artifacts may still be registered against a caller-supplied URI, and complete as unverified |
 | `ASHML_S3_BUCKET` | `ashml` | Bucket checkpoints and models are written to |
 | `ASHML_S3_ENDPOINT` | `http://127.0.0.1:9000` | The dev MinIO. **Unset it for real AWS**, where the SDK resolves the host itself. Must be reachable *from a training pod* — see below |
+| `ASHML_DEPLOYMENT_SYNC_INTERVAL_MS` | `10000` | How often deployment status is read back from the cluster. Slower than the executor: a deployment sits READY for days |
 | `ASHML_API_ADVERTISE_URL` | `http://host.k3d.internal:8080` | What training pods are told to report to, injected as `ASHML_ENDPOINT`. In a cluster, the Service URL |
 | `ASHML_S3_REGION` | `us-east-1` | |
 | `ASHML_S3_ACCESS_KEY` / `ASHML_S3_SECRET_KEY` | dev MinIO credentials | Unset both to use the SDK credential chain (an IAM role in a cluster) |

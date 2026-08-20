@@ -491,6 +491,104 @@ components:
     def-9:
       type: object
       required:
+        - id
+        - name
+        - project
+        - model
+        - status
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        project:
+          type: string
+        model:
+          type: string
+        status:
+          type: string
+          enum:
+            - PENDING
+            - PROGRESSING
+            - READY
+            - DEGRADED
+            - FAILED
+            - STOPPED
+          description: What the cluster reports, not what was asked for. PROGRESSING means
+            the objects exist but no pod has loaded a model yet; DEGRADED means
+            it was serving and is now short of replicas.
+        image:
+          type: string
+        replicas:
+          type: integer
+          description: Replicas asked for
+        ready_replicas:
+          type: integer
+          description: Replicas that passed their readiness probe — which for a model
+            server means the weights are loaded, not merely that the pod exists
+        cpu:
+          type: number
+        memory_bytes:
+          type: integer
+        gpu:
+          type: integer
+        endpoint_url:
+          type:
+            - "null"
+            - string
+          description: The in-cluster address. Null means nothing is listening yet.
+        k8s_name:
+          type:
+            - "null"
+            - string
+        namespace:
+          type:
+            - "null"
+            - string
+        last_error:
+          type:
+            - "null"
+            - string
+          description: Why it is not serving. Cleared when it is, so it cannot go stale.
+        target:
+          type:
+            - "null"
+            - object
+          description: The model version this deployment serves.
+          properties:
+            model_version_id:
+              type: string
+              format: uuid
+            version:
+              type: integer
+            version_status:
+              type: string
+            traffic_weight:
+              type: integer
+            artifact_id:
+              type: string
+              format: uuid
+            artifact_status:
+              type: string
+            arch:
+              type:
+                - "null"
+                - string
+              description: The architecture the training run recorded on the artifact
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type:
+            - "null"
+            - string
+          format: date-time
+      title: Deployment
+    def-10:
+      type: object
+      required:
         - name
         - points
       properties:
@@ -521,7 +619,7 @@ components:
                 format: date-time
                 description: When the run observed the value, not when the API received it
       title: MetricSeries
-    def-10:
+    def-11:
       type: object
       required:
         - id
@@ -596,7 +694,7 @@ components:
           type: string
           format: date-time
       title: Artifact
-    def-11:
+    def-12:
       type: object
       required:
         - id
@@ -626,7 +724,7 @@ components:
           type: string
           format: date-time
       title: Model
-    def-12:
+    def-13:
       type: object
       required:
         - id
@@ -1834,6 +1932,185 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/def-8"
+  /api/v1/projects/{name}/models/{model}/deployments:
+    post:
+      summary: Deploy a model version
+      tags:
+        - deployments
+      description: Creates the Kubernetes Deployment and Service that serve a version,
+        or updates them if this deployment name already exists — which is how a
+        new version is rolled out without dropping traffic. With no version
+        given, the one in PRODUCTION is deployed; if none is promoted this fails
+        rather than quietly serving the newest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                version:
+                  type: integer
+                  minimum: 1
+                name:
+                  type: string
+                  description: Deployment name; defaults to the model name
+                replicas:
+                  type: integer
+                  minimum: 1
+                  default: 1
+                image:
+                  type: string
+                cpu:
+                  type: number
+                  minimum: 0
+                memory_bytes:
+                  type: integer
+                  minimum: 0
+                gpu:
+                  type: integer
+                  minimum: 0
+                arch:
+                  type: string
+                  description: Overrides the architecture recorded on the artifact
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: model
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-9"
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/deployments:
+    get:
+      summary: List a project's deployments
+      tags:
+        - deployments
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - deployments
+                properties:
+                  deployments:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-9"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/deployments/{deployment}:
+    get:
+      summary: Show a deployment
+      tags:
+        - deployments
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: deployment
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-9"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    delete:
+      summary: Remove a deployment
+      tags:
+        - deployments
+      description: Deletes the Kubernetes objects first and the record second. The
+        other order can leave pods serving that nothing in AshML knows about.
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: deployment
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - id
+                  - name
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  project:
+                    type: string
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
   /api/v1/jobs/{id}/metrics:
     post:
       summary: Report training metrics for a job
@@ -1976,7 +2253,7 @@ paths:
                   series:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-9"
+                      $ref: "#/components/schemas/def-10"
         "404":
           description: Default Response
           content:
@@ -2083,7 +2360,7 @@ paths:
                   series:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-9"
+                      $ref: "#/components/schemas/def-10"
         "404":
           description: Default Response
           content:
@@ -2149,7 +2426,7 @@ paths:
                   - artifact
                 properties:
                   artifact:
-                    $ref: "#/components/schemas/def-10"
+                    $ref: "#/components/schemas/def-11"
                   upload:
                     type:
                       - "null"
@@ -2221,7 +2498,7 @@ paths:
                   artifacts:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-10"
+                      $ref: "#/components/schemas/def-11"
         "404":
           description: Default Response
           content:
@@ -2273,7 +2550,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-10"
+                $ref: "#/components/schemas/def-11"
         "400":
           description: Default Response
           content:
@@ -2326,7 +2603,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-10"
+                $ref: "#/components/schemas/def-11"
         "404":
           description: Default Response
           content:
@@ -2411,7 +2688,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-10"
+                $ref: "#/components/schemas/def-11"
         "404":
           description: Default Response
           content:
@@ -2457,7 +2734,7 @@ paths:
                   artifacts:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-10"
+                      $ref: "#/components/schemas/def-11"
         "404":
           description: Default Response
           content:
@@ -2496,7 +2773,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-11"
+                $ref: "#/components/schemas/def-12"
         "404":
           description: Default Response
           content:
@@ -2532,7 +2809,7 @@ paths:
                   models:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-11"
+                      $ref: "#/components/schemas/def-12"
         "404":
           description: Default Response
           content:
@@ -2562,7 +2839,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-11"
+                $ref: "#/components/schemas/def-12"
         "404":
           description: Default Response
           content:
@@ -2619,7 +2896,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-12"
+                $ref: "#/components/schemas/def-13"
         "400":
           description: Default Response
           content:
@@ -2677,7 +2954,7 @@ paths:
                   versions:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-12"
+                      $ref: "#/components/schemas/def-13"
         "404":
           description: Default Response
           content:
@@ -2713,7 +2990,7 @@ paths:
                 type: object
                 properties:
                   version:
-                    $ref: "#/components/schemas/def-12"
+                    $ref: "#/components/schemas/def-13"
         "404":
           description: Default Response
           content:
@@ -2748,7 +3025,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-12"
+                $ref: "#/components/schemas/def-13"
         "404":
           description: Default Response
           content:
@@ -2810,7 +3087,7 @@ paths:
                   - version
                 properties:
                   version:
-                    $ref: "#/components/schemas/def-12"
+                    $ref: "#/components/schemas/def-13"
                   displaced:
                     type:
                       - "null"
@@ -2863,3 +3140,5 @@ tags:
     description: Checkpoints and models produced by runs
   - name: models
     description: "The model registry: versions and their lifecycle"
+  - name: deployments
+    description: Serving a model version, and what the cluster reports back

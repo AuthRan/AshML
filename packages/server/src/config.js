@@ -44,6 +44,11 @@ export function loadConfig(env = process.env) {
     // seconds; neither is worth a `LIST nodes` and an `nvidia-smi` fork on every job pass.
     discoveryIntervalMs: parseCount(env.ASHML_DISCOVERY_INTERVAL_MS, 'ASHML_DISCOVERY_INTERVAL_MS') ?? 15_000,
 
+    // Deployments change far less often than jobs: one sits READY for days, where a job
+    // moves through five states in a minute. Polling them on the executor's interval
+    // would be load spent to observe nothing.
+    deploymentSyncIntervalMs: parseCount(env.ASHML_DEPLOYMENT_SYNC_INTERVAL_MS, 'ASHML_DEPLOYMENT_SYNC_INTERVAL_MS') ?? 10_000,
+
     // The address a training pod should call the control plane on. It is not
     // `host`/`port`: the API binds 0.0.0.0 inside its own network namespace, which is
     // not an address anything else can reach. In development the control plane runs on

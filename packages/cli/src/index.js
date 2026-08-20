@@ -1139,6 +1139,134 @@ gpu
 
 // ------------------------------------------------------------------ system
 
+// ---------------------------------------------------------------- deployments
+
+const deployment = program
+  .command('deployment')
+  .description('Serving a model version, and what the cluster reports back');
+
+const deploymentProjectOption = ['-p, --project <name>', 'project the deployment belongs to (or $ASHML_PROJECT)'];
+
+/**
+ * How ready a deployment is, as a fraction rather than a word.
+ *
+ * "1/3" says something "PROGRESSING" does not: which way it is going and how far it
+ * has to go. The status column still carries the judgement.
+ */
+function readyLabel(d) {
+  return `${d.ready_replicas}/${d.replicas}`;
+}
+
+model
+  .command('deploy <name>')
+  .description('Serve a model version: creates the inference Deployment and Service')
+  .option(...modelProjectOption)
+  .option('--version <n>', 'version to serve; defaults to the one in PRODUCTION')
+  .option('--as <name>', 'deployment name; defaults to the model name')
+  .option('--replicas <n>', 'how many pods to run', '1')
+  .option('--cpu <n>', 'CPU cores per replica')
+  .option('--memory-bytes <n>', 'memory per replica')
+  .option('--gpu <n>', 'GPUs per replica')
+  .option('--image <ref>', 'inference image to run')
+  .option('--arch <name>', 'override the architecture recorded on the artifact')
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const project = requireProject(opts);
+    const body = { replicas: Number(opts.replicas) };
+    if (opts.version) body.version = Number(opts.version);
+    if (opts.as) body.name = opts.as;
+    if (opts.cpu) body.cpu = Number(opts.cpu);
+    if (opts.memoryBytes) body.memory_bytes = Number(opts.memoryBytes);
+    if (opts.gpu) body.gpu = Number(opts.gpu);
+    if (opts.image) body.image = opts.image;
+    if (opts.arch) body.arch = opts.arch;
+
+    const d = await api(endpoint(), `/api/v1/projects/${project}/models/${name}/deployments`, {
+      method: 'POST',
+      body,
+    });
+
+    output(opts, d, () => {
+      console.log(`deploying ${d.model} v${d.target?.version} as ${d.name}`);
+      console.log(`  status:   ${d.status}`);
+      console.log(`  replicas: ${readyLabel(d)}`);
+      console.log(`  endpoint: ${d.endpoint_url ?? 'not assigned yet'}`);
+      console.log('');
+      // PROGRESSING is the honest answer at this point and it is worth saying why, so
+      // nobody reads it as a failure: the objects exist, and no pod has loaded a model
+      // yet. Only the cluster can say when one has.
+      console.log('The objects exist; no replica has loaded the model yet. Watch it with:');
+      console.log(`  ash deployment get ${d.name}`);
+    });
+  });
+
+deployment
+  .command('list')
+  .description('List a project\'s deployments')
+  .option(...deploymentProjectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (opts) => {
+    const body = await api(endpoint(), `/api/v1/projects/${requireProject(opts)}/deployments`);
+    output(opts, body, ({ deployments }) => {
+      if (deployments.length === 0) {
+        console.log('No deployments in this project.');
+        return;
+      }
+      const table = newTable(['NAME', 'MODEL', 'VER', 'STATUS', 'READY', 'ENDPOINT', 'AGE']);
+      for (const d of deployments) {
+        table.push([
+          d.name,
+          d.model,
+          d.target?.version ?? '-',
+          d.status,
+          readyLabel(d),
+          d.endpoint_url ?? '-',
+          age(d.created_at),
+        ]);
+      }
+      console.log(table.toString());
+    });
+  });
+
+deployment
+  .command('get <name>')
+  .description('Show a deployment')
+  .option(...deploymentProjectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const d = await api(endpoint(), `/api/v1/projects/${requireProject(opts)}/deployments/${name}`);
+    output(opts, d, () => {
+      console.log(`name:      ${d.name}`);
+      console.log(`project:   ${d.project}`);
+      console.log(`model:     ${d.model} v${d.target?.version ?? '?'} (${d.target?.version_status ?? '?'})`);
+      console.log(`status:    ${d.status}`);
+      console.log(`ready:     ${readyLabel(d)} replicas`);
+      console.log(`endpoint:  ${d.endpoint_url ?? 'not assigned yet'}`);
+      console.log(`image:     ${d.image}`);
+      console.log(`arch:      ${d.target?.arch ?? 'unknown'}`);
+      console.log(`artifact:  ${d.target?.artifact_id ?? '-'} (${d.target?.artifact_status ?? '-'})`);
+      console.log(`resources: ${d.cpu} CPU, ${size(d.memory_bytes)}${d.gpu ? `, ${d.gpu} GPU` : ''}`);
+      if (d.last_error) {
+        console.log('');
+        console.log(`not serving: ${d.last_error}`);
+      }
+    });
+  });
+
+deployment
+  .command('delete <name>')
+  .description('Remove a deployment and the Kubernetes objects behind it')
+  .option(...deploymentProjectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const removed = await api(
+      endpoint(),
+      `/api/v1/projects/${requireProject(opts)}/deployments/${name}`,
+      { method: 'DELETE' },
+    );
+    output(opts, removed, () => console.log(`removed deployment ${removed.name}`));
+  });
+
 program
   .command('version')
   .description('Show client and server versions')

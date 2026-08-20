@@ -274,7 +274,7 @@ whether that version serves traffic.
 
 Spec milestones 8, 9, 10.
 
-- `ash model deploy` → inference Deployment + Service, health/readiness probes
+- ~~`ash model deploy` → inference Deployment + Service, health/readiness probes~~ **done**
 - Model router (own Fastify service) with weighted version routing
 - Prometheus + Grafana + DCGM-exporter; Loki for logs; OTel traces
 - Dashboards: cluster/GPU, job pipeline, training curves, inference latency
@@ -284,6 +284,61 @@ Spec milestones 8, 9, 10.
 
 **Exit criteria:** the full §50 user journey runs start to finish, including a killed
 pod recovering, with real numbers in `docs/benchmarks.md`.
+
+### Serving, as built
+
+`ash model deploy` turns a registered version into a Kubernetes Deployment and a
+ClusterIP Service. Proven end to end: the ResNet-18 version trained in Phase 4 was
+deployed to k3d and answered **1 000 real CIFAR-10 test images at 66.0% top-1**, 8.7 ms
+per image on CPU — consistent with the 65.59% recorded for that artifact over the full
+test set, which is what confirms the served model is the model that was evaluated.
+
+The inference image is generic. It is handed an **artifact id**, not a URL or a baked-in
+model, and exchanges it for a time-limited download at startup through the same endpoint
+the training SDK uses. A presigned URL in the manifest would expire, and a pod that
+restarted six hours later would crash-loop on a dead signature long after anyone
+connected the two.
+
+**Readiness is the part that matters.** `/healthz` answers as soon as the process binds;
+`/readyz` answers only once the weights are loaded *and* a forward pass has run. The two
+are wired to different probes on purpose, and getting it backwards breaks something
+specific in each direction:
+
+- readiness on `/healthz` puts a pod with no model into the Service's endpoints, and
+  callers get 503s that look like the model's fault;
+- liveness on `/readyz` kills a pod that is slowly but successfully downloading a large
+  checkpoint — and the restart begins the download again, a crash loop caused entirely
+  by the probe.
+
+A startup probe covers the first load so a slow cold start is never mistaken for a hang.
+
+Deployment status is **observed, not assumed**, exactly as job state is. Creating the
+objects reports `PROGRESSING`; only the sync loop, reading `readyReplicas` back from the
+cluster, may say `READY`. `DEGRADED` is kept distinct from `PROGRESSING` because "was
+serving and is now short of replicas" and "has not started serving yet" are different
+events, and one word for both hides an outage inside something that sounds like startup.
+
+Four things are refused at deploy time rather than inside a container: a version whose
+artifact is not `READY`, an `ARCHIVED` version, an architecture the server has no builder
+for, and a deployment name already serving a different model. The architecture is read
+from what the **training run recorded** on the artifact, not retyped by the operator —
+the run is the only thing that actually knows.
+
+Deploying with no version named serves whatever is in `PRODUCTION`, and fails plainly if
+nothing is promoted rather than falling back to the newest. "Latest" and "the one we
+chose" are different things, and quietly substituting one for the other is how the wrong
+model ends up serving.
+
+### Deferred within this phase, so far
+
+- **Weighted routing.** `deployment_targets` carries the weight column and a deployment
+  holds exactly one target at 100. Two targets are meaningless until the router exists,
+  because nothing would decide which one answers.
+- **External exposure.** The Service is a ClusterIP. A NodePort per model would hand out
+  a different port for every deployment and make the address depend on which node
+  answered; that belongs to a gateway.
+- **Autoscaling.** Replicas are what was asked for. Scaling on load needs the metrics
+  that arrive later in this phase.
 
 ---
 

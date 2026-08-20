@@ -169,6 +169,7 @@ export function createKubernetesBackend({ namespace = 'ashml-jobs', kubeconfig =
     clients = {
       core: kc.makeApiClient(k8s.CoreV1Api),
       batch: kc.makeApiClient(k8s.BatchV1Api),
+      apps: kc.makeApiClient(k8s.AppsV1Api),
     };
     return clients;
   }
@@ -359,6 +360,114 @@ export function createKubernetesBackend({ namespace = 'ashml-jobs', kubeconfig =
         // away. Neither is an error worth failing the request over.
         if (statusOf(err) === 400 || statusOf(err) === 404) return null;
         throw err;
+      }
+    },
+
+    /**
+     * Creates a Deployment, or updates the one already there.
+     *
+     * Unlike a training Job, a deployment is a long-lived object that legitimately
+     * changes: rolling out a new model version is an update to the same Deployment, and
+     * Kubernetes' rolling update is what keeps the old pods serving until the new ones
+     * pass their readiness probe. Deleting and recreating would drop traffic on every
+     * version change for no benefit.
+     *
+     * 409 therefore means "already exists, update it", where for `createJob` it meant
+     * "leave it alone" — the difference is that a Job's identity includes its attempt
+     * number, so a colliding Job is the same attempt, while a colliding Deployment is
+     * the previous state of a thing that is meant to be mutated.
+     */
+    async applyDeployment(manifest) {
+      const { apps } = connect();
+      const ns = manifest.metadata.namespace ?? namespace;
+      try {
+        await apps.createNamespacedDeployment({ namespace: ns, body: manifest });
+      } catch (err) {
+        if (statusOf(err) !== 409) throw err;
+        await apps.replaceNamespacedDeployment({
+          namespace: ns,
+          name: manifest.metadata.name,
+          body: manifest,
+        });
+      }
+    },
+
+    /**
+     * Creates the Service if it is absent.
+     *
+     * Not replaced when it already exists: a Service's `spec.clusterIP` is assigned by
+     * the cluster and immutable, so sending back a manifest without it is rejected. The
+     * fields AshML sets — selector, ports — do not change for the life of a deployment,
+     * so there is nothing to update anyway.
+     */
+    async applyService(manifest) {
+      const { core } = connect();
+      const ns = manifest.metadata.namespace ?? namespace;
+      try {
+        await core.createNamespacedService({ namespace: ns, body: manifest });
+      } catch (err) {
+        if (statusOf(err) !== 409) throw err;
+      }
+    },
+
+    /**
+     * Reports what the cluster currently shows for a Deployment.
+     *
+     * `ready` is the number that decides whether AshML calls a deployment READY, and it
+     * is deliberately `readyReplicas` rather than `replicas` or `availableReplicas`:
+     * `replicas` counts pods that exist, including ones still downloading a model and
+     * failing their readiness probe. Reporting those as ready is exactly the overclaim
+     * the probe split exists to prevent.
+     *
+     * @returns {Promise<object|null>} null when the Deployment does not exist
+     */
+    async observeDeployment(ns, name) {
+      const { apps } = connect();
+      let deployment;
+      try {
+        deployment = await apps.readNamespacedDeployment({ namespace: ns, name });
+      } catch (err) {
+        if (statusOf(err) === 404) return null;
+        throw err;
+      }
+
+      const status = deployment.status ?? {};
+      const conditions = status.conditions ?? [];
+
+      // Kubernetes reports a stalled rollout as Progressing=False with reason
+      // ProgressDeadlineExceeded. Surfacing its own message is more use than
+      // paraphrasing it: it names the ReplicaSet that could not come up.
+      const progressing = conditions.find((c) => c.type === 'Progressing');
+      const failure = progressing?.status === 'False' ? (progressing.message ?? progressing.reason) : null;
+
+      return {
+        desired: deployment.spec?.replicas ?? 0,
+        ready: status.readyReplicas ?? 0,
+        available: status.availableReplicas ?? 0,
+        updated: status.updatedReplicas ?? 0,
+        reason: failure,
+      };
+    },
+
+    /**
+     * Removes a deployment's Deployment and its Service.
+     *
+     * Both, because they are one thing to the operator who asked for it, and a Service
+     * left behind resolves to no endpoints — which fails as a connection timeout rather
+     * than as anything that mentions a deleted deployment.
+     */
+    async deleteDeployment(ns, name) {
+      const { apps, core } = connect();
+      for (const remove of [
+        () => apps.deleteNamespacedDeployment({ namespace: ns, name, propagationPolicy: 'Background' }),
+        () => core.deleteNamespacedService({ namespace: ns, name }),
+      ]) {
+        try {
+          await remove();
+        } catch (err) {
+          // Already gone is the state we were asking for.
+          if (statusOf(err) !== 404) throw err;
+        }
       }
     },
 

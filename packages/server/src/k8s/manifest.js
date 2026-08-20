@@ -205,3 +205,206 @@ export function buildJobManifest(job, { namespace = 'ashml-jobs', nodeName = nul
     },
   };
 }
+
+// --------------------------------------------------------------------- inference
+
+/** The port the model server listens on inside the container. */
+export const SERVING_PORT = 8081;
+
+/**
+ * Builds the Kubernetes name shared by a deployment's Deployment and Service.
+ *
+ * Same construction as `kubeJobName` and for the same reasons, minus the attempt
+ * suffix: a deployment is long-lived and updated in place, so there is no attempt to
+ * disambiguate. Deployment and Service share the name because they are one thing to an
+ * operator, and `kubectl get all -l ashml.io/deployment-id=<id>` is how you find both.
+ */
+export function kubeDeploymentName(deployment) {
+  const id8 = String(deployment.id).replaceAll('-', '').slice(0, 8);
+  const suffix = `-${id8}`;
+  const prefix = `${MANAGED_BY}-svc-`;
+  const budget = MAX_NAME - prefix.length - suffix.length;
+
+  const stem = String(deployment.name).slice(0, Math.max(1, budget)).replace(/-+$/, '');
+  return `${prefix}${stem}${suffix}`;
+}
+
+/**
+ * The environment that tells a model server which model it is.
+ *
+ * The server is handed an artifact *id*, not a URL. It exchanges that for a
+ * time-limited download URL at startup, which is what lets a pod that restarts hours
+ * later still fetch its own weights — a presigned URL baked into the manifest would
+ * expire and the pod would crash-loop on a dead signature long after anyone had stopped
+ * associating the two.
+ */
+function servingEnv(deployment, { apiUrl = null } = {}) {
+  const env = [
+    { name: 'ASHML_MODEL_ARCH', value: String(deployment.target.arch) },
+    { name: 'ASHML_ARTIFACT_ID', value: String(deployment.target.artifact_id) },
+    { name: 'ASHML_PORT', value: String(SERVING_PORT) },
+    { name: 'ASHML_DEPLOYMENT_ID', value: String(deployment.id) },
+    { name: 'ASHML_MODEL_VERSION', value: String(deployment.target.version) },
+  ];
+  // Omitted rather than guessed when unconfigured, exactly as for training jobs: the
+  // server then says it was never told where to fetch from, instead of failing with a
+  // connection error to an invented address.
+  if (apiUrl) env.unshift({ name: 'ASHML_ENDPOINT', value: apiUrl });
+  return env;
+}
+
+/**
+ * Liveness, readiness and startup probes for a model server.
+ *
+ * The three are genuinely different questions and conflating any two of them breaks
+ * something specific:
+ *
+ * - **readiness** hits `/readyz`, which is 200 only once the weights are loaded and a
+ *   forward pass has run. Pointing this at `/healthz` would put a pod with no model in
+ *   it into the Service's endpoints, and callers would get 503s that look like the
+ *   model's fault.
+ * - **liveness** hits `/healthz`, which answers as soon as the process binds. Pointing
+ *   this at `/readyz` would kill a pod that is slowly but successfully downloading a
+ *   large checkpoint, and restarting it makes the download start over — a crash loop
+ *   caused entirely by the probe.
+ * - **startup** guards the first load. Until it passes, liveness is not evaluated at
+ *   all, so a cold start that takes longer than the liveness threshold is not mistaken
+ *   for a hang. `failureThreshold * periodSeconds` is the budget for pulling weights
+ *   over the network; it is generous because being wrong in the other direction costs a
+ *   restart loop that never converges.
+ */
+function servingProbes() {
+  const port = SERVING_PORT;
+  return {
+    startupProbe: {
+      httpGet: { path: '/readyz', port },
+      periodSeconds: 5,
+      failureThreshold: 60,
+    },
+    readinessProbe: {
+      httpGet: { path: '/readyz', port },
+      periodSeconds: 10,
+      failureThreshold: 3,
+    },
+    livenessProbe: {
+      httpGet: { path: '/healthz', port },
+      periodSeconds: 20,
+      failureThreshold: 3,
+    },
+  };
+}
+
+/**
+ * Builds the Kubernetes Deployment for a model deployment.
+ *
+ * @param {object} deployment a deployment row joined with its single target
+ * @param {object} [options]
+ * @returns {object} a Kubernetes apps/v1 Deployment
+ */
+export function buildDeploymentManifest(deployment, { namespace = 'ashml-jobs', apiUrl = null } = {}) {
+  if (!deployment.image) {
+    throw new Error(`deployment ${deployment.id}: image is required`);
+  }
+  if (!deployment.target?.artifact_id) {
+    throw new Error(`deployment ${deployment.id}: target.artifact_id is required`);
+  }
+
+  const name = kubeDeploymentName(deployment);
+
+  // `ashml.io/deployment-id` is the link back to the database row, read by the status
+  // loop rather than parsing the name — same contract as `ashml.io/job-id`.
+  const labels = {
+    'app.kubernetes.io/managed-by': MANAGED_BY,
+    'app.kubernetes.io/component': 'model-server',
+    'ashml.io/deployment-id': deployment.id,
+    'ashml.io/project': deployment.project,
+  };
+
+  // The selector must be stable for the life of the Deployment: `spec.selector` is
+  // immutable in Kubernetes, so anything that can change on an update — the version,
+  // the artifact — must not appear in it.
+  const selector = {
+    'app.kubernetes.io/managed-by': MANAGED_BY,
+    'ashml.io/deployment-id': deployment.id,
+  };
+
+  const annotations = {
+    'ashml.io/deployment-name': deployment.name,
+    'ashml.io/model': String(deployment.model ?? ''),
+    'ashml.io/model-version': String(deployment.target.version),
+    'ashml.io/artifact-id': String(deployment.target.artifact_id),
+  };
+
+  const container = {
+    name: 'model-server',
+    image: deployment.image,
+    imagePullPolicy: deployment.image_pull_policy ?? 'IfNotPresent',
+    ports: [{ name: 'http', containerPort: SERVING_PORT }],
+    env: servingEnv(deployment, { apiUrl }),
+    resources: resourceRequirements({
+      cpu: deployment.cpu,
+      memory_bytes: deployment.memory_bytes,
+      gpu: deployment.gpu,
+    }),
+    ...servingProbes(),
+  };
+
+  return {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: { name, namespace, labels, annotations },
+    spec: {
+      replicas: deployment.replicas,
+      selector: { matchLabels: selector },
+      template: {
+        metadata: { labels: { ...labels, ...selector }, annotations },
+        spec: { containers: [container] },
+      },
+    },
+  };
+}
+
+/**
+ * Builds the Service that gives a deployment a stable address.
+ *
+ * ClusterIP: this is the address other things *inside* the cluster call, and it is what
+ * `endpoint_url` records. Exposing it outside the cluster is a gateway's job, not a
+ * per-deployment one — a NodePort per model would hand out a different port for every
+ * deployment and make the address depend on which node answered.
+ */
+export function buildServiceManifest(deployment, { namespace = 'ashml-jobs' } = {}) {
+  const name = kubeDeploymentName(deployment);
+
+  return {
+    apiVersion: 'v1',
+    kind: 'Service',
+    metadata: {
+      name,
+      namespace,
+      labels: {
+        'app.kubernetes.io/managed-by': MANAGED_BY,
+        'app.kubernetes.io/component': 'model-server',
+        'ashml.io/deployment-id': deployment.id,
+        'ashml.io/project': deployment.project,
+      },
+    },
+    spec: {
+      type: 'ClusterIP',
+      selector: {
+        'app.kubernetes.io/managed-by': MANAGED_BY,
+        'ashml.io/deployment-id': deployment.id,
+      },
+      ports: [{ name: 'http', port: 80, targetPort: SERVING_PORT, protocol: 'TCP' }],
+    },
+  };
+}
+
+/**
+ * The in-cluster URL for a deployment's Service.
+ *
+ * Recorded on the row when the Service is created, so that reading a deployment does
+ * not require reconstructing the naming scheme in a second place.
+ */
+export function serviceUrl(deployment, { namespace = 'ashml-jobs' } = {}) {
+  return `http://${kubeDeploymentName(deployment)}.${namespace}.svc.cluster.local`;
+}

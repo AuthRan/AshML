@@ -34,6 +34,7 @@ import { registerExperimentRoutes } from './routes/experiments.js';
 import { registerMetricRoutes } from './routes/metrics.js';
 import { registerArtifactRoutes } from './routes/artifacts.js';
 import { registerModelRoutes } from './routes/models.js';
+import { registerDeploymentRoutes } from './routes/deployments.js';
 import { createPool } from './db/pool.js';
 import { IllegalTransitionError } from './domain/job-state.js';
 
@@ -93,6 +94,10 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null,
   }
   app.decorate('gpuProvider', provider);
   app.decorate('ashmlVersion', config.version);
+  // The address a *container* should call this API on, which is never the address this
+  // API bound to. The executor gets it passed in from index.js; the deployment routes
+  // need it too, because a model server fetches its own weights through the API.
+  app.decorate('apiAdvertiseUrl', config.apiAdvertiseUrl);
 
   let backend;
   try {
@@ -154,6 +159,7 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null,
         { name: 'metrics', description: 'Training metrics reported by running jobs' },
         { name: 'artifacts', description: 'Checkpoints and models produced by runs' },
         { name: 'models', description: 'The model registry: versions and their lifecycle' },
+        { name: 'deployments', description: 'Serving a model version, and what the cluster reports back' },
       ],
     },
   });
@@ -193,6 +199,7 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null,
   await app.register(registerExperimentRoutes);
   await app.register(registerJobRoutes);
   await app.register(registerNodeRoutes);
+  await app.register(registerDeploymentRoutes);
   await app.register(registerMetricRoutes);
   await app.register(registerArtifactRoutes);
   await app.register(registerModelRoutes);

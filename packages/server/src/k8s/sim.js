@@ -39,6 +39,9 @@ export function createSimBackend({
   /** `${namespace}/${name}` -> record */
   const jobs = new Map();
 
+  /** `${namespace}/${name}` -> record. Deployments outlive jobs, so they are separate. */
+  const deployments = new Map();
+
   const simNodes = nodes ?? [{
     name: 'sim-node-0',
     ready: true,
@@ -110,6 +113,64 @@ export function createSimBackend({
       jobs.delete(key(ns, name));
     },
 
+    async applyDeployment(manifest) {
+      const ns = manifest.metadata.namespace ?? namespace;
+      const id = key(ns, manifest.metadata.name);
+      const existing = deployments.get(id);
+
+      // Replaces rather than ignores when it already exists, matching the real backend:
+      // a Deployment is a mutable object, and a rollout is an update to it.
+      deployments.set(id, {
+        manifest,
+        desired: manifest.spec?.replicas ?? 1,
+        // A rollout starts with nothing ready, even when replacing something that was.
+        // Reporting the old ready count against the new manifest would make a
+        // simulated rollout look instantaneous, which is the one thing about a rollout
+        // worth simulating.
+        ready: 0,
+        observations: 0,
+        services: existing?.services ?? false,
+      });
+    },
+
+    async applyService(manifest) {
+      const ns = manifest.metadata.namespace ?? namespace;
+      const record = deployments.get(key(ns, manifest.metadata.name));
+      if (record) record.services = true;
+    },
+
+    async observeDeployment(ns, name) {
+      const record = deployments.get(key(ns, name));
+      if (!record) return null;
+
+      if (autoAdvance) {
+        record.observations += 1;
+        if (record.observations > observationsToRunning) {
+          record.ready = record.desired;
+        }
+      }
+
+      return {
+        desired: record.desired,
+        ready: record.ready,
+        available: record.ready,
+        updated: record.desired,
+        reason: null,
+        simulated: true,
+      };
+    },
+
+    async deleteDeployment(ns, name) {
+      deployments.delete(key(ns, name));
+    },
+
+    /** Test seam: drive a deployment's ready count directly, bypassing autoAdvance. */
+    _setReady(ns, name, ready) {
+      const record = deployments.get(key(ns, name));
+      if (!record) throw new Error(`sim: no such deployment ${key(ns, name)}`);
+      record.ready = ready;
+    },
+
     async readLogs(ns, name) {
       const record = jobs.get(key(ns, name));
       return record ? record.logs : null;
@@ -117,6 +178,7 @@ export function createSimBackend({
 
     async close() {
       jobs.clear();
+      deployments.clear();
     },
 
     /** Test seam: drive a job to a phase directly, bypassing autoAdvance. */
@@ -140,6 +202,7 @@ export function createSimBackend({
      */
     _reset() {
       jobs.clear();
+      deployments.clear();
     },
   };
 }
