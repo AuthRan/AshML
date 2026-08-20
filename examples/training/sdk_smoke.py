@@ -34,6 +34,12 @@ STEP_SECONDS = float(os.environ.get("SMOKE_STEP_SECONDS", "0.05"))
 #: down to make an interruption cheap and the recovery quick to observe.
 CHECKPOINT_EVERY = int(os.environ.get("SMOKE_CHECKPOINT_EVERY", str(STEPS_PER_EPOCH)))
 
+#: A heartbeat, so progress is visible from `ash job logs` and not only from metrics.
+#: The distinction matters when the control plane is unreachable: metrics are buffered
+#: in the process and may never arrive, while stdout keeps going regardless — which is
+#: what makes it evidence that a run survived an outage rather than wedged in one.
+LOG_EVERY = int(os.environ.get("SMOKE_LOG_EVERY", "5"))
+
 
 def main() -> None:
     with ashml.init() as run:
@@ -54,6 +60,9 @@ def main() -> None:
                 step=step,
                 epoch=step // STEPS_PER_EPOCH,
             )
+
+            if LOG_EVERY and step % LOG_EVERY == 0:
+                print(f"  step {step}/{STEPS} loss {fake_loss:.4f}", flush=True)
 
             time.sleep(STEP_SECONDS)
 

@@ -203,9 +203,13 @@ check('killing the control plane does not touch the training pod', async () => {
   );
   assert.equal(phase, 'Running', 'the training pod must not depend on the control plane');
 
+  // The workload's heartbeat, which goes to stdout and does not depend on the control
+  // plane being reachable. Metrics would not do here: they are buffered in the process
+  // and may never have arrived, so their absence proves nothing about whether the run
+  // kept working.
   const linesAfter = (await kubectl('logs', globalThis.__pod, '-n', NAMESPACE)).split('\n').length;
   assert.ok(
-    linesAfter > linesBefore,
+    linesAfter > linesBefore + 1,
     `the pod stopped making progress during the outage (${linesBefore} -> ${linesAfter} log lines)`,
   );
   note(`${(OUTAGE_MS / 1000).toFixed(0)}s outage: pod still Running, ${linesAfter - linesBefore} new log lines`);
@@ -255,30 +259,33 @@ check('the run finishes, and says whether the outage cost it any metrics', async
   const { logs } = await api('GET', `/api/v1/jobs/${globalThis.__job}/logs`);
   const dropped = logs.match(/(\d+) metric point\(s\) were dropped/);
 
-  const series = await api('GET', `/api/v1/jobs/${globalThis.__job}/metrics?name=loss&limit=20000`);
-  const steps = ((series.series ?? []).find((s) => s.name === 'loss')?.points ?? []).map((p) => p.step);
-  const missing = [];
-  for (let s = 0; s < STEPS; s += 1) if (!steps.includes(s)) missing.push(s);
+  // Counted in *points*, not steps. The workload reports three metrics per step, so a
+  // flush lost during the outage takes three points per step with it — comparing the
+  // SDK's count against a count of missing steps would disagree by a factor of three
+  // and look like a bug in whichever of the two you trusted less.
+  const { series } = await api('GET', `/api/v1/jobs/${globalThis.__job}/metrics?limit=20000`);
+  const missingPoints = series.reduce((total, s) => {
+    const steps = new Set(s.points.map((p) => p.step));
+    return total + (STEPS - steps.size);
+  }, 0);
+  const recorded = series.reduce((total, s) => total + s.points.length, 0);
 
   // Whatever the outage cost, it has to be *said*. A curve with a hole in it looks like
   // a training problem until you know it was a network one, which is why the SDK counts
   // dropped points and reports them at the end rather than failing quietly.
-  if (missing.length) {
-    assert.ok(
-      dropped,
-      `${missing.length} metric points are missing and the run never said so`,
-    );
+  if (missingPoints) {
+    assert.ok(dropped, `${missingPoints} metric points are missing and the run never said so`);
     assert.equal(
-      Number(dropped[1]), missing.length,
-      `the run reported ${dropped[1]} dropped points but ${missing.length} are missing`,
+      Number(dropped[1]), missingPoints,
+      `the run reported ${dropped[1]} dropped points but ${missingPoints} are missing`,
     );
-    note(`${missing.length} metric point(s) lost to the outage, and the run reported exactly that`);
+    note(`${missingPoints} metric point(s) lost to the outage, and the run reported exactly that`);
   } else {
     // The SDK's retries are jittered and bounded; a short outage can be ridden out.
     assert.ok(!dropped, `the run reported dropping ${dropped?.[1]} points, but none are missing`);
     note(`no metrics lost: the SDK's retries outlasted a ${(OUTAGE_MS / 1000).toFixed(0)}s outage`);
   }
-  note(`${steps.length}/${STEPS} steps recorded; job ${done.state}`);
+  note(`${recorded} metric points recorded across ${series.length} series; job ${done.state}`);
 });
 
 // ------------------------------------------------------------------- driver
