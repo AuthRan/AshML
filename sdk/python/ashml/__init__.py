@@ -16,6 +16,17 @@ which means a training script has to say something. This package exists to make 
 container — ``ASHML_ENDPOINT``, ``ASHML_JOB_ID``, ``ASHML_EXPERIMENT_ID`` — so the same
 script runs unchanged under the platform and, with those set by hand, outside it.
 
+A retried job is additionally offered the checkpoint it can resume from, and a workload
+that wants to take up the offer asks for it::
+
+    with ashml.init() as run:
+        resume = run.fetch_resume()      # None on a first attempt
+        if resume:
+            model.load_state_dict(torch.load(resume)["model"])
+
+Asking is the whole interface: a workload that never calls it starts from the beginning,
+which is what makes resuming an addition to the contract rather than a change to it.
+
 No third-party dependencies, on purpose: a training image is a fragile enough
 dependency graph already.
 """
@@ -37,6 +48,7 @@ def init(
     endpoint: str | None = None,
     job_id: str | None = None,
     experiment_id: str | None = None,
+    resume_artifact_id: str | None = None,
     report_start: bool = True,
     strict: bool = False,
     timeout: float = 10.0,
@@ -48,6 +60,11 @@ def init(
     platform this is called with no arguments at all. Passing them explicitly is for
     running the same script outside a job.
 
+    :param resume_artifact_id: the checkpoint this attempt should resume from. AshML
+        sets ``ASHML_RESUME_FROM`` on a retry that has a confirmed one to offer, and
+        leaves it unset otherwise, so a workload asks with :meth:`Run.fetch_resume`
+        rather than being told. See :meth:`Run.fetch_resume` for why a promised resume
+        that cannot be fetched raises instead of quietly starting over.
     :param report_start: also stamps the experiment's start and records the framework
         and hardware this run observed. Turn it off for a script that attaches to an
         already-running experiment.
@@ -61,6 +78,7 @@ def init(
     endpoint = endpoint or os.environ.get("ASHML_ENDPOINT")
     job_id = job_id or os.environ.get("ASHML_JOB_ID")
     experiment_id = experiment_id or os.environ.get("ASHML_EXPERIMENT_ID") or None
+    resume_artifact_id = resume_artifact_id or os.environ.get("ASHML_RESUME_FROM") or None
 
     if not job_id:
         raise RuntimeError(
@@ -78,6 +96,7 @@ def init(
         Client(endpoint, timeout=timeout),
         job_id,
         experiment_id=experiment_id,
+        resume_artifact_id=resume_artifact_id,
         strict=strict,
         **run_options,
     )

@@ -124,6 +124,13 @@ e2e: ## End-to-end: submit a job, run it on k3d, assert it SUCCEEDED
 e2e-scheduler: ## End-to-end: overfill the cluster, assert queueing and placement
 	node scripts/e2e-scheduler.mjs
 
+.PHONY: chaos-resume
+chaos-resume: ## Chaos: kill a training pod, assert the retry resumes from its checkpoint
+	# Needs a control plane that is already *running* and reachable from a pod, because
+	# what is being proved is that the platform recovers on its own loop rather than
+	# when a test calls into it. See the header of the script for the two addresses.
+	node scripts/chaos-resume.mjs
+
 .PHONY: openapi
 openapi: ## Regenerate api/openapi.yaml from the route schemas
 	npm run openapi

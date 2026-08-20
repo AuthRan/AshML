@@ -13,9 +13,11 @@ The other half, whether the control plane accepts what is sent, is
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -43,6 +45,10 @@ class StubHandler(BaseHTTPRequestHandler):
         })
         self._reply()
 
+    def do_GET(self):  # noqa: N802
+        self.server.requests.append({"path": self.path, "method": "GET"})
+        self._reply()
+
     def do_PUT(self):  # noqa: N802
         length = int(self.headers.get("content-length", 0))
         raw = self.rfile.read(length) if length else b""
@@ -56,9 +62,12 @@ class StubHandler(BaseHTTPRequestHandler):
 
     def _reply(self):
         status, payload = self.server.script.pop(0) if self.server.script else (200, {})
-        body = json.dumps(payload).encode()
+        # Raw bytes stand for object storage: a download is not JSON, and a stub that
+        # only ever spoke JSON could not exercise the path that matters here.
+        raw = isinstance(payload, (bytes, bytearray))
+        body = bytes(payload) if raw else json.dumps(payload).encode()
         self.send_response(status)
-        self.send_header("content-type", "application/json")
+        self.send_header("content-type", "application/octet-stream" if raw else "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -302,6 +311,45 @@ class ArtifactTest(unittest.TestCase):
             self.assertTrue(confirm["digest"].startswith("sha256:"))
             self.assertEqual(result.status, "READY")
 
+    def test_buffered_metrics_are_sent_before_the_checkpoint_they_describe(self):
+        with StubServer() as stub:
+            stub.script(
+                (200, {}),                                                        # the flush
+                (201, {"artifact": {"id": "a"}, "upload": {"url": f"{stub.url}/u", "method": "PUT"}}),
+                (200, {}),
+                (200, {"id": "a", "status": "READY"}),
+            )
+            run = ashml.Run(Client(stub.url, retries=0), JOB)
+            run.log_metrics({"loss": 1.5}, step=7)      # buffered, not yet due
+            run.log_artifact(self.tmp.name, name="epoch-0.pt")
+
+            paths = [r["path"] for r in stub.requests]
+            self.assertEqual(paths[0], f"/api/v1/jobs/{JOB}/metrics")
+            self.assertEqual(paths[1], f"/api/v1/jobs/{JOB}/artifacts")
+
+            # Ordering, not merely eventual delivery. If the pod is killed after the
+            # checkpoint lands, the retry resumes past these steps and nothing will
+            # ever report them again — so they have to be gone before it lands.
+            self.assertEqual(stub.requests[0]["body"]["metrics"][0]["step"], 7)
+
+    def test_a_failed_flush_does_not_stop_the_checkpoint_from_uploading(self):
+        with StubServer() as stub:
+            stub.script(
+                (503, {}),                                                        # the flush
+                (201, {"artifact": {"id": "a"}, "upload": {"url": f"{stub.url}/u", "method": "PUT"}}),
+                (200, {}),
+                (200, {"id": "a", "status": "READY"}),
+            )
+            run = ashml.Run(Client(stub.url, retries=0), JOB)
+            run.log_metrics({"loss": 1.5}, step=7)
+
+            # Telemetry is worth less than the checkpoint. Losing the points is bad;
+            # losing the run's only recoverable state because a metric POST failed
+            # would be the reporting path killing the training it exists to describe.
+            with self.assertLogs("ashml", level="WARNING"):
+                result = run.log_artifact(self.tmp.name, name="epoch-0.pt")
+            self.assertEqual(result.status, "READY")
+
     def test_the_name_defaults_to_the_filename(self):
         with StubServer() as stub:
             stub.script(
@@ -352,6 +400,158 @@ class ArtifactTest(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "no artifact store configured"):
                 run.log_artifact(self.tmp.name)
+
+
+def _read(path):
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+class ResumeTest(unittest.TestCase):
+    """Taking up the checkpoint a retry is offered (``ASHML_RESUME_FROM``)."""
+
+    PAYLOAD = b"checkpoint bytes, pretend these are optimizer moments"
+    DIGEST = "sha256:" + hashlib.sha256(PAYLOAD).hexdigest()
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _script(self, stub, *, digest=None, size=None, payload=None):
+        """The three responses a resume makes: the record, the URL, the bytes."""
+        body = self.PAYLOAD if payload is None else payload
+        stub.script(
+            (200, {
+                "id": "art-9",
+                "name": "epoch-2.pt",
+                "status": "READY",
+                "digest": self.DIGEST if digest is None else digest,
+                "size_bytes": len(self.PAYLOAD) if size is None else size,
+            }),
+            (200, {"url": f"{stub.url}/signed-object", "expires_at": "2026-01-01T00:00:00Z"}),
+            (200, body),
+        )
+
+    def test_a_first_attempt_has_nothing_to_resume_from(self):
+        with StubServer() as stub:
+            run = ashml.Run(Client(stub.url, retries=0), JOB)
+            self.assertIsNone(run.resume_artifact_id)
+            self.assertIsNone(run.fetch_resume())
+            # And it did not go looking: a first attempt must cost no round trips.
+            self.assertEqual(stub.requests, [])
+
+    def test_the_offered_checkpoint_is_fetched_and_verified(self):
+        with StubServer() as stub:
+            self._script(stub)
+            run = ashml.Run(Client(stub.url, retries=0), JOB, resume_artifact_id="art-9")
+
+            path = run.fetch_resume(self.dir)
+
+            self.assertEqual(_read(path), self.PAYLOAD)
+            # Named for the artifact, inside the directory it was given.
+            self.assertEqual(os.path.basename(path), "epoch-2.pt")
+            self.assertEqual(
+                [r["path"] for r in stub.requests],
+                ["/api/v1/artifacts/art-9", "/api/v1/artifacts/art-9/download", "/signed-object"],
+            )
+
+    def test_the_url_is_fetched_at_download_time_not_handed_over_earlier(self):
+        with StubServer() as stub:
+            self._script(stub)
+            run = ashml.Run(Client(stub.url, retries=0), JOB, resume_artifact_id="art-9")
+            run.fetch_resume(self.dir)
+
+            # The signing request comes after the run started, not from a manifest
+            # written when the pod was created — which is the whole reason the
+            # environment carries an artifact id rather than a URL.
+            self.assertIn("/api/v1/artifacts/art-9/download", [r["path"] for r in stub.requests])
+
+    def test_a_corrupt_download_raises_and_leaves_nothing_behind(self):
+        with StubServer() as stub:
+            self._script(stub, payload=b"x" * len(self.PAYLOAD))
+            run = ashml.Run(Client(stub.url, retries=0), JOB, resume_artifact_id="art-9")
+
+            with self.assertRaises(RuntimeError) as caught:
+                run.fetch_resume(self.dir)
+
+            self.assertIn("digest", str(caught.exception))
+            # Not even a partial file: torch.load on a truncated checkpoint sometimes
+            # succeeds, and a run resumed from one is wrong in a way nothing reports.
+            self.assertEqual(os.listdir(self.dir), [])
+
+    def test_a_truncated_download_is_caught_by_size_before_digest(self):
+        with StubServer() as stub:
+            self._script(stub, payload=self.PAYLOAD[:10])
+            run = ashml.Run(Client(stub.url, retries=0), JOB, resume_artifact_id="art-9")
+
+            with self.assertRaises(RuntimeError) as caught:
+                run.fetch_resume(self.dir)
+
+            message = str(caught.exception)
+            self.assertIn("truncated", message)
+            self.assertIn("10 bytes", message)
+            self.assertEqual(os.listdir(self.dir), [])
+
+    def test_an_artifact_with_no_digest_is_not_treated_as_corrupt(self):
+        with StubServer() as stub:
+            self._script(stub, digest=None)
+            stub.server.script[0][1].pop("digest")
+            run = ashml.Run(Client(stub.url, retries=0), JOB, resume_artifact_id="art-9")
+
+            path = run.fetch_resume(self.dir)
+            self.assertEqual(_read(path), self.PAYLOAD)
+
+    def test_an_unknown_digest_algorithm_is_reported_not_raised(self):
+        with StubServer() as stub:
+            self._script(stub, digest="md5:d41d8cd98f00b204e9800998ecf8427e")
+            run = ashml.Run(Client(stub.url, retries=0), JOB, resume_artifact_id="art-9")
+
+            with self.assertLogs("ashml", level="WARNING") as logs:
+                path = run.fetch_resume(self.dir)
+
+            self.assertEqual(_read(path), self.PAYLOAD)
+            self.assertIn("cannot check", "".join(logs.output))
+
+    def test_a_promised_resume_that_cannot_be_fetched_raises(self):
+        with StubServer() as stub:
+            stub.script((404, {"error": {"code": "NOT_FOUND", "message": "no such artifact"}}))
+            run = ashml.Run(Client(stub.url, retries=0), JOB, resume_artifact_id="art-9")
+
+            # Emphatically not None. Returning None here would restart the run from step
+            # zero while every number it goes on to report says otherwise.
+            with self.assertRaises(ApiError):
+                run.fetch_resume(self.dir)
+
+    def test_a_control_plane_with_no_store_says_so_clearly(self):
+        with StubServer() as stub:
+            stub.script(
+                (200, {"id": "art-9", "name": "epoch-2.pt", "status": "READY"}),
+                (200, {"expires_at": "2026-01-01T00:00:00Z"}),
+            )
+            run = ashml.Run(Client(stub.url, retries=0), JOB, resume_artifact_id="art-9")
+
+            with self.assertRaises(RuntimeError) as caught:
+                run.fetch_resume(self.dir)
+
+            self.assertIn("no artifact store", str(caught.exception))
+
+    def test_init_takes_the_offer_from_the_environment(self):
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"ASHML_ENDPOINT": "http://ashml:8080", "ASHML_JOB_ID": JOB, "ASHML_RESUME_FROM": "art-9"},
+            clear=True,
+        ):
+            run = ashml.init(report_start=False)
+            self.assertEqual(run.resume_artifact_id, "art-9")
+
+    def test_an_unset_variable_is_not_an_empty_artifact_id(self):
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"ASHML_ENDPOINT": "http://ashml:8080", "ASHML_JOB_ID": JOB, "ASHML_RESUME_FROM": ""},
+            clear=True,
+        ):
+            run = ashml.init(report_start=False)
+            self.assertIsNone(run.resume_artifact_id)
 
 
 class ClientTest(unittest.TestCase):

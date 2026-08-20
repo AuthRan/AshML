@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import tempfile
 import threading
 import time
 import urllib.error
@@ -34,6 +35,11 @@ DEFAULT_BATCH_SIZE = 200
 #: would not be visible until the batch happened to fill, which for a job logging once
 #: an epoch could be hours.
 DEFAULT_FLUSH_INTERVAL = 10.0
+
+#: How long a checkpoint download may take. Generous where the metric timeout is not:
+#: this runs once at startup, on a file that can be tens of gigabytes, and giving up on
+#: it costs the whole retry the checkpoint was meant to save.
+DEFAULT_DOWNLOAD_TIMEOUT = 900.0
 
 
 class Artifact:
@@ -67,6 +73,8 @@ class Run:
         batch_size: int = DEFAULT_BATCH_SIZE,
         flush_interval: float = DEFAULT_FLUSH_INTERVAL,
         strict: bool = False,
+        resume_artifact_id: str | None = None,
+        download_timeout: float = DEFAULT_DOWNLOAD_TIMEOUT,
     ):
         self._client = client
         self.job_id = job_id
@@ -74,6 +82,8 @@ class Run:
         self._batch_size = batch_size
         self._flush_interval = flush_interval
         self._strict = strict
+        self._resume_artifact_id = resume_artifact_id or None
+        self._download_timeout = download_timeout
 
         self._buffer: list[dict] = []
         # A DataLoader worker or a callback may log from another thread. The lock is
@@ -174,6 +184,17 @@ class Run:
         if not os.path.isfile(path):
             raise FileNotFoundError(path)
 
+        # Buffered metrics go out *before* the artifact does, so that a checkpoint and
+        # the history of the work it contains cannot be separated by a kill.
+        #
+        # This is not tidiness. If the pod dies after this point, the retry resumes from
+        # this checkpoint and starts reporting at the step after it — so any point still
+        # sitting in the buffer describes work that no attempt will ever report again,
+        # and the curve keeps a hole in it for ever. Flushing here bounds what an
+        # interruption costs the record to the same thing it costs the training: the
+        # work since the last checkpoint.
+        self.flush()
+
         artifact_name = name or os.path.basename(path)
         size = os.path.getsize(path)
 
@@ -218,6 +239,83 @@ class Run:
             # The original failure is the one worth raising; this one only means the
             # record will stay PENDING, which the platform already treats as suspect.
             log.warning("ashml: could not mark artifact %s failed: %s", artifact_id, err)
+
+
+    # ---------------------------------------------------------------- resuming
+
+    @property
+    def resume_artifact_id(self) -> str | None:
+        """The checkpoint AshML is offering this attempt, or ``None``.
+
+        Set from ``ASHML_RESUME_FROM``, which the control plane injects **only** on a
+        retry that has a confirmed checkpoint to point at. A first attempt never has
+        one, so ``None`` is the ordinary case and not an error.
+        """
+        return self._resume_artifact_id
+
+    def fetch_resume(self, dest: str | None = None) -> str | None:
+        """Downloads the checkpoint this attempt should resume from, if there is one.
+
+        Returns a local path, or ``None`` when this is not a resumed attempt — so the
+        calling shape is::
+
+            resume = run.fetch_resume()
+            if resume:
+                state = torch.load(resume)
+
+        What it deliberately does not do is return ``None`` when a checkpoint *was*
+        offered and could not be fetched. That would turn a recoverable interruption
+        into a run that silently restarts from step zero while its logs, its metric
+        steps and its next checkpoint all claim otherwise — the failure is discovered
+        much later, in a curve with a discontinuity nobody can explain. A resume that
+        was promised and cannot be delivered raises.
+        """
+        if not self._resume_artifact_id:
+            return None
+        return self.download_artifact(self._resume_artifact_id, dest)
+
+    def download_artifact(self, artifact_id: str, dest: str | None = None, *, verify: bool = True) -> str:
+        """Fetches an artifact's bytes, returning the path they were written to.
+
+        The artifact id is exchanged for a time-limited URL at the moment of the
+        download rather than being handed one earlier, for the reason the model server
+        does the same: a signature minted when a manifest was written has usually
+        expired by the time a pod restarts and tries to use it.
+
+        ``dest`` may be a directory (the artifact's name is used inside it), a file
+        path, or ``None`` for a temporary file. The bytes land at ``dest + ".part"``
+        and are renamed only once the download is complete and verified, because a
+        truncated checkpoint that torch is willing to load is worse than no checkpoint
+        at all.
+
+        ``verify`` compares what arrived against the size and digest recorded when the
+        artifact was confirmed. Phase 4 deferred digest verification on the *upload*
+        side, where reading a 30 GB object back would cost more than it proves; here
+        the bytes are being read anyway, so checking them is nearly free and this is
+        the moment they matter.
+        """
+        record = self._client.request("GET", f"/api/v1/artifacts/{artifact_id}")
+        signed = self._client.request("GET", f"/api/v1/artifacts/{artifact_id}/download")
+        url = signed.get("url")
+        if not url:
+            raise RuntimeError(
+                f"AshML returned no download URL for artifact {artifact_id}; the control "
+                "plane has no artifact store configured, so it cannot serve the bytes"
+            )
+
+        path = _resolve_dest(dest, record.get("name") or artifact_id)
+        partial = f"{path}.part"
+
+        digest = _download(url, partial, timeout=self._download_timeout)
+        try:
+            if verify:
+                _verify(partial, record, digest, artifact_id)
+        except Exception:
+            os.unlink(partial)
+            raise
+
+        os.replace(partial, path)
+        return path
 
     # ------------------------------------------------------------- experiment
 
@@ -307,6 +405,84 @@ def _put_file(url: str, path: str, size: int) -> None:
         with urllib.request.urlopen(request, timeout=600) as res:
             if res.status >= 300:
                 raise RuntimeError(f"upload returned HTTP {res.status}")
+
+
+def _resolve_dest(dest: str | None, name: str) -> str:
+    """Where the bytes go: a temporary file, a named file, or a name inside a directory."""
+    if dest is None:
+        handle = tempfile.NamedTemporaryFile(delete=False, suffix=_suffix(name))
+        handle.close()
+        return handle.name
+    if os.path.isdir(dest):
+        return os.path.join(dest, os.path.basename(name))
+    return dest
+
+
+def _suffix(name: str) -> str:
+    _, ext = os.path.splitext(name)
+    return ext if len(ext) <= 8 else ""
+
+
+def _download(url: str, path: str, *, timeout: float, chunk: int = 1024 * 1024) -> str:
+    """Streams a URL to a file, returning the sha256 of what was written.
+
+    Streamed and hashed in one pass. The file is exactly the thing that does not fit in
+    memory, and a second pass over it to hash would double the read for no gain — unlike
+    the upload path, where the digest has to survive a retried PUT.
+    """
+    digest = hashlib.sha256()
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response, open(path, "wb") as out:
+            while True:
+                block = response.read(chunk)
+                if not block:
+                    break
+                digest.update(block)
+                out.write(block)
+    except Exception:
+        # Nothing downstream should find a half-written file to be tempted by.
+        if os.path.exists(path):
+            os.unlink(path)
+        raise
+    return digest.hexdigest()
+
+
+def _verify(path: str, record: dict, digest: str, artifact_id: str) -> None:
+    """Checks what arrived against what the artifact says it is.
+
+    Size first, because a truncated download is the likely failure and its message is
+    the more useful one. The digest is compared only when the record has one: an
+    artifact registered before digests were recorded, or completed without one, is not
+    evidence of corruption and must not be reported as such.
+    """
+    size = os.path.getsize(path)
+    expected_size = record.get("size_bytes")
+    if expected_size is not None and int(expected_size) != size:
+        raise RuntimeError(
+            f"artifact {artifact_id} downloaded as {size} bytes but is recorded as "
+            f"{expected_size}; the object is truncated or is not the one recorded"
+        )
+
+    expected = (record.get("digest") or "").strip()
+    if not expected:
+        return
+
+    algorithm, _, value = expected.partition(":")
+    if not value or algorithm.lower() != "sha256":
+        # Not a failure of the bytes. Saying so plainly beats either ignoring the field
+        # or raising as though the checkpoint were corrupt.
+        log.warning(
+            "ashml: artifact %s records digest %r, which this SDK cannot check; "
+            "size was verified, contents were not", artifact_id, expected,
+        )
+        return
+
+    if value.lower() != digest:
+        raise RuntimeError(
+            f"artifact {artifact_id} does not match its recorded digest: expected "
+            f"sha256:{value}, got sha256:{digest}"
+        )
 
 
 def _version() -> str:
