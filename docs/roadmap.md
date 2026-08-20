@@ -278,8 +278,8 @@ Spec milestones 8, 9, 10.
 - Model router (own Fastify service) with weighted version routing
 - Prometheus + Grafana + DCGM-exporter; Loki for logs; OTel traces
 - Dashboards: cluster/GPU, job pipeline, training curves, inference latency
-- Failure recovery: retry policy, checkpoint resume, GPU-unhealthy handling
-- Chaos scripts: kill training pod, kill inference pod, restart scheduler
+- ~~Failure recovery: retry policy, checkpoint resume~~ **done**; GPU-unhealthy handling
+- Chaos scripts: ~~kill training pod~~ **done**; kill inference pod, restart scheduler
 - **Benchmarks with measured numbers** (spec §37) — never invented
 
 **Exit criteria:** the full §50 user journey runs start to finish, including a killed
@@ -329,6 +329,78 @@ nothing is promoted rather than falling back to the newest. "Latest" and "the on
 chose" are different things, and quietly substituting one for the other is how the wrong
 model ends up serving.
 
+### Recovery, as built
+
+A job that dies partway through comes back as a second attempt that starts where the
+first one stopped. `make chaos-resume` kills a training pod with `kubectl` and asserts
+the whole of it, and `make chaos-resume-resnet` does the same to ResNet-18: killed at
+step 13 of 40, resumed from the checkpoint confirmed at step 10, finished, registered a
+verified model.
+
+Two decisions shape the rest of it.
+
+**A retry has to be able to change the outcome.** `domain/retry-policy.js` is a pure
+classifier of failures that a second attempt could plausibly survive, and it refuses the
+ones where trying again is arithmetic rather than hope — an image that will not pull does
+not begin to exist because a second pod asked for it, and a container killed for exceeding
+its memory request will exceed the same request again. Eviction, a lost node and a
+vanished Job are retried, because none of them taught us anything about the code. An
+unrecognised reason is retried on purpose: a deterministic bug and a transient fault are
+indistinguishable from here, and the operator already expressed a view by setting
+`max_retries` above zero. It still defaults to 0, so nothing retries unless asked.
+Permanence is checked before the budget, so the message names the real obstacle rather
+than sending someone to raise a limit and watch the identical failure.
+
+**The platform offers a checkpoint; it does not impose one.** The retry is handed the
+newest `READY` checkpoint as `ASHML_RESUME_FROM` — an artifact *id*, so the download is
+signed when the container asks rather than when the manifest was written. Unconfirmed
+bytes are never offered. A workload that does not implement resuming ignores the variable
+and starts over, which is why this is an addition to the environment rather than a change
+to the command.
+
+Taking up the offer is one call, `run.fetch_resume()`, returning a path or `None`. What it
+will not do is return `None` when a checkpoint *was* offered and could not be fetched: that
+restarts the run from step zero while its logs, its metric steps and its next checkpoint
+all say otherwise, and the failure surfaces days later as a curve with a discontinuity
+nobody can explain.
+
+The download is where Phase 4's **digest deferral** is closed, in the place that phase
+said it belonged. Verifying on upload means reading a 30 GB object back to prove something
+about bytes just sent; verifying here costs one hash of a stream already being read, and
+this is the moment it matters, because something is about to load it. Size is checked
+first so a truncated download blames the right thing, and the bytes are renamed into place
+only once verified — a truncated checkpoint that torch is willing to load is worse than no
+checkpoint at all.
+
+What a resumed ResNet restores is the model, the optimizer's moments and the
+learning-rate schedule. The schedule is the one that hides: restore the first two and not
+the third and the run trains, converges and looks entirely healthy while following a
+different curve from the one its experiment record claims. So the proof is the learning
+rate itself, across the kill —
+
+| step | 0 | 5 | 10 | 15 | 20 | 25 | 30 | 35 |
+|---|---|---|---|---|---|---|---|---|
+| lr | .0059 | .0588 | .1000 | .0923 | .0717 | .0444 | .0188 | .0028 |
+
+— steps 0 and 5 from the killed attempt, 10 onwards from the resumed one, and one
+OneCycle rather than two. A restarted schedule would repeat `.0059` at step 10.
+
+What is **not** restored is the position in the shuffled training set. The resumed epoch
+runs the batches it had left, drawn fresh, rather than the exact images the killed attempt
+had not reached; replaying those needs the sampler and RNG state checkpointed alongside
+the weights. So the run says so, in its own logs and in the caveat metadata attached to
+every artifact the resumed attempt produces.
+
+One defect the first chaos run exposed, because it is the kind only a real kill finds. The
+first attempt's metrics for steps 0–14 existed nowhere: the SDK batches points, the pod
+was SIGKILLed, and the buffer went with it. The checkpoint had preserved the work and
+nothing had preserved the record of it — and since the resumed attempt starts *after* the
+checkpoint, those points would never be reported by anyone. `log_artifact` now flushes
+buffered metrics before uploading, which bounds what an interruption costs the record to
+what it costs the training: the work since the last checkpoint. Steps after the checkpoint
+may legitimately be reported twice, because they are genuinely trained twice and metrics
+are append-only; steps before it must never be.
+
 ### Deferred within this phase, so far
 
 - **Weighted routing.** `deployment_targets` carries the weight column and a deployment
@@ -339,6 +411,13 @@ model ends up serving.
   answered; that belongs to a gateway.
 - **Autoscaling.** Replicas are what was asked for. Scaling on load needs the metrics
   that arrive later in this phase.
+- **Resuming the data order.** Covered above: a resumed epoch redraws its remaining
+  batches rather than replaying them. Fixing it means checkpointing the sampler and RNG
+  state, which is worth doing when a run is long enough for the difference to matter.
+- **GPU-unhealthy handling.** The retry classifier has no category for it, because this
+  cluster cannot produce one: no device reaches a k3d node (ADR 0008), so a job never
+  fails for a reason a GPU could cause. Writing the pattern blind would be a guess about
+  a string we have never seen.
 
 ---
 

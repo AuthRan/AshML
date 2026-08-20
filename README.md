@@ -113,11 +113,49 @@ sync loop reading `readyReplicas` back from the cluster may say `READY`. `DEGRAD
 was serving, now short of replicas — is kept distinct from `PROGRESSING`, because one
 word for both hides an outage inside something that sounds like startup.
 
+### Surviving a killed pod
+
+A job with `max_retries` above zero, whose failure a retry could plausibly survive, comes
+back as a second attempt that starts where the first one stopped:
+
+```bash
+make chaos-resume          # kills a training pod; asserts the retry resumes from step N
+make chaos-resume-resnet   # the same, against ResNet-18: weights, optimizer, schedule
+```
+
+Killed at step 13 of 40, resumed from the checkpoint confirmed at step 10, finished, and
+registered a verified model. The script does not drive the executor — it breaks something
+with `kubectl` and then only watches, because what needs proving is that the platform
+recovers on its own loop.
+
+Two things have to hold for that to be worth anything. **A retry has to be able to change
+the outcome**, so failures are classified rather than counted: an image that will not pull
+does not begin to exist because a second pod asked for it, and a container killed for
+exceeding its memory request will exceed the same request again. And **resuming has to be
+offered rather than imposed** — the retry is handed the newest confirmed checkpoint as an
+artifact id in `ASHML_RESUME_FROM`, and a workload that does not implement resuming
+ignores it and starts over. Taking it up is one call:
+
+```python
+with ashml.init() as run:
+    resume = run.fetch_resume()      # None on a first attempt
+    if resume:
+        state = torch.load(resume, weights_only=True)
+```
+
+What a resumed ResNet restores is the model, the optimizer's moments *and* the
+learning-rate schedule. The third is the one that hides: without it the run trains,
+converges and looks healthy while following a different curve from the one its experiment
+record claims — so the proof is the learning rate across the kill, `.0059 → .0588 →
+.1000 → .0923 → … → .0028`, one OneCycle rather than two. What is **not** restored is the
+position in the shuffled training set, and the run says so in its logs and in the caveat
+metadata on every artifact it produces.
+
 **Not yet:** GPU jobs cannot run on this host — the machine has two RTX 2080 Tis, but
 installing the NVIDIA container toolkit needs root, so no GPU reaches a k3d node and the
 cluster advertises `nvidia.com/gpu: 0`. AshML handles this the honest way: such a job is
 **queued with an explanation**, never placed onto a GPU the cluster will not grant
-(ADR 0008). Retries and preemption are stored but not driven (Phase 5).
+(ADR 0008). Preemption is stored but not driven (Phase 5).
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the phase plan and
 [`docs/architecture/architecture.md`](docs/architecture/architecture.md) for the design.
