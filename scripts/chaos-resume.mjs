@@ -33,13 +33,73 @@ const exec = promisify(execFile);
 
 const ENDPOINT = (process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 const NAMESPACE = process.env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs';
-const IMAGE = process.env.TRAINER_IMAGE ?? 'ashml/trainer:v1';
-const TIMEOUT_MS = Number(process.env.CHAOS_TIMEOUT_MS ?? 240_000);
+const TIMEOUT_MS = Number(process.env.CHAOS_TIMEOUT_MS ?? 300_000);
 
-/** Total steps, and how often the workload checkpoints. */
-const STEPS = Number(process.env.CHAOS_STEPS ?? 60);
-const CHECKPOINT_EVERY = Number(process.env.CHAOS_CHECKPOINT_EVERY ?? 5);
-const STEP_SECONDS = Number(process.env.CHAOS_STEP_SECONDS ?? 0.4);
+/**
+ * Two workloads, because they prove different halves of the same claim.
+ *
+ * `smoke` is fast and its state is one integer, so it exercises the *platform* path —
+ * artifact offered, fetched, verified, resumed — in about a minute, which is what makes
+ * this runnable often enough to catch a regression.
+ *
+ * `resnet` is the real one. Its checkpoint is a state dict, an optimizer's momentum
+ * buffers and a learning-rate schedule, restored strictly into a freshly built
+ * architecture, and none of that is exercised by an integer in a JSON file. It takes
+ * minutes rather than seconds.
+ */
+const WORKLOADS = {
+  smoke: {
+    image: process.env.TRAINER_IMAGE ?? 'ashml/trainer:v1',
+    command: ['python', 'sdk_smoke.py'],
+    resources: { cpu: 1, memory_bytes: 536_870_912 },
+    steps: Number(process.env.CHAOS_STEPS ?? 60),
+    checkpointEvery: Number(process.env.CHAOS_CHECKPOINT_EVERY ?? 5),
+    logEvery: 1,
+    env: (w) => ({
+      SMOKE_STEPS: String(w.steps),
+      SMOKE_CHECKPOINT_EVERY: String(w.checkpointEvery),
+      SMOKE_STEP_SECONDS: String(process.env.CHAOS_STEP_SECONDS ?? 0.4),
+    }),
+  },
+  resnet: {
+    image: process.env.RESNET_IMAGE ?? 'ashml/resnet-trainer:v1',
+    command: ['python', 'resnet_cifar.py'],
+    resources: { cpu: 4, memory_bytes: 4_294_967_296 },
+    steps: Number(process.env.CHAOS_STEPS ?? 40),
+    checkpointEvery: Number(process.env.CHAOS_CHECKPOINT_EVERY ?? 10),
+    logEvery: 5,
+    // Its checkpoint carries a OneCycle schedule, so the resumed run's learning rate is
+    // checkable evidence about what was restored — see the check that uses this.
+    restoresSchedule: true,
+    env: (w) => ({
+      // Bounded by MAX_STEPS, so this trains nothing worth quoting and says so in its
+      // own logs. What is under test is the resume, not the accuracy.
+      EPOCHS: '1',
+      MAX_STEPS: String(w.steps),
+      CHECKPOINT_EVERY: String(w.checkpointEvery),
+      MAX_EVAL_BATCHES: '4',
+      LOG_EVERY: String(w.logEvery),
+      BATCH_SIZE: '128',
+      SEED: '1337',
+      DATALOADER_WORKERS: '2',
+      OMP_NUM_THREADS: '4',
+    }),
+  },
+};
+
+const WORKLOAD = process.env.CHAOS_WORKLOAD ?? 'smoke';
+const workload = WORKLOADS[WORKLOAD];
+if (!workload) {
+  console.error(`unknown CHAOS_WORKLOAD "${WORKLOAD}"; known: ${Object.keys(WORKLOADS).join(', ')}`);
+  process.exit(2);
+}
+
+const STEPS = workload.steps;
+const CHECKPOINT_EVERY = workload.checkpointEvery;
+
+/** The steps this workload is expected to report, given how often it logs. */
+const EXPECTED_STEPS = [];
+for (let s = 0; s < STEPS; s += workload.logEvery) EXPECTED_STEPS.push(s);
 
 const suffix = Math.random().toString(36).slice(2, 8);
 const project = `chaos-${suffix}`;
@@ -120,15 +180,11 @@ check('a job is submitted with one retry, and starts running', async () => {
     // One retry. The classifier still has to agree the failure is worth retrying — the
     // budget only makes it possible, which is the distinction the policy exists for.
     max_retries: 1,
-    resources: { cpu: 1, memory_bytes: 536_870_912 },
+    resources: workload.resources,
     spec: {
-      image: IMAGE,
-      command: ['python', 'sdk_smoke.py'],
-      env: {
-        SMOKE_STEPS: String(STEPS),
-        SMOKE_CHECKPOINT_EVERY: String(CHECKPOINT_EVERY),
-        SMOKE_STEP_SECONDS: String(STEP_SECONDS),
-      },
+      image: workload.image,
+      command: workload.command,
+      env: workload.env(workload),
     },
   });
   globalThis.__job = job.id;
@@ -272,7 +328,10 @@ check('the retried run resumes from the checkpoint instead of starting over', as
   const { logs, available } = await api('GET', `/api/v1/jobs/${globalThis.__job}/logs`);
   assert.equal(available, true, 'the retried pod\'s own output must be readable');
 
-  const resumed = logs.match(/resuming from artifact (\S+) at step (\d+)/);
+  // Both workloads announce the same fact in their own words; the artifact id is a
+  // UUID, and whatever separates it from the step is punctuation neither of them
+  // should have to agree on.
+  const resumed = logs.match(/resuming from artifact ([0-9a-f-]{36})\D+step (\d+)/);
   assert.ok(resumed, `the second attempt did not report resuming:\n${logs.slice(0, 500)}`);
   assert.equal(resumed[1], globalThis.__checkpoint.id);
   assert.equal(Number(resumed[2]), globalThis.__checkpoint.step);
@@ -285,25 +344,23 @@ check('the retried run resumes from the checkpoint instead of starting over', as
   );
 });
 
-check('the run covered every step exactly once across the two attempts', async () => {
+check('no work before the checkpoint was done twice, and none after it was skipped', async () => {
   const series = await api('GET', `/api/v1/jobs/${globalThis.__job}/metrics?name=loss&limit=20000`);
   const steps = stepsOf(series, 'loss');
   const resumedAt = globalThis.__checkpoint.step;
+  const twice = (list) => [...new Set(list.filter((s, i) => list.indexOf(s) !== i))];
 
   // The point of resuming, stated as arithmetic. A restart would repeat every step
-  // below the checkpoint; a resume repeats none of them.
-  const duplicated = [...new Set(steps.filter((s, i) => steps.indexOf(s) !== i))];
-  assert.deepEqual(duplicated, [], `steps were trained twice: ${duplicated}`);
-
-  const missing = [];
-  for (let s = 0; s < STEPS; s += 1) {
-    if (!steps.includes(s)) missing.push(s);
-  }
+  // below the checkpoint. A resume repeats none of them, and this is the assertion that
+  // a resume dressed up as a restart would fail.
+  const repeatedBefore = twice(steps.filter((s) => s < resumedAt));
+  assert.deepEqual(repeatedBefore, [], `work before the checkpoint was redone: ${repeatedBefore}`);
 
   // Everything up to the checkpoint survived the kill, because the SDK flushes what it
-  // has buffered before uploading a checkpoint. Without that, these points would be
-  // lost for good: the resumed attempt starts *after* them, so no attempt ever reports
-  // them again and the curve keeps a hole nobody can explain.
+  // has buffered before uploading a checkpoint. Without that these points would be lost
+  // for good: the resumed attempt starts after them, so no attempt ever reports them
+  // again and the curve keeps a hole nobody can explain.
+  const missing = EXPECTED_STEPS.filter((s) => !steps.includes(s));
   assert.deepEqual(
     missing.filter((s) => s < resumedAt), [],
     'work the checkpoint preserved lost its metrics anyway',
@@ -316,10 +373,57 @@ check('the run covered every step exactly once across the two attempts', async (
   );
 
   assert.equal(Math.min(...steps), 0, 'the first attempt must have started at step 0');
-  assert.equal(Math.max(...steps), STEPS - 1, 'the run must have finished the work it was given');
+  assert.equal(Math.max(...steps), EXPECTED_STEPS.at(-1), 'the run must have finished its work');
 
-  note(`${steps.length} of ${STEPS} steps reported, none twice; resumed at step ${resumedAt}`);
+  // Steps *after* the checkpoint may be reported twice, and that is correct rather than
+  // tolerated: the work since the last checkpoint is genuinely done again, and metrics
+  // are append-only by design (reporting a step twice records both points). What bounds
+  // it is the checkpoint interval — which is exactly the thing a resume is for.
+  const repeatedAfter = twice(steps.filter((s) => s >= resumedAt));
+  assert.ok(
+    repeatedAfter.length <= Math.ceil(CHECKPOINT_EVERY / workload.logEvery) + 1,
+    `${repeatedAfter.length} steps were redone, more than the ${CHECKPOINT_EVERY}-step `
+    + 'checkpoint interval can explain',
+  );
+
+  note(`${EXPECTED_STEPS.length} expected steps all reported; resumed at step ${resumedAt}`);
+  note(
+    repeatedAfter.length
+      ? `${repeatedAfter.length} step(s) redone after the checkpoint (${repeatedAfter.join(', ')}), `
+        + 'reported twice because they were genuinely trained twice'
+      : 'no step was reported twice',
+  );
   note(`killed with step ${globalThis.__killedNear} the newest the API had been told about`);
+});
+
+check('the learning-rate schedule continued rather than restarting', async () => {
+  if (!workload.restoresSchedule) {
+    note(`the ${WORKLOAD} workload has no schedule state to carry; nothing to check here`);
+    return;
+  }
+
+  const series = await api('GET', `/api/v1/jobs/${globalThis.__job}/metrics?name=lr&limit=20000`);
+  const points = (series.series ?? []).find((s) => s.name === 'lr')?.points ?? [];
+  assert.ok(points.length >= 3, 'the run must have reported its learning rate');
+
+  const byStep = new Map(points.map((p) => [p.step, p.value]));
+  const first = points[0];
+  const atResume = byStep.get(globalThis.__checkpoint.step);
+  assert.ok(atResume !== undefined, 'the resumed attempt must have reported a learning rate');
+
+  // This is the failure that hides. Restoring the weights and the optimizer but not the
+  // schedule gives a resumed run that trains, converges and looks entirely healthy —
+  // while following a different learning-rate curve from the one the experiment record
+  // says it followed. Had the schedule restarted at the resume, this point would repeat
+  // the value the cycle began with.
+  assert.notEqual(
+    atResume.toFixed(6), first.value.toFixed(6),
+    `the learning rate at the resume step is the cycle's opening value (${first.value}); `
+    + 'the schedule restarted instead of continuing',
+  );
+
+  note(`lr across the kill: ${points.map((p) => `${p.step}:${p.value.toFixed(4)}`).join('  ')}`);
+  note(`one cycle, not two: it opened at ${first.value.toFixed(5)} and was ${atResume.toFixed(5)} at the resume`);
 });
 
 check('the finished run has the model the second attempt produced', async () => {

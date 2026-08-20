@@ -56,6 +56,16 @@ MAX_STEPS = env_int("MAX_STEPS", 0)
 #: Bounds evaluation the same way, for the same reason.
 MAX_EVAL_BATCHES = env_int("MAX_EVAL_BATCHES", 0)
 
+#: Upload a resumable checkpoint every N optimizer steps, on top of the one taken at
+#: every epoch boundary. 0 keeps the epoch-only behaviour.
+#:
+#: This is the dial between two costs, and neither is negligible: what an interrupted
+#: run loses is the work since its last checkpoint, and what a frequent checkpoint costs
+#: is 85 MiB through the SDK's upload path while the GPU waits. An hour-long epoch with
+#: epoch-only checkpoints can lose an hour. The right value depends on how long a step
+#: takes and how often the cluster disrupts a pod, so it is a knob rather than a default.
+CHECKPOINT_EVERY = env_int("CHECKPOINT_EVERY", 0)
+
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
 
@@ -175,14 +185,29 @@ def main() -> None:
     total_steps = MAX_STEPS or (len(train_loader) * EPOCHS)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=LR, total_steps=total_steps)
 
+    steps_per_epoch = len(train_loader)
+
     with ashml.init() as run:
         print(f"[resnet] reporting to job {run.job_id}", flush=True)
 
-        step = 0
-        started = time.monotonic()
+        # Nothing on a first attempt. On a retry, AshML offers the newest checkpoint it
+        # confirmed exists, and this is where the run stops being a repetition.
+        step, start_epoch = restore(run, model, optimizer, scheduler, device, caveats, steps_per_epoch)
 
-        for epoch in range(EPOCHS):
+        accuracy = None
+        started = time.monotonic()
+        started_at_step = step
+
+        for epoch in range(start_epoch, EPOCHS):
+            # A resumed epoch runs the batches it has left, not a whole one — otherwise
+            # a run interrupted five times trains for five extra epochs and the step
+            # count stops meaning anything.
+            budget = steps_per_epoch - (step - epoch * steps_per_epoch)
+            done_this_epoch = 0
+
             for images, labels in train_loader:
+                if done_this_epoch >= budget:
+                    break
                 images, labels = images.to(device), labels.to(device)
 
                 optimizer.zero_grad(set_to_none=True)
@@ -200,7 +225,10 @@ def main() -> None:
                             "loss": loss.item(),
                             "train_accuracy": batch_accuracy,
                             "lr": scheduler.get_last_lr()[0],
-                            "steps_per_second": (step + 1) / (time.monotonic() - started),
+                            # Measured over this attempt only. A resumed run's rate is
+                            # not (steps so far / seconds since this process started),
+                            # which would report a speed nothing ever ran at.
+                            "steps_per_second": (step - started_at_step + 1) / (time.monotonic() - started),
                         },
                         step=step,
                         epoch=epoch,
@@ -208,6 +236,22 @@ def main() -> None:
                     print(f"[resnet] step {step} loss {loss.item():.4f} acc {batch_accuracy:.3f}", flush=True)
 
                 step += 1
+                done_this_epoch += 1
+
+                if CHECKPOINT_EVERY and step % CHECKPOINT_EVERY == 0 and step < total_steps:
+                    checkpoint = save(model, optimizer, step, epoch, scheduler=scheduler)
+                    try:
+                        run.log_artifact(
+                            checkpoint,
+                            name=f"step-{step}.pt",
+                            kind="checkpoint",
+                            step=step,
+                            metadata={"epoch": epoch, "mid_epoch": True, **caveat_metadata(caveats, hardware)},
+                        )
+                        print(f"[resnet] checkpointed at step {step}", flush=True)
+                    finally:
+                        os.unlink(checkpoint)
+
                 if MAX_STEPS and step >= MAX_STEPS:
                     break
 
@@ -215,7 +259,7 @@ def main() -> None:
             run.log_metrics({"val_accuracy": accuracy, "val_loss": val_loss}, step=step, epoch=epoch)
             print(f"[resnet] epoch {epoch}: val_accuracy {accuracy:.4f} val_loss {val_loss:.4f}", flush=True)
 
-            checkpoint = save(model, optimizer, step, epoch)
+            checkpoint = save(model, optimizer, step, epoch, scheduler=scheduler)
             try:
                 run.log_artifact(
                     checkpoint,
@@ -229,6 +273,15 @@ def main() -> None:
 
             if MAX_STEPS and step >= MAX_STEPS:
                 break
+
+        if accuracy is None:
+            # Resumed past the last training step — an interruption between the final
+            # epoch's checkpoint and the model upload. There is a model to publish and
+            # no measurement of it, so measure it rather than publishing a number the
+            # previous attempt happened to record.
+            accuracy, val_loss = evaluate(model, test_loader, device)
+            run.log_metrics({"val_accuracy": accuracy, "val_loss": val_loss}, step=step, epoch=EPOCHS - 1)
+            print(f"[resnet] resumed run evaluated: val_accuracy {accuracy:.4f}", flush=True)
 
         final = save(model, optimizer, step, EPOCHS - 1, weights_only=True)
         try:
@@ -264,7 +317,14 @@ def caveat_metadata(caveats, hardware):
     return {"caveats": caveats, "hardware": hardware, "benchmark": False}
 
 
-def save(model, optimizer, step, epoch, *, weights_only=False):
+def save(model, optimizer, step, epoch, *, scheduler=None, weights_only=False):
+    """Writes a checkpoint. Returns the path; the caller uploads and deletes it.
+
+    ``step`` is the global count of optimizer steps completed, and it is what a resume
+    is keyed on — the epoch is written for a reader, not for the arithmetic, because the
+    epoch a step belongs to is `step // steps_per_epoch` and deriving it cannot drift
+    from the step the way a second stored field can.
+    """
     handle = tempfile.NamedTemporaryFile(delete=False, suffix=".pt")
     handle.close()
 
@@ -273,9 +333,75 @@ def save(model, optimizer, step, epoch, *, weights_only=False):
         # A resumable checkpoint needs the optimizer; a published model does not, and
         # shipping SGD momentum buffers to an inference server is just weight.
         payload["optimizer"] = optimizer.state_dict()
+        # And the schedule. Without it a resumed run restarts OneCycle from its warm-up
+        # at whatever step it resumed at, which is a different learning-rate schedule
+        # from the one the experiment recorded — the loss recovers and the run looks
+        # fine, so this is exactly the kind of wrongness nothing reports.
+        if scheduler is not None:
+            payload["scheduler"] = scheduler.state_dict()
 
     torch.save(payload, handle.name)
     return handle.name
+
+
+def restore(run, model, optimizer, scheduler, device, caveats, steps_per_epoch):
+    """Loads the checkpoint AshML offered this attempt. Returns `(step, epoch)`.
+
+    `(0, 0)` on a first attempt, which is every attempt that was not retried.
+
+    What is restored is the model, the optimizer's moments and the learning-rate
+    schedule. What is **not** restored is the position in the shuffled training set: the
+    resumed epoch runs the number of batches it had left, drawn fresh, rather than the
+    exact images the killed attempt had not reached. Replaying those would mean
+    checkpointing the sampler's state and the RNG alongside the weights, and this run
+    does not, so the honest thing is to say so — it goes in the caveats, which travel
+    with every artifact the resumed attempt produces.
+    """
+    path = run.fetch_resume()
+    if path is None:
+        return 0, 0
+
+    try:
+        # weights_only=True: this file arrived over the network, and torch.load is a
+        # pickle loader. The bytes were verified against the digest AshML recorded, but
+        # that proves they are the bytes we uploaded, not that executing them is safe —
+        # and a training pod that can be made to execute arbitrary pickles by a
+        # substituted checkpoint is a much worse failure than a lost run.
+        state = torch.load(path, map_location=device, weights_only=True)
+    finally:
+        os.unlink(path)
+
+    # strict=True on purpose. A checkpoint whose keys do not match this architecture is
+    # a checkpoint from a different model, and loading the half of it that fits produces
+    # a network that trains without ever recovering.
+    model.load_state_dict(state["model"], strict=True)
+    optimizer.load_state_dict(state["optimizer"])
+    if "scheduler" in state:
+        scheduler.load_state_dict(state["scheduler"])
+
+    step = int(state["step"])
+    epoch = step // steps_per_epoch
+    print(
+        f"[resnet] resuming from artifact {run.resume_artifact_id}: "
+        f"step {step}, epoch {epoch}"
+        + ("" if "scheduler" in state else " (no schedule in checkpoint; it restarts)"),
+        flush=True,
+    )
+    added = [
+        f"resumed from a checkpoint at step {step} after an interruption; the resumed "
+        "epoch's remaining batches were drawn fresh rather than replayed, so the data "
+        "order differs from an uninterrupted run"
+    ]
+    if "scheduler" not in state:
+        added.append(
+            "the checkpoint carried no learning-rate schedule, so the schedule restarted "
+            "at the resumed step"
+        )
+    for caveat in added:
+        print(f"[resnet] CAVEAT: {caveat}", flush=True)
+    caveats.extend(added)
+
+    return step, epoch
 
 
 if __name__ == "__main__":
