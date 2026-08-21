@@ -178,10 +178,17 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null,
     if (status >= 500) {
       request.log.error({ err }, 'request failed');
     }
+
+    // 5xx messages are hidden by default because an unexpected exception's message is
+    // an internal detail — a SQL fragment, a stack, a connection string. `expose` is
+    // for the 5xx that were *constructed* to be read: an upstream's own answer relayed
+    // back to whoever asked. Masking those would replace the only useful sentence in
+    // the response with "Internal server error".
+    const readable = status < 500 || err.expose === true;
     reply.status(status).send({
       error: {
         code: err.code ?? (status >= 500 ? 'INTERNAL_ERROR' : 'BAD_REQUEST'),
-        message: status >= 500 ? 'Internal server error' : err.message,
+        message: readable ? err.message : 'Internal server error',
       },
     });
   });

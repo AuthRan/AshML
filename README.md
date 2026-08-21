@@ -90,6 +90,7 @@ A registered version becomes something that answers requests:
 ```bash
 ash model deploy resnet18-cifar10 --replicas 2   # serves the PRODUCTION version
 ash deployment get resnet18-cifar10              # what the cluster reports back
+ash predict resnet18-cifar10 --image cat.png     # ask it, from outside the cluster
 ```
 
 Proven end to end on k3d: the ResNet-18 version above served **1 000 real CIFAR-10 test
@@ -101,6 +102,53 @@ The inference image is generic. It is handed an **artifact id**, not a URL and n
 baked-in model, and exchanges it for a time-limited download at startup through the same
 endpoint the training SDK uses — a presigned URL in the manifest would expire, and a pod
 restarting hours later would crash-loop on a dead signature.
+
+### Asking it a question
+
+```bash
+make cifar-png                                   # test images as PNGs, labels in the names
+ash predict resnet18-cifar10 --image data/cifar-png/test-00001-ship.png
+```
+```
+  test-00001-ship.png: 32x32 truecolour
+
+prediction:  ship
+confidence:  81.5%
+
+served by:   resnet18-cifar10 v1 → artifact 7228968a-… (resnet18-cifar)
+latency:     269.6 ms in the pod, 284 ms round trip
+```
+
+`--image` repeats, so a batch is one call and prints a table.
+
+Those are CIFAR-10 **test** images with their true labels in the filename, so the answer
+can be checked rather than admired — and over the first eight of them this model gets six
+right, which is roughly what a 65.59% model should look like. A demo that scores 8/8 is
+predicting on its own training set.
+
+Every answer carries the version and artifact that produced it. A prediction nobody can
+attribute to a model version is how the wrong model serves for a week, and
+`ash deployment metadata` closes the loop by asking the pod what it *actually* loaded and
+comparing that against what AshML recorded:
+
+```bash
+ash deployment metadata resnet18-cifar10
+```
+
+The request goes through the Kubernetes API server's proxy, which already routes to
+Services and which the control plane already holds credentials for — so a ClusterIP stays
+a ClusterIP and nothing new is exposed. **This is not the serving path**, and the code
+says so where it would otherwise be misused: real traffic goes to `endpoint_url` from
+inside the cluster, because routing inference through the control plane puts every
+request on the event loop that runs the scheduler, and makes a control-plane restart an
+inference outage.
+
+Decoding the PNG happens in `ash`, not on the server. The model server takes pixels
+because it owns the normalisation its weights were trained with, and a second
+implementation of that transform on the client's side of the wire is a silent accuracy
+loss that no error message would ever point at. So `ash` centre-crops and area-averages
+down to 32×32 — and prints what it did, because a confident prediction about a 32×32 crop
+of a photograph is still a prediction about a 32×32 crop of a photograph.
 
 `/healthz` answers as soon as the process binds; `/readyz` answers only once the weights
 are loaded and a forward pass has run. They are wired to different probes deliberately:
@@ -233,6 +281,13 @@ ash experiment metrics <experiment-id>
 ash experiment artifacts <experiment-id> --ready
 ash experiment get <experiment-id>   # what was asked for, and what the run observed
 ash job cancel <id>      # stops at CANCELLING until the Pod is really gone
+
+# Serve a registered version, and ask it something.
+ash model deploy resnet18-cifar10 --replicas 2
+ash deployment get resnet18-cifar10       # status the cluster reported, not what was asked for
+ash deployment metadata resnet18-cifar10  # what the pod says it actually loaded
+ash predict resnet18-cifar10 --image test-00001-ship.png
+ash predict resnet18-cifar10 --instances batch.json   # any other architecture's shape
 
 ash node list            # cluster capacity: what is free, what is committed
 ash project quota vision --gpu 2 --jobs 4

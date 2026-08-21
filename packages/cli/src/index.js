@@ -15,6 +15,8 @@ import { Command } from 'commander';
 import Table from 'cli-table3';
 import { parse as parseYaml } from 'yaml';
 
+import { imageToInstance } from './png.js';
+
 const DEFAULT_ENDPOINT = process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080';
 
 /** Calls the control plane, unwrapping the standard error envelope (spec §45). */
@@ -1265,6 +1267,141 @@ deployment
       { method: 'DELETE' },
     );
     output(opts, removed, () => console.log(`removed deployment ${removed.name}`));
+  });
+
+deployment
+  .command('metadata <name>')
+  .description('Ask the pods what they actually have loaded')
+  .option(...deploymentProjectOption)
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const m = await api(
+      endpoint(),
+      `/api/v1/projects/${requireProject(opts)}/deployments/${name}/metadata`,
+    );
+    output(opts, m, () => {
+      console.log(`deployment:  ${m.deployment}`);
+      console.log(`recorded:    ${m.model} v${m.version ?? '?'} → artifact ${m.artifact_id ?? '-'}`);
+      console.log(`pod reports: ${m.reported?.arch ?? '?'} → artifact ${m.reported?.artifact_id ?? '-'}`);
+      console.log(`source:      ${m.reported?.source_uri ?? '-'}`);
+      console.log(`ready:       ${m.reported?.ready === true ? 'yes' : 'NO'}${m.reported?.error ? ` (${m.reported.error})` : ''}`);
+      console.log(`torch:       ${m.reported?.torch ?? '-'}`);
+      if (m.matches_record === false) {
+        // The whole reason this command exists. A pod serving something other than what
+        // the registry says it serves produces predictions nobody can reproduce, and
+        // nothing else in the platform would ever mention it.
+        console.log('');
+        console.log('MISMATCH: the pod is not serving the artifact AshML recorded for this');
+        console.log('deployment. Redeploy it, or find out what changed before trusting an answer.');
+      } else if (m.matches_record === null) {
+        console.log('');
+        console.log('The pod did not say which artifact it loaded, so this could not be checked.');
+      }
+    });
+  });
+
+// ------------------------------------------------------------------ predict
+
+/**
+ * Reads instances from files, and says what it did to get them.
+ *
+ * Two ways in, because they answer different needs. `--image` is the demo: a PNG, cropped
+ * and resized here because the server takes pixels rather than a file. `--instances` is
+ * the escape hatch for anything else — another architecture, a batch prepared by a
+ * script, a case this CLI has no opinion about — and is passed through untouched.
+ */
+async function gatherInstances(opts) {
+  if (opts.instances && opts.image?.length) {
+    throw new Error('pass either --image or --instances, not both');
+  }
+
+  if (opts.instances) {
+    const parsed = JSON.parse(await readFile(opts.instances, 'utf8'));
+    const instances = Array.isArray(parsed) ? parsed : parsed.instances;
+    if (!Array.isArray(instances) || instances.length === 0) {
+      throw new Error(
+        `${opts.instances}: expected a JSON array, or an object with an "instances" array`,
+      );
+    }
+    return { instances, labels: instances.map((_, i) => `#${i}`), notes: [] };
+  }
+
+  if (!opts.image?.length) {
+    throw new Error('nothing to predict on: pass --image <file.png> or --instances <file.json>');
+  }
+
+  const instances = [];
+  const labels = [];
+  const notes = [];
+  for (const file of opts.image) {
+    const { instance, describe: how } = imageToInstance(await readFile(file));
+    instances.push(instance);
+    labels.push(file.split('/').pop());
+    notes.push(`${file}: ${how}`);
+  }
+  return { instances, labels, notes };
+}
+
+const percent = (value) => (Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '-');
+
+program
+  .command('predict <deployment>')
+  .description('Ask a deployment for a prediction')
+  .option(...deploymentProjectOption)
+  .option('--image <file...>', 'PNG to predict on; repeat for a batch')
+  .option('--instances <file>', 'JSON array of instances, passed through unchanged')
+  .option('--timeout <ms>', 'how long to wait for the pod to answer')
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const project = requireProject(opts);
+    const { instances, labels, notes } = await gatherInstances(opts);
+
+    const body = { instances };
+    if (opts.timeout) body.timeout_ms = Number(opts.timeout);
+
+    const answer = await api(
+      endpoint(),
+      `/api/v1/projects/${project}/deployments/${name}/predict`,
+      { method: 'POST', body },
+    );
+
+    output(opts, answer, () => {
+      // What happened to the image before the model saw it, printed before the answer
+      // rather than after: a confident prediction about a 32x32 crop of a photograph is
+      // still a prediction about a 32x32 crop of a photograph.
+      for (const note of notes) console.log(`  ${note}`);
+      if (notes.length) console.log('');
+
+      const predictions = answer.predictions ?? [];
+      if (predictions.length === 1) {
+        const [only] = predictions;
+        console.log(`prediction:  ${only.class_name ?? `class ${only.class_id}`}`);
+        console.log(`confidence:  ${percent(only.confidence)}`);
+      } else {
+        const table = newTable(['INPUT', 'PREDICTION', 'CONFIDENCE']);
+        for (const [index, p] of predictions.entries()) {
+          table.push([
+            labels[index] ?? `#${index}`,
+            p.class_name ?? `class ${p.class_id}`,
+            percent(p.confidence),
+          ]);
+        }
+        console.log(table.toString());
+      }
+
+      const by = answer.served_by ?? {};
+      console.log('');
+      // Provenance, every time and not behind a flag. A prediction whose model nobody
+      // recorded is how the wrong version serves for a week without anyone noticing.
+      console.log(`served by:   ${by.model} v${by.version ?? '?'} → artifact ${by.artifact_id ?? '-'} (${answer.arch ?? by.arch ?? '?'})`);
+      const inPod = answer.latency_ms == null ? '' : `${num(answer.latency_ms)} ms in the pod, `;
+      console.log(`latency:     ${inPod}${num(answer.round_trip_ms)} ms round trip`);
+      if (answer.simulated) {
+        console.log('');
+        console.log('WARNING: no real pod answered this. The output above is fabricated by');
+        console.log('the sim execution backend and is not a model prediction.');
+      }
+    });
   });
 
 program

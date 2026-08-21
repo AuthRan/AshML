@@ -12,6 +12,7 @@ AGENTS       ?= 1
 TRAINER_IMAGE ?= ashml/trainer:v1
 RESNET_IMAGE ?= ashml/resnet-trainer:v1
 DATA_DIR     ?= data
+PNG_COUNT    ?= 10
 SERVER_IMAGE ?= ashml/model-server:v1
 TEST_DATABASE_URL ?= postgresql://ashml:ashml@127.0.0.1:5432/ashml_test
 NAMESPACE    ?= ashml-jobs
@@ -73,6 +74,12 @@ resnet-image: cifar10 ## Build the ResNet-18/CIFAR-10 image and load it into the
 	# ~2 GB, mostly PyTorch, so this import takes a few minutes where the smoke image
 	# takes seconds. Same reason as `image`: k3d nodes cannot see the host's daemon.
 	k3d image import $(RESNET_IMAGE) -c $(CLUSTER)
+
+.PHONY: cifar-png
+cifar-png: cifar10 ## Write CIFAR-10 test images out as PNGs, for `ash predict`
+	# Test images, not training ones, and the true label is in each filename -- so a
+	# prediction can be checked rather than admired.
+	python3 scripts/cifar-png.py --data $(DATA_DIR) --count $(PNG_COUNT) --out $(DATA_DIR)/cifar-png
 
 .PHONY: model-server-image
 model-server-image: ## Build the inference image and load it into the cluster

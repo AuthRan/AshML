@@ -53,6 +53,9 @@ export function createSimBackend({
     labels: {},
   }];
 
+  /** Set by `_setServiceResponder`; null means `callService` refuses. */
+  let responder = null;
+
   const key = (ns, name) => `${ns}/${name}`;
 
   return {
@@ -167,6 +170,48 @@ export function createSimBackend({
       deployments.delete(key(ns, name));
     },
 
+    /**
+     * Refuses, in words, rather than inventing an answer.
+     *
+     * Every other thing this backend fabricates is infrastructure: a pod phase, a ready
+     * count, a node's capacity. A prediction is not infrastructure — it is model output,
+     * and spec Rule 5 forbids faking that outright. A simulated deployment has no
+     * weights in it, so the only honest response is to say so, and a caller reading
+     * `simulated: true` off this is reading a refusal rather than a plausible number.
+     *
+     * A test that needs a service to answer installs `_setServiceResponder` explicitly.
+     * That keeps the fabrication in the test that wanted it, where it is visible, rather
+     * than in a backend a demo might be pointed at by accident.
+     */
+    async callService(ns, name, options = {}) {
+      const record = deployments.get(key(ns, name));
+      if (!record) {
+        return {
+          status: 404,
+          body: { error: `sim: no such service ${key(ns, name)}` },
+          text: `sim: no such service ${key(ns, name)}`,
+          simulated: true,
+        };
+      }
+      if (responder) return { ...(await responder(ns, name, options)), simulated: true };
+
+      const message = 'sim: no container is running, so there is nothing to answer this. '
+        + 'The sim backend fabricates cluster state (ASHML_K8S_BACKEND=sim); it will not '
+        + 'fabricate model output. Set ASHML_K8S_BACKEND=kubernetes to ask a real pod.';
+      return { status: 501, body: { error: message }, text: message, simulated: true };
+    },
+
+    /**
+     * Test seam: make `callService` answer with whatever this returns.
+     *
+     * Deliberately not a default: see `callService`. A test that installs one is stating
+     * that the answer is a fixture it wrote, which is a different thing from a backend
+     * that hands out predictions to anyone who asks.
+     */
+    _setServiceResponder(fn) {
+      responder = fn;
+    },
+
     /** Test seam: drive a deployment's ready count directly, bypassing autoAdvance. */
     _setReady(ns, name, ready) {
       const record = deployments.get(key(ns, name));
@@ -206,6 +251,7 @@ export function createSimBackend({
     _reset() {
       jobs.clear();
       deployments.clear();
+      responder = null;
     },
   };
 }

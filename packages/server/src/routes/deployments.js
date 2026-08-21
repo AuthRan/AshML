@@ -12,6 +12,7 @@
  */
 
 import * as deploymentService from '../services/deployments.js';
+import * as inferenceService from '../services/inference.js';
 
 const deploymentSchema = {
   $id: 'Deployment',
@@ -197,6 +198,194 @@ export async function registerDeploymentRoutes(app) {
       request.params.name,
       request.params.deployment,
     ),
+  );
+
+  /**
+   * A batch of 64 CIFAR images is about a megabyte of JSON, which is exactly Fastify's
+   * default body limit — so the default would reject the largest batch the model server
+   * is willing to accept, and the error would name a byte count rather than a batch size.
+   * Raised here only, because no other endpoint on this API has any business taking a
+   * body this size.
+   */
+  const PREDICT_BODY_LIMIT = 16 * 1024 * 1024;
+
+  app.post(
+    '/api/v1/projects/:name/deployments/:deployment/predict',
+    {
+      bodyLimit: PREDICT_BODY_LIMIT,
+      schema: {
+        tags: ['deployments'],
+        summary: 'Ask a deployment for predictions',
+        description:
+          'Forwards instances to the pods behind a deployment and returns what they '
+          + 'answer, together with which model version AshML records as serving.\n\n'
+          + '**This is not the serving path.** It goes through the Kubernetes API '
+          + "server's proxy so that a human outside the cluster can ask a ClusterIP a "
+          + 'question. Production traffic goes to `endpoint_url` from inside the '
+          + 'cluster: routing it through here would put every inference on the event '
+          + 'loop that runs the scheduler, and would make a control-plane restart an '
+          + 'inference outage.\n\n'
+          + 'The shape of an instance is the model server\'s business, not this API\'s. '
+          + 'For `resnet18-cifar` it is a 32x32x3 array of 0..255 values, and the '
+          + 'normalisation the weights were trained with is applied by the server — '
+          + 'doing it on the caller\'s side is a silent accuracy loss no error mentions.',
+        params: {
+          type: 'object',
+          required: ['name', 'deployment'],
+          properties: { name: { type: 'string' }, deployment: { type: 'string' } },
+        },
+        body: {
+          type: 'object',
+          required: ['instances'],
+          additionalProperties: false,
+          properties: {
+            instances: {
+              type: 'array',
+              minItems: 1,
+              description: 'One entry per thing to predict on, in whatever shape the architecture takes',
+            },
+            timeout_ms: {
+              type: 'integer',
+              minimum: 100,
+              maximum: 120_000,
+              description: 'How long to wait for the pod to answer',
+            },
+          },
+        },
+        response: {
+          200: {
+            type: 'object',
+            required: ['predictions', 'served_by'],
+            properties: {
+              predictions: {
+                type: 'array',
+                description: "The model server's answers, relayed unchanged",
+                items: {
+                  type: 'object',
+                  additionalProperties: true,
+                  properties: {
+                    class_id: { type: 'integer' },
+                    class_name: { type: ['string', 'null'] },
+                    confidence: { type: 'number' },
+                  },
+                },
+              },
+              latency_ms: {
+                type: ['number', 'null'],
+                description: 'The forward pass, as measured by the pod that ran it',
+              },
+              round_trip_ms: {
+                type: 'number',
+                description:
+                  'The whole call as measured here, including the API server proxy. '
+                  + 'Larger than latency_ms, and the difference is not the model.',
+              },
+              arch: {
+                type: ['string', 'null'],
+                description: 'The architecture the answering pod says it is running',
+              },
+              served_by: {
+                type: 'object',
+                description: 'What AshML records this deployment as serving',
+                additionalProperties: true,
+                properties: {
+                  deployment: { type: 'string' },
+                  model: { type: 'string' },
+                  version: { type: ['integer', 'null'] },
+                  artifact_id: { type: ['string', 'null'] },
+                  arch: { type: ['string', 'null'] },
+                },
+              },
+              simulated: {
+                type: 'boolean',
+                description: 'Present and true only when no real pod answered (spec Rule 5)',
+              },
+            },
+          },
+          400: { $ref: 'Error#' },
+          404: { $ref: 'Error#' },
+          409: { $ref: 'Error#' },
+          502: { $ref: 'Error#' },
+          503: { $ref: 'Error#' },
+        },
+      },
+    },
+    async (request) => {
+      const body = request.body ?? {};
+      const answer = await inferenceService.predict(app.db, app.k8s, {
+        projectName: request.params.name,
+        deploymentName: request.params.deployment,
+        instances: body.instances,
+        ...(body.timeout_ms ? { timeoutMs: body.timeout_ms } : {}),
+      });
+
+      request.log.info(
+        {
+          deployment: request.params.deployment,
+          model_version: answer.served_by.version,
+          instances: body.instances.length,
+          latency_ms: answer.latency_ms,
+          round_trip_ms: answer.round_trip_ms,
+        },
+        'prediction served',
+      );
+      return answer;
+    },
+  );
+
+  app.get(
+    '/api/v1/projects/:name/deployments/:deployment/metadata',
+    {
+      schema: {
+        tags: ['deployments'],
+        summary: 'Ask the pods what they actually have loaded',
+        description:
+          "What the process says is in its memory, as against what AshML's record says "
+          + 'it deployed. Normally identical — and the point is the case where they are '
+          + 'not, which otherwise surfaces only as predictions nobody can reproduce. '
+          + '`matches_record` is that comparison, made here so a caller cannot forget '
+          + 'to make it.',
+        params: {
+          type: 'object',
+          required: ['name', 'deployment'],
+          properties: { name: { type: 'string' }, deployment: { type: 'string' } },
+        },
+        response: {
+          200: {
+            type: 'object',
+            required: ['reported'],
+            additionalProperties: true,
+            properties: {
+              deployment: { type: 'string' },
+              model: { type: 'string' },
+              version: { type: ['integer', 'null'] },
+              artifact_id: { type: ['string', 'null'] },
+              arch: { type: ['string', 'null'] },
+              reported: {
+                type: 'object',
+                additionalProperties: true,
+                description: "The pod's own answer, relayed unchanged",
+              },
+              matches_record: {
+                type: ['boolean', 'null'],
+                description:
+                  'Whether the pod is serving the artifact AshML recorded. Null when '
+                  + 'one side did not say, which is not the same as a mismatch.',
+              },
+              simulated: { type: 'boolean' },
+            },
+          },
+          404: { $ref: 'Error#' },
+          409: { $ref: 'Error#' },
+          502: { $ref: 'Error#' },
+          503: { $ref: 'Error#' },
+        },
+      },
+    },
+    async (request) => inferenceService.servedMetadata(app.db, app.k8s, {
+      projectName: request.params.name,
+      deploymentName: request.params.deployment,
+    }),
   );
 
   app.delete(

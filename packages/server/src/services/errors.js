@@ -36,3 +36,24 @@ export class ValidationError extends Error {
 
 /** Postgres unique-violation SQLSTATE, the race-safe way to detect a duplicate. */
 export const UNIQUE_VIOLATION = '23505';
+
+/**
+ * A failure that came back from something AshML called, rather than from AshML.
+ *
+ * The status is chosen by the caller because there is no single right one: a model
+ * server refusing a malformed batch is the requester's 400, a model server with no
+ * weights loaded is a 503 about the deployment, and a proxy that could not reach
+ * anything is a 502. What they share is that the message was written for the person
+ * reading it and is safe to send — hence `expose`, which the error handler honours for
+ * statuses it would otherwise mask. Nothing about an upstream's answer is an internal
+ * detail of this process.
+ */
+export class UpstreamError extends Error {
+  constructor(code, message, statusCode = 502) {
+    super(message);
+    this.name = 'UpstreamError';
+    this.code = code;
+    this.statusCode = statusCode;
+    this.expose = true;
+  }
+}

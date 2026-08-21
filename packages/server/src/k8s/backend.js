@@ -20,6 +20,7 @@
  *     applyService(manifest): Promise<void>,
  *     observeDeployment(namespace, name): Promise<DeploymentObservation|null>,
  *     deleteDeployment(namespace, name): Promise<void>,
+ *     callService(namespace, name, options): Promise<ServiceResponse>,
  *     close(): Promise<void>,
  *   }
  *
@@ -46,6 +47,17 @@
  * desired and one ready is neither healthy nor failed, and that middle state is the
  * one an operator most needs to see. `observeDeployment` returns null when the
  * Deployment is absent, with the same meaning as for Jobs.
+ *
+ * A `ServiceResponse` is one HTTP answer from a Service inside the cluster:
+ *
+ *   { status: number, body: object|null, text: string }
+ *
+ * `callService` exists so a *human* can ask a deployment a question — `ash predict`, a
+ * smoke test, a demo — from outside the cluster, where a ClusterIP is not an address.
+ * It is not the serving path and must not become one: real traffic goes to
+ * `endpoint_url` from inside the cluster. `body` is null when the answer was not JSON,
+ * which a proxy error page will not be, and `text` is kept either way because that is
+ * what explains it.
  *
  * A `NodeInfo` is what the scheduler needs to know about a machine, already converted
  * out of Kubernetes' quantity strings into plain numbers:

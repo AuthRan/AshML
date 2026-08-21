@@ -275,6 +275,7 @@ whether that version serves traffic.
 Spec milestones 8, 9, 10.
 
 - ~~`ash model deploy` → inference Deployment + Service, health/readiness probes~~ **done**
+- ~~`ash predict` → the §50 journey's step 7, answered by a real pod~~ **done**
 - Model router (own Fastify service) with weighted version routing
 - Prometheus + Grafana + DCGM-exporter; Loki for logs; OTel traces
 - Dashboards: cluster/GPU, job pipeline, training curves, inference latency
@@ -328,6 +329,61 @@ Deploying with no version named serves whatever is in `PRODUCTION`, and fails pl
 nothing is promoted rather than falling back to the newest. "Latest" and "the one we
 chose" are different things, and quietly substituting one for the other is how the wrong
 model ends up serving.
+
+### Asking a deployment a question
+
+Step 7 of the §50 journey is `ash predict`, and until now there was no way to run it: a
+deployment's Service is a ClusterIP, which is right for serving and useless from a
+laptop. Proving the deployment served correctly meant holding a `kubectl port-forward`
+open, which is not a thing to ask of a demo.
+
+`POST /api/v1/projects/:p/deployments/:d/predict` forwards a body to the Service through
+the **Kubernetes API server's proxy subresource** — which already proxies to Services and
+which this process already holds credentials for, so nothing new is exposed and nothing
+new is installed. A NodePort per model would have handed out a different port for every
+deployment and made the address depend on which node answered; that still belongs to a
+gateway.
+
+**It is not the serving path and must not become one.** Real traffic goes to
+`endpoint_url` from inside the cluster: every request routed through here occupies the
+event loop that also runs the scheduler, and a control plane being restarted must not
+take inference down with it. This is for a human asking a deployment a question.
+
+Three things it does beyond proxying, each because the alternative fails quietly:
+
+- **Every answer says which version produced it.** `served_by` carries the deployment,
+  model, version and artifact id. A prediction nobody can attribute to a version is how
+  the wrong model serves for a week.
+- **`GET …/metadata` asks the pod what it actually loaded**, and compares it against what
+  AshML recorded. They agree in every normal case; the point is the case where they do
+  not, which otherwise surfaces only as predictions nobody can reproduce.
+- **Failures name the right thing.** A malformed batch comes back as the caller's 400
+  carrying the model server's own message, a pod with no weights as a 503 carrying what
+  AshML last observed *and how long ago* — deployment status is polled, so "READY" means
+  "was READY when last asked" — and an unreachable Service as a 502 about the path rather
+  than about the pod. The error handler had to learn to stop masking 5xx messages for
+  errors constructed to be read; it still masks everything else.
+
+Refusing early on `ready_replicas == 0` was written and then removed. That readiness is
+up to a sync interval old, so refusing on it denies a prediction because of a ten-second
+old observation — confidently wrong, about a pod that is answering perfectly well. The
+cluster is asked instead, and what AshML knows is attached to the failure rather than used
+to pre-empt it.
+
+The PNG decoding is in the CLI, not the server. The model server takes pixels because it
+owns the normalisation its weights were trained with, and a second implementation of that
+transform on the client's side of the wire is a silent accuracy loss no error message
+points at. `packages/cli/src/png.js` is a hand-written decoder — `ash` is a tool people
+install, and an image library is a lot of native code to carry for one command — which
+centre-crops, area-averages to 32x32, and **prints what it did**. Interlaced and sub-8-bit
+PNGs are refused by name rather than half-decoded.
+
+Proven against the live k3d deployment: `make cifar-png` writes CIFAR-10 **test** images
+with their true labels in the filename, and the ResNet-18 version above gets six of the
+first eight right — which is what a 65.59% model looks like, and what a demo scoring 8/8
+would be hiding. Measured: ~270 ms in the pod for one image, ~350 ms for eight, and the
+API server proxy adds 15-25 ms of that. The per-request floor dominates at this batch
+size; the 8.7 ms per image recorded earlier was over a much larger run.
 
 ### Recovery, as built
 
@@ -457,9 +513,10 @@ operator to ignore the field on the day it matters.
 - **Weighted routing.** `deployment_targets` carries the weight column and a deployment
   holds exactly one target at 100. Two targets are meaningless until the router exists,
   because nothing would decide which one answers.
-- **External exposure.** The Service is a ClusterIP. A NodePort per model would hand out
-  a different port for every deployment and make the address depend on which node
-  answered; that belongs to a gateway.
+- **External exposure.** The Service is still a ClusterIP, and `ash predict` reaches it
+  through the API server's proxy rather than by exposing anything. That is right for a
+  human with a kubeconfig and is not an ingress: callers who are not AshML operators, and
+  traffic at any volume, need a gateway.
 - **Autoscaling.** Replicas are what was asked for. Scaling on load needs the metrics
   that arrive later in this phase.
 - **Resuming the data order.** Covered above: a resumed epoch redraws its remaining

@@ -2111,6 +2111,239 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/deployments/{deployment}/predict:
+    post:
+      summary: Ask a deployment for predictions
+      tags:
+        - deployments
+      description: >-
+        Forwards instances to the pods behind a deployment and returns what they
+        answer, together with which model version AshML records as serving.
+
+
+        **This is not the serving path.** It goes through the Kubernetes API
+        server's proxy so that a human outside the cluster can ask a ClusterIP a
+        question. Production traffic goes to `endpoint_url` from inside the
+        cluster: routing it through here would put every inference on the event
+        loop that runs the scheduler, and would make a control-plane restart an
+        inference outage.
+
+
+        The shape of an instance is the model server's business, not this API's.
+        For `resnet18-cifar` it is a 32x32x3 array of 0..255 values, and the
+        normalisation the weights were trained with is applied by the server —
+        doing it on the caller's side is a silent accuracy loss no error
+        mentions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - instances
+              additionalProperties: false
+              properties:
+                instances:
+                  type: array
+                  minItems: 1
+                  description: One entry per thing to predict on, in whatever shape the
+                    architecture takes
+                timeout_ms:
+                  type: integer
+                  minimum: 100
+                  maximum: 120000
+                  description: How long to wait for the pod to answer
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: deployment
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - predictions
+                  - served_by
+                properties:
+                  predictions:
+                    type: array
+                    description: The model server's answers, relayed unchanged
+                    items:
+                      type: object
+                      additionalProperties: true
+                      properties:
+                        class_id:
+                          type: integer
+                        class_name:
+                          type:
+                            - "null"
+                            - string
+                        confidence:
+                          type: number
+                  latency_ms:
+                    type:
+                      - "null"
+                      - number
+                    description: The forward pass, as measured by the pod that ran it
+                  round_trip_ms:
+                    type: number
+                    description: The whole call as measured here, including the API server proxy.
+                      Larger than latency_ms, and the difference is not the
+                      model.
+                  arch:
+                    type:
+                      - "null"
+                      - string
+                    description: The architecture the answering pod says it is running
+                  served_by:
+                    type: object
+                    description: What AshML records this deployment as serving
+                    additionalProperties: true
+                    properties:
+                      deployment:
+                        type: string
+                      model:
+                        type: string
+                      version:
+                        type:
+                          - "null"
+                          - integer
+                      artifact_id:
+                        type:
+                          - "null"
+                          - string
+                      arch:
+                        type:
+                          - "null"
+                          - string
+                  simulated:
+                    type: boolean
+                    description: Present and true only when no real pod answered (spec Rule 5)
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "502":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/deployments/{deployment}/metadata:
+    get:
+      summary: Ask the pods what they actually have loaded
+      tags:
+        - deployments
+      description: What the process says is in its memory, as against what AshML's
+        record says it deployed. Normally identical — and the point is the case
+        where they are not, which otherwise surfaces only as predictions nobody
+        can reproduce. `matches_record` is that comparison, made here so a
+        caller cannot forget to make it.
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: deployment
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - reported
+                additionalProperties: true
+                properties:
+                  deployment:
+                    type: string
+                  model:
+                    type: string
+                  version:
+                    type:
+                      - "null"
+                      - integer
+                  artifact_id:
+                    type:
+                      - "null"
+                      - string
+                  arch:
+                    type:
+                      - "null"
+                      - string
+                  reported:
+                    type: object
+                    additionalProperties: true
+                    description: The pod's own answer, relayed unchanged
+                  matches_record:
+                    type:
+                      - "null"
+                      - boolean
+                    description: Whether the pod is serving the artifact AshML recorded. Null when
+                      one side did not say, which is not the same as a mismatch.
+                  simulated:
+                    type: boolean
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "502":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
   /api/v1/jobs/{id}/metrics:
     post:
       summary: Report training metrics for a job
