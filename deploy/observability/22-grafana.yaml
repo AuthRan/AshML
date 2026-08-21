@@ -1,0 +1,111 @@
+# Grafana: where the dashboards are read, and what it is allowed to know.
+#
+# Its credentials are in 21-grafana-credentials.yaml.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: ashml
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+        app.kubernetes.io/part-of: ashml
+      annotations:
+        ashml.io/dashboards-hash: replaced-by-make
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        fsGroup: 472
+      containers:
+        - name: grafana
+          image: grafana/grafana:13.1.4
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            # Anonymous read access, on a cluster reachable only through a port-forward
+            # from the machine it runs on. It is here so that opening a dashboard is one
+            # command rather than one command and a login, and it is a local-development
+            # choice: a Grafana exposed to anything wider needs this off. The admin
+            # account still exists and is still what editing would need.
+            - { name: GF_AUTH_ANONYMOUS_ENABLED, value: 'true' }
+            - { name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Viewer }
+            - { name: GF_USERS_DEFAULT_THEME, value: dark }
+            # No call home, no news feed, no plugin catalogue. A monitoring tool that
+            # makes outbound requests on its own is a monitoring tool that can be slow for
+            # reasons unrelated to what it is monitoring.
+            - { name: GF_ANALYTICS_REPORTING_ENABLED, value: 'false' }
+            - { name: GF_ANALYTICS_CHECK_FOR_UPDATES, value: 'false' }
+            - { name: GF_NEWS_NEWS_FEED_ENABLED, value: 'false' }
+            - { name: GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED, value: 'true' }
+          envFrom:
+            - secretRef: { name: grafana-datasource-credentials }
+          # A startup probe, for the reason the model server has one: Grafana runs its
+          # own sqlite migrations on a cold boot, which on a slow filesystem takes
+          # minutes. Written first without one, the liveness probe killed it mid-migration
+          # and the restart began the migration again — a crash loop caused entirely by
+          # the probe, which is the exact failure the model server's probes were arranged
+          # to avoid. Liveness does not start counting until this passes.
+          startupProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 5
+            failureThreshold: 90
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: provisioning-datasources, mountPath: /etc/grafana/provisioning/datasources }
+            - { name: provisioning-dashboards, mountPath: /etc/grafana/provisioning/dashboards }
+            - { name: dashboards, mountPath: /etc/grafana/dashboards }
+            - { name: data, mountPath: /var/lib/grafana }
+      volumes:
+        - name: provisioning-datasources
+          configMap: { name: grafana-datasources }
+        - name: provisioning-dashboards
+          configMap: { name: grafana-dashboard-provider }
+        - name: dashboards
+          configMap: { name: grafana-dashboards }
+        # An emptyDir, and unlike Prometheus' volume that is not a compromise. Everything
+        # this Grafana knows — datasources, dashboards, folder — is provisioned from the
+        # ConfigMaps above, so its sqlite holds nothing that is not already in this
+        # repository. Losing it on a restart costs the session cookie.
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: ashml
+spec:
+  # ClusterIP, reached with `make grafana` (a port-forward), for the same reason a model
+  # deployment's Service is a ClusterIP: exposing it needs an answer to who may reach it,
+  # and this Grafana has anonymous viewing switched on. A NodePort here would put every
+  # graph on the network for anyone who can reach the node.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

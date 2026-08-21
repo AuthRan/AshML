@@ -1,0 +1,38 @@
+# Restores `host.k3d.internal` inside the cluster.
+#
+# **What breaks without this.** `host.k3d.internal` is how anything running in k3d reaches
+# the workstation, and this platform depends on it twice: it is what every training pod is
+# handed as `ASHML_ENDPOINT` (`config.apiAdvertiseUrl`), so a run that cannot resolve it
+# reports no metrics and confirms no artifacts, and it is what Prometheus scrapes the
+# control plane on. The failure is quiet — the pod runs, trains, and tells nobody.
+#
+# **Why it goes missing.** k3d installs the name by writing it into CoreDNS' `NodeHosts`
+# entry. k3s owns that same entry and rewrites it from the node list whenever the node set
+# changes — a restart, an agent coming back — and k3d's line is not in the node list, so it
+# is dropped. That is what happened on this host after Docker was reinstalled: the cluster
+# came back, and the name did not.
+#
+# **Why a rewrite rather than an address.** The `hosts` plugin would need an IP, and the
+# right IP depends on how Docker is running: on plain Linux Docker it is the bridge
+# gateway, while under Docker Desktop the cluster's nodes live in a VM and the workstation
+# is somewhere else entirely (192.168.65.2 on this host — the bridge gateway reaches the
+# VM, not the machine). `host.docker.internal` is the name the Docker daemon itself keeps
+# pointed at the workstation, so aliasing to it is correct in both cases and hard-codes
+# neither.
+#
+# Applied with `make cluster-dns`, and only worth applying when the name has actually gone:
+# `make cluster-dns-check` says which. On a cluster where k3d's own entry is intact this
+# changes nothing, because the answer is the same either way.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/part-of: ashml
+data:
+  # The Corefile shipped by k3s ends with `import /etc/coredns/custom/*.override`, which
+  # is inside the `.:53` server block — so this line joins that block's plugin chain, and
+  # `rewrite` runs before the upstream lookup regardless of where it appears.
+  ashml.override: |
+    rewrite name host.k3d.internal host.docker.internal

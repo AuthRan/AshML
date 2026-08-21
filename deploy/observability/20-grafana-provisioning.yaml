@@ -1,0 +1,86 @@
+# Grafana's datasources and its dashboard provider, as files.
+#
+# Everything Grafana knows is provisioned from here, and nothing is created by clicking.
+# That is what makes the emptyDir below safe and the dashboards reviewable: a panel
+# changes in a pull request or it does not change.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: ashml
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      # ------------------------------------------------------------------ scraped
+      - name: Prometheus
+        uid: ashml-prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus.ashml-observability.svc.cluster.local:9090
+        isDefault: true
+        jsonData:
+          # Matches global.scrape_interval. Grafana uses it as the floor for $__rate_interval,
+          # and getting it wrong is how a rate() over a window shorter than the scrape
+          # interval silently returns nothing.
+          timeInterval: 15s
+
+      # ------------------------------------------------------------------ pushed
+      #
+      # The training curves come from here, not from Prometheus, and that is ADR 0009
+      # rather than an inconvenience. A loss belongs to a *step*, and only the training
+      # loop knows which one; a scraper sampling on a timer would record "loss was 1.84 at
+      # 14:03:22" — the wrong axis, silently dropping every step between two scrapes.
+      # `training_metrics` has the step column the run reported, so the dashboards plot
+      # against it directly.
+      #
+      # Read-only would be better and Grafana's Postgres datasource has no such setting;
+      # the user this connects as should be one that cannot write. On the development host
+      # it is the same `ashml` user the control plane uses, which is a local-development
+      # compromise and is called one here rather than left to be discovered.
+      - name: AshML PostgreSQL
+        uid: ashml-postgres
+        type: grafana-postgresql-datasource
+        access: proxy
+        # Interpolated from the container's environment at provisioning time (see
+        # 22-grafana.yaml). The address is the *host's* database as seen from inside k3d,
+        # because the control plane's database runs on the workstation next to it.
+        url: $ASHML_PG_ADDR
+        user: $ASHML_PG_USER
+        database: $ASHML_PG_DATABASE
+        secureJsonData:
+          password: $ASHML_PG_PASSWORD
+        jsonData:
+          sslmode: disable
+          postgresVersion: 1600
+          timescaledb: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: ashml
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: ashml
+        orgId: 1
+        folder: AshML
+        type: file
+        # A dashboard edited in the UI is overwritten on the next reload, and deleting one
+        # from the UI does not stick. Both are deliberate: these files are the dashboards,
+        # and a panel that exists only in someone's browser is a panel nobody else has.
+        disableDeletion: true
+        allowUiUpdates: false
+        updateIntervalSeconds: 30
+        options:
+          path: /etc/grafana/dashboards
+          foldersFromFilesStructure: false

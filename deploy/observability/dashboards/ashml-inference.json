@@ -1,0 +1,718 @@
+{
+  "id": null,
+  "uid": "ashml-inference",
+  "title": "AshML \u2014 Inference",
+  "description": "Serving deployments, and the latency of asking one a question through `ash predict`. Note that this is the control plane's path, not the serving path.",
+  "tags": [
+    "ashml"
+  ],
+  "timezone": "browser",
+  "editable": false,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Deployments READY",
+      "description": "READY means every requested replica passed its readiness probe when the sync loop last looked \u2014 and for a model server, readiness means the weights are loaded and a forward pass has run, not that the process bound a port.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "ashml_deployments{status=\"READY\"}",
+          "legendFormat": "",
+          "range": true,
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "DEGRADED",
+      "description": "Was serving and is now short of replicas. Kept distinct from PROGRESSING on purpose: one word for both would hide an outage inside something that sounds like a start-up.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "ashml_deployments{status=\"DEGRADED\"}",
+          "legendFormat": "",
+          "range": true,
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "PROGRESSING",
+      "description": "Objects exist, not enough replicas are ready yet. A cold start legitimately sits here while a checkpoint downloads.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "ashml_deployments{status=\"PROGRESSING\"}",
+          "legendFormat": "",
+          "range": true,
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### What the two latency graphs are for\n\n`ash predict` reaches a deployment through the **Kubernetes API server's proxy**, and that is deliberately *not* the serving path \u2014 real traffic goes to `endpoint_url` from inside the cluster. Every request on this dashboard occupied the event loop that also runs the scheduler.\n\nSo two histograms are exported: the **round trip** AshML measured, and the **forward pass** the model server measured for itself. The difference between them is this control plane plus the proxy, and it is measured rather than asserted \u2014 `docs/benchmarks.md` records 120\u2013160 ms of it. Reporting only the model's number would credit the platform with a latency it does not deliver."
+      },
+      "transparent": false
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Replicas \u2014 asked for, and ready",
+      "description": "Two series rather than one health flag, because \"is it up\" and \"how far short is it\" are different questions and only the second is useful during a rollout or an outage. A deleted deployment stops reporting entirely \u2014 absence here means the row is gone, not that it has zero replicas.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "ashml_deployment_replicas_desired",
+          "legendFormat": "{{project}}/{{deployment}} \u00b7 desired",
+          "range": true,
+          "editorMode": "code"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "ashml_deployment_replicas_ready",
+          "legendFormat": "{{project}}/{{deployment}} \u00b7 ready",
+          "range": true,
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Round trip, through the control plane and the API server proxy",
+      "description": "Failures are timed too, and deliberately: a deployment refusing in 4 ms and one timing out at 15 s are both \"failing\", and a histogram of successes only would show neither. Split them with the outcome panel below.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ashml_prediction_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "range": true,
+          "editorMode": "code"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ashml_prediction_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "range": true,
+          "editorMode": "code"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ashml_prediction_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p99",
+          "range": true,
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "The forward pass itself, as the pod measured it",
+      "description": "Reported by the model server in its own response and recorded here. It is the only number on this dashboard that is about the model rather than about the path to it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ashml_prediction_upstream_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "range": true,
+          "editorMode": "code"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ashml_prediction_upstream_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p99",
+          "range": true,
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "What is not the model \u2014 round trip minus forward pass (p50)",
+      "description": "The measured form of \"this is not the serving path\". Two independently estimated quantiles subtracted, so treat it as an order of magnitude rather than a precise figure \u2014 but the order of magnitude is the point, and it is why production traffic must not come through here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ashml_prediction_duration_seconds_bucket[$__rate_interval]))) - histogram_quantile(0.50, sum by (le) (rate(ashml_prediction_upstream_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "control plane + proxy",
+          "range": true,
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Seconds per instance, as the pod measured it",
+      "description": "Per-image cost, which falls sharply with batch size \u2014 the per-request floor dominates at batch 1. Measured on this cluster: ~270 ms for one image and ~350 ms for eight, against 8.7 ms per image over a 1 000-image run.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "rate(ashml_prediction_upstream_duration_seconds_sum[$__rate_interval]) / rate(ashml_prediction_instances_total[$__rate_interval])",
+          "legendFormat": "{{project}}/{{deployment}}",
+          "range": true,
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Instances predicted on",
+      "description": "Counted only on success, because this is the denominator of per-image cost and a batch that was refused predicted on nothing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "sum by (project, deployment) (rate(ashml_prediction_instances_total[$__rate_interval]))",
+          "legendFormat": "{{project}}/{{deployment}}",
+          "range": true,
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Prediction outcomes",
+      "description": "`client_error` is the caller's batch \u2014 the model server refused it and the refusal was relayed verbatim. `server_error` is everything else: an unreachable Service, a pod with no weights, a deployment that was never launched. The split is who has to act, which is the only division a label here can usefully make.\n\nA request naming a deployment that does not exist is in neither: it never reached a pod, and labelling it would mint a series for every name anyone mistypes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "sum by (outcome) (rate(ashml_prediction_duration_seconds_count[$__rate_interval])) * 60",
+          "legendFormat": "{{outcome}} /min",
+          "range": true,
+          "editorMode": "code"
+        }
+      ]
+    }
+  ]
+}

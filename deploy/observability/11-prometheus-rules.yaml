@@ -1,0 +1,96 @@
+# Alert rules, and what they are honestly worth here.
+#
+# There is **no Alertmanager in this deployment**, so nothing here pages anyone. These
+# rules fire into Prometheus' own Alerts page and nowhere else, and that is stated rather
+# than left to be discovered: a rule that looks like an alert and reaches no one is worse
+# than no rule, because it is trusted. Adding Alertmanager is a routing decision — where
+# does it go, who is on call — that this cluster cannot answer.
+#
+# What they are worth is the expressions. Each one is a failure this platform has actually
+# had, written down as the query that would have shown it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: ashml
+data:
+  ashml.yml: |
+    groups:
+      - name: ashml-control-plane
+        rules:
+          - alert: AshMLControlPlaneDown
+            expr: up{job="ashml-control-plane"} == 0
+            for: 1m
+            labels: { severity: critical }
+            annotations:
+              summary: The control plane is not answering /metrics
+              description: >-
+                Jobs already running are unaffected — the platform keeps no state in its
+                own process (ADR 0001) and a training pod does not notice — but nothing is
+                being scheduled, no deployment status is being observed, and no run can
+                report a metric or confirm an artifact while this is true.
+
+          - alert: AshMLQueueNotDraining
+            expr: ashml_queue_oldest_seconds > 900
+            for: 5m
+            labels: { severity: warning }
+            annotations:
+              summary: A job has been queued for over 15 minutes
+              description: >-
+                Depth alone cannot tell ten jobs submitted a second ago from one job
+                nothing will ever place, which is why this alerts on the age. On this
+                cluster the usual cause is a job requesting nvidia.com/gpu, which no node
+                advertises (ADR 0008); `ash job get` prints the placement reason.
+
+          - alert: AshMLExecutorPassFailing
+            expr: increase(ashml_executor_passes_total{outcome="failed"}[10m]) > 0
+            for: 0m
+            labels: { severity: warning }
+            annotations:
+              summary: An executor pass failed outright
+              description: >-
+                A whole pass threw rather than one job failing — the database or the
+                Kubernetes API server, not a workload. The loop keeps running, so this is
+                a warning and not a page, but nothing advanced during those passes.
+
+      - name: ashml-serving
+        rules:
+          - alert: AshMLDeploymentShortOfReplicas
+            expr: ashml_deployment_replicas_ready < ashml_deployment_replicas_desired
+            for: 5m
+            labels: { severity: warning }
+            annotations:
+              summary: '{{ $labels.project }}/{{ $labels.deployment }} is short of replicas'
+              description: >-
+                Five minutes is chosen to be longer than a cold start: a model server
+                downloads its checkpoint and runs a forward pass before it reports ready,
+                so a rollout legitimately sits here for a minute or two. Past that it is
+                an outage rather than a start-up.
+
+      - name: ashml-observability
+        rules:
+          - alert: AshMLScrapeSourceFailing
+            expr: increase(ashml_scrape_errors_total[10m]) > 0
+            for: 0m
+            labels: { severity: warning }
+            annotations:
+              summary: 'The {{ $labels.source }} snapshot could not be collected'
+              description: >-
+                The scrape still succeeded — a failing source is isolated so that the
+                sources still working are not lost with it — which means every gauge from
+                this source is stale rather than absent. This alert is the only thing that
+                says so.
+
+          - alert: AshMLArtifactsStuckPending
+            expr: ashml_artifacts{status="PENDING"} > 0
+            for: 30m
+            labels: { severity: warning }
+            annotations:
+              summary: Artifacts registered but never confirmed
+              description: >-
+                A run registered an artifact and died before confirming the bytes landed.
+                Nothing sweeps these yet (the Phase 4 garbage-collection deferral), so
+                they accumulate; this is what makes the pile countable.

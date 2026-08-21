@@ -1,0 +1,105 @@
+# What Prometheus scrapes, and why each target is here.
+#
+# Three sources, and they are three because they know three different things:
+#
+#   - the AshML control plane, which is the only thing that knows what AshML *decided* —
+#     queue depth, placements, deployment status as the platform observed it;
+#   - the kubelets' cAdvisor, which knows what containers actually *used*, as against
+#     what their manifests asked for. That difference is the whole of "is this workload
+#     sized right", and neither number can produce it alone;
+#   - Prometheus itself, so a gap in a graph can be told apart from a scraper that
+#     stopped.
+#
+# There is no DCGM-exporter here. It is in the Phase 5 plan and it would report nothing
+# on this cluster: no NVIDIA device plugin is installed, so no GPU reaches a node
+# (ADR 0008). The real telemetry from the two RTX 2080 Tis in this host arrives through
+# the control plane's own `ashml_gpu_*` series instead, gathered by the GpuProvider in
+# the process that can actually see them. Deploying an exporter that would export zeroes
+# is exactly the kind of decoration spec Rule 5 forbids.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: ashml
+data:
+  prometheus.yml: |
+    global:
+      # The control plane's own loops run on 2 s (executor) and 10 s (deployment sync),
+      # so 15 s samples both without oversampling either. Faster would mostly record the
+      # same value twice; slower would alias the executor's pass entirely.
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: k3d-ashml
+
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    scrape_configs:
+      # ------------------------------------------------------------------ control plane
+      #
+      # `host.k3d.internal` is how a Pod in k3d reaches the workstation, and the control
+      # plane runs there rather than in the cluster — the same address that training pods
+      # are handed as ASHML_ENDPOINT (`config.apiAdvertiseUrl`). One address, one thing
+      # that has to be true, and it is already true for every training run.
+      #
+      # A control plane that has moved into the cluster changes this line to its Service
+      # and nothing else: the exporter does not know or care where it is scraped from.
+      - job_name: ashml-control-plane
+        metrics_path: /metrics
+        # The scrape reads PostgreSQL for its snapshot gauges. Ten seconds is generous
+        # against a query set that takes milliseconds, and short enough that a hung
+        # database marks the target down within one interval instead of stalling the
+        # scrape loop.
+        scrape_timeout: 10s
+        static_configs:
+          - targets: ['host.k3d.internal:8080']
+            labels:
+              instance: ashml-control-plane
+
+      # ------------------------------------------------------------------ cAdvisor
+      #
+      # Per-container CPU and memory, read from each kubelet through the API server's
+      # proxy. Going through the API server rather than to `node:10250` directly is what
+      # makes this work unchanged on a cluster where the kubelet port is firewalled, and
+      # it reuses the authentication the ServiceAccount already has (see 11-prometheus).
+      - job_name: kubernetes-cadvisor
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          # The discovered address is the kubelet's; rewrite it to the API server and
+          # point the path at that node's proxy subresource.
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+        metric_relabel_configs:
+          # cAdvisor emits a series per cgroup, most of which are not containers. Keeping
+          # only the four series that answer a question worth asking here is the
+          # difference between a few hundred series and tens of thousands — and an
+          # unfiltered cAdvisor is the usual reason a small Prometheus falls over.
+          - source_labels: [__name__]
+            regex: 'container_(cpu_usage_seconds_total|memory_working_set_bytes|network_receive_bytes_total|network_transmit_bytes_total)'
+            action: keep
+          # The pod-level cgroup reports under an empty container name and double-counts
+          # everything below it.
+          - source_labels: [container]
+            regex: ''
+            action: drop
+
+      # ------------------------------------------------------------------ itself
+      - job_name: prometheus
+        static_configs:
+          - targets: ['localhost:9090']

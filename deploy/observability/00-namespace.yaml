@@ -1,0 +1,13 @@
+# Prometheus and Grafana, in their own namespace.
+#
+# Separate from `ashml-jobs` on purpose: what runs here watches the platform, and a
+# namespace holding both the watcher and the watched makes "delete everything AshML ran"
+# and "delete the monitoring" the same command. Deleting a training namespace must never
+# take the graphs that explain what happened in it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ashml-observability
+  labels:
+    app.kubernetes.io/part-of: ashml
+    app.kubernetes.io/component: observability

@@ -1,0 +1,579 @@
+{
+  "id": null,
+  "uid": "ashml-training",
+  "title": "AshML \u2014 Training curves",
+  "description": "Losses, accuracies and learning rates on the step axis the runs reported them against, read from `training_metrics` over the PostgreSQL datasource (ADR 0009).",
+  "tags": [
+    "ashml"
+  ],
+  "timezone": "browser",
+  "editable": false,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "templating": {
+    "list": [
+      {
+        "name": "project",
+        "label": "Project",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "ashml-postgres"
+        },
+        "query": "SELECT DISTINCT p.name\n  FROM projects p\n  JOIN training_jobs j ON j.project_id = p.id\n  JOIN training_metrics m ON m.job_id = j.id\n ORDER BY 1",
+        "refresh": 1,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "current": {},
+        "options": [],
+        "hide": 0,
+        "description": "Only projects that have reported at least one metric. A project with no runs would offer an empty job list and a blank dashboard."
+      },
+      {
+        "name": "job",
+        "label": "Run",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "ashml-postgres"
+        },
+        "query": "SELECT j.name || ' \u00b7 ' || left(j.id::text, 8) AS __text,\n       j.id::text                                 AS __value\n  FROM training_jobs j\n  JOIN projects p ON p.id = j.project_id\n WHERE p.name = '$project'\n   AND EXISTS (SELECT 1 FROM training_metrics m WHERE m.job_id = j.id)\n ORDER BY j.created_at DESC",
+        "refresh": 1,
+        "sort": 0,
+        "multi": true,
+        "includeAll": false,
+        "current": {},
+        "options": [],
+        "hide": 0,
+        "description": "The short id is in the label because run names repeat \u2014 every chaos script names its job after itself \u2014 and a curve attributed to the wrong run is worse than no curve."
+      },
+      {
+        "name": "metric",
+        "label": "Any other metric",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "ashml-postgres"
+        },
+        "query": "SELECT DISTINCT name\n  FROM training_metrics\n WHERE job_id::text IN (${job:sqlstring})\n ORDER BY 1",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "current": {},
+        "options": [],
+        "hide": 0,
+        "description": "The metric names are whatever the training script chose to log \u2014 this schema stores them long, one row per name, so nothing here needs a migration when a run logs something new."
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### These curves do not come from Prometheus, and that is the design\n\nA loss belongs to a **step**, and only the training loop knows which one. A scraper sampling on a timer would record *\"loss was 1.84 at 14:03:22\"* \u2014 the wrong axis \u2014 and would silently drop every step between two scrapes. So runs **push** their metrics (ADR 0009), `training_metrics` keeps the step the run reported, and these panels read it directly over the PostgreSQL datasource. The x-axis below is steps, not time, which is why these are Trend panels rather than time series.\n\nThe cost is stated plainly: a training script that does not call the SDK reports nothing, and AshML will not invent a curve for it.\n\n**A resumed run may report the same step twice.** Those steps were genuinely trained twice \u2014 the retry restarts from the last confirmed checkpoint \u2014 and the points are drawn as they were reported rather than averaged into one line that never happened."
+      },
+      "transparent": false
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Runs in view",
+      "description": "`attempt` above zero means this run was retried and resumed from a checkpoint. `first_report` is when the *training process* observed the first point, not when the API received it \u2014 a run that buffers and flushes in a batch would otherwise have its whole history collapse onto the moment of the flush.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ashml-postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ashml-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT j.name                                        AS run,\n       left(j.id::text, 8)                          AS id,\n       j.state                                      AS state,\n       j.attempt                                    AS attempt,\n       max(m.step)                                  AS last_step,\n       count(DISTINCT m.name)                       AS metrics,\n       count(*)                                     AS points,\n       min(m.recorded_at)                           AS first_report,\n       max(m.recorded_at)                           AS last_report\n  FROM training_jobs j\n  JOIN training_metrics m ON m.job_id = j.id\n WHERE j.id::text IN (${job:sqlstring})\n GROUP BY 1, 2, 3, 4\n ORDER BY min(m.recorded_at) DESC",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "trend",
+      "title": "Loss, against step",
+      "description": "Training loss and, where the run reported one, validation loss. A discontinuity here on a resumed run is the thing worth looking at: weights, optimizer moments *and* the learning-rate schedule are restored on resume, and restoring the first two without the third produces a run that trains, converges and looks healthy while following a different curve from the one its experiment record claims.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ashml-postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "displayName": "${__field.labels.series}",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "step",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "series"
+            ],
+            "keepFields": false,
+            "naming": {
+              "asLabels": true
+            }
+          }
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "step",
+            "mode": "outer"
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ashml-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT m.step                                                    AS step,\n       j.name || ' \u00b7 ' || left(j.id::text, 8) || ' \u00b7 ' || m.name AS series,\n       m.value                                                   AS value\n  FROM training_metrics m\n  JOIN training_jobs j ON j.id = m.job_id\n WHERE j.id::text IN (${job:sqlstring})\n   AND m.name IN ('loss', 'val_loss')\n ORDER BY series, m.step, m.recorded_at",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "trend",
+      "title": "Accuracy, against step",
+      "description": "Whatever the run called it. The ResNet-18 run recorded here reached 65.59% top-1 on the full 10 000-image CIFAR-10 test set after one epoch \u2014 which is undertrained and should never be quoted as a CIFAR-10 result. It is here to show the platform carried a real workload, not to say anything about ResNet-18.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ashml-postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "displayName": "${__field.labels.series}",
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "step",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "series"
+            ],
+            "keepFields": false,
+            "naming": {
+              "asLabels": true
+            }
+          }
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "step",
+            "mode": "outer"
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ashml-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT m.step                                                    AS step,\n       j.name || ' \u00b7 ' || left(j.id::text, 8) || ' \u00b7 ' || m.name AS series,\n       m.value                                                   AS value\n  FROM training_metrics m\n  JOIN training_jobs j ON j.id = m.job_id\n WHERE j.id::text IN (${job:sqlstring})\n   AND m.name IN ('accuracy', 'train_accuracy', 'val_accuracy')\n ORDER BY series, m.step, m.recorded_at",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "trend",
+      "title": "Learning rate, against step",
+      "description": "The series that proves a resume actually resumed. A OneCycle schedule restored correctly shows one curve across the kill; a schedule that restarted repeats its opening value at the step the checkpoint was taken. That is the check `make chaos-resume-resnet` makes, and this is where you can see it.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ashml-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "displayName": "${__field.labels.series}",
+          "decimals": 4,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "step",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "series"
+            ],
+            "keepFields": false,
+            "naming": {
+              "asLabels": true
+            }
+          }
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "step",
+            "mode": "outer"
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ashml-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT m.step                                                    AS step,\n       j.name || ' \u00b7 ' || left(j.id::text, 8) || ' \u00b7 ' || m.name AS series,\n       m.value                                                   AS value\n  FROM training_metrics m\n  JOIN training_jobs j ON j.id = m.job_id\n WHERE j.id::text IN (${job:sqlstring})\n   AND m.name IN ('lr')\n ORDER BY series, m.step, m.recorded_at",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "trend",
+      "title": "$metric, against step",
+      "description": "For whatever else a run logged \u2014 `steps_per_second` on the workloads here. The set of metric names belongs to the training script, not to this schema, so this panel follows it rather than needing a new panel each time.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ashml-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "displayName": "${__field.labels.series}",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "step",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "series"
+            ],
+            "keepFields": false,
+            "naming": {
+              "asLabels": true
+            }
+          }
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "step",
+            "mode": "outer"
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ashml-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT m.step                                                    AS step,\n       j.name || ' \u00b7 ' || left(j.id::text, 8) || ' \u00b7 ' || m.name AS series,\n       m.value                                                   AS value\n  FROM training_metrics m\n  JOIN training_jobs j ON j.id = m.job_id\n WHERE j.id::text IN (${job:sqlstring})\n   AND m.name IN ('$metric')\n ORDER BY series, m.step, m.recorded_at",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Last reported value of every metric",
+      "description": "The *last* value, not the best one. A best-value column invites reporting the high-water mark of a run that then diverged, and the number a model version carries is the one measured on the artifact that was registered.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ashml-postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ashml-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT DISTINCT ON (j.id, m.name)\n       j.name              AS run,\n       left(j.id::text, 8) AS id,\n       m.name              AS metric,\n       m.value             AS last_value,\n       m.step              AS at_step,\n       m.recorded_at       AS recorded_at\n  FROM training_metrics m\n  JOIN training_jobs j ON j.id = m.job_id\n WHERE j.id::text IN (${job:sqlstring})\n ORDER BY j.id, m.name, m.step DESC, m.recorded_at DESC",
+          "editorMode": "code"
+        }
+      ]
+    }
+  ]
+}

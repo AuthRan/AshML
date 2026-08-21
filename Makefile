@@ -17,6 +17,12 @@ SERVER_IMAGE ?= ashml/model-server:v1
 TEST_DATABASE_URL ?= postgresql://ashml:ashml@127.0.0.1:5432/ashml_test
 NAMESPACE    ?= ashml-jobs
 
+# Pins the context on every target that talks to the cluster. `current-context` is a
+# global setting belonging to whoever last ran `kubectl config use-context`, and on a
+# workstation with more than one cluster that is how an apply lands somewhere else
+# entirely -- the same reason the control plane takes ASHML_KUBECONFIG_CONTEXT.
+KCTL := kubectl --context k3d-$(CLUSTER)
+
 .PHONY: help
 help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -37,17 +43,34 @@ cluster: ## Create the local k3d cluster (idempotent)
 			--k3s-arg "--disable=traefik@server:*" \
 			--wait; \
 	fi
-	@kubectl --context k3d-$(CLUSTER) get nodes
+	@$(KCTL) get nodes
 
 .PHONY: cluster-down
 cluster-down: ## Delete the local k3d cluster
 	k3d cluster delete $(CLUSTER)
 
+.PHONY: cluster-dns
+cluster-dns: ## Restore host.k3d.internal inside the cluster (see the manifest's header)
+	# Without this name, training pods cannot reach the control plane they were told to
+	# report to, and Prometheus cannot scrape it. k3s rewrites the CoreDNS entry k3d puts
+	# it in, so it disappears on a cluster restart. Harmless to apply when it is intact.
+	$(KCTL) apply -f deploy/local/coredns-host-alias.yaml
+	$(KCTL) -n kube-system rollout restart deployment/coredns
+	$(KCTL) -n kube-system rollout status deployment/coredns --timeout=90s
+
+.PHONY: cluster-dns-check
+cluster-dns-check: ## Ask a Pod whether it can reach the control plane on host.k3d.internal
+	# Asks from inside the cluster, because that is the only place the answer matters --
+	# the name resolves perfectly well on the workstation and tells you nothing.
+	@$(KCTL) run ashml-dns-check-$$$$ --rm -i --restart=Never --image=busybox:1.36 \
+		--command -- sh -c 'wget -qO- -T 4 http://host.k3d.internal:8080/healthz \
+		|| echo "UNREACHABLE -- run: make cluster-dns (and check a control plane is running)"'
+
 .PHONY: cluster-status
 cluster-status: ## Nodes, and every AshML workload in the cluster
-	@kubectl get nodes
+	@$(KCTL) get nodes
 	@echo
-	@kubectl get jobs,pods -n $(NAMESPACE) 2>/dev/null || echo "namespace $(NAMESPACE) does not exist yet"
+	@$(KCTL) get jobs,pods -n $(NAMESPACE) 2>/dev/null || echo "namespace $(NAMESPACE) does not exist yet"
 
 # ------------------------------------------------------------------ images
 
@@ -167,3 +190,99 @@ bench: ## Measured benchmarks against a running control plane (see docs/benchmar
 .PHONY: openapi
 openapi: ## Regenerate api/openapi.yaml from the route schemas
 	npm run openapi
+
+# ------------------------------------------------------------ observability
+
+OBS_DIR       := deploy/observability
+OBS_NS        ?= ashml-observability
+PROM_IMAGE    ?= prom/prometheus:v3.14.0
+GRAFANA_IMAGE ?= grafana/grafana:13.1.4
+GRAFANA_PORT  ?= 3000
+PROM_PORT     ?= 9090
+
+# Where Grafana's PostgreSQL datasource should look, *from inside the cluster*. The
+# committed default matches deploy/local/docker-compose.yml; override it for a database
+# on another port, e.g. `make observability GRAFANA_PG_ADDR=host.k3d.internal:55432`.
+GRAFANA_PG_ADDR     ?=
+GRAFANA_PG_DATABASE ?=
+GRAFANA_PG_USER     ?=
+GRAFANA_PG_PASSWORD ?=
+
+# Hashes of what the pods mount. A ConfigMap change with no pod-template change is
+# applied and then ignored by the running process until something restarts it, which is
+# a change with no visible effect -- the worst kind to debug. These go into a pod
+# annotation, so changing a scrape config or a dashboard rolls the pod that reads it.
+OBS_CONFIG_HASH = $(shell cat $(OBS_DIR)/10-prometheus-config.yaml $(OBS_DIR)/11-prometheus-rules.yaml | sha256sum | cut -c1-16)
+# The Grafana hash covers the datasource overrides as well as the files, because an
+# address supplied on the command line is read once at process start exactly like a file
+# would be -- and a changed address that does not roll the pod is a change with no effect.
+OBS_GRAFANA_HASH = $(shell { cat $(OBS_DIR)/dashboards/*.json $(OBS_DIR)/20-grafana-provisioning.yaml $(OBS_DIR)/21-grafana-credentials.yaml; \
+                             echo '$(GRAFANA_PG_ADDR)|$(GRAFANA_PG_DATABASE)|$(GRAFANA_PG_USER)|$(GRAFANA_PG_PASSWORD)'; } | sha256sum | cut -c1-16)
+
+.PHONY: observability-images
+observability-images: ## Pull Prometheus and Grafana and load them into the cluster
+	docker pull $(PROM_IMAGE)
+	docker pull $(GRAFANA_IMAGE)
+	k3d image import $(PROM_IMAGE) $(GRAFANA_IMAGE) -c $(CLUSTER)
+
+.PHONY: observability
+observability: ## Deploy Prometheus + Grafana with the dashboards in deploy/observability
+	$(KCTL) apply -f $(OBS_DIR)/00-namespace.yaml
+	$(KCTL) apply -f $(OBS_DIR)/10-prometheus-config.yaml -f $(OBS_DIR)/11-prometheus-rules.yaml
+	$(KCTL) apply -f $(OBS_DIR)/20-grafana-provisioning.yaml
+	# Credentials before the Deployment that reads them, and overrides before either.
+	# The other order starts the pod on the committed default and needs a restart to
+	# correct it, which on a first deploy leaves two ReplicaSets behind.
+	$(KCTL) apply -f $(OBS_DIR)/21-grafana-credentials.yaml
+	@for pair in ASHML_PG_ADDR:'$(GRAFANA_PG_ADDR)' ASHML_PG_DATABASE:'$(GRAFANA_PG_DATABASE)' \
+	             ASHML_PG_USER:'$(GRAFANA_PG_USER)' ASHML_PG_PASSWORD:'$(GRAFANA_PG_PASSWORD)'; do \
+		key=$${pair%%:*}; value=$${pair#*:}; \
+		if [ -n "$$value" ]; then \
+			echo "overriding $$key in the Grafana datasource secret"; \
+			$(KCTL) patch secret grafana-datasource-credentials -n $(OBS_NS) \
+				-p "{\"stringData\":{\"$$key\":\"$$value\"}}" >/dev/null; \
+		fi; \
+	done
+	# Dashboards are .json files in git rather than YAML-embedded strings, so they stay
+	# reviewable, diffable and machine-checkable; this is what turns them into the
+	# ConfigMap Grafana mounts. `create --dry-run | apply` rather than `create`, so
+	# running this twice is not an error.
+	$(KCTL) create configmap grafana-dashboards -n $(OBS_NS) \
+		$(foreach f,$(wildcard $(OBS_DIR)/dashboards/*.json),--from-file=$(f)) \
+		--dry-run=client -o yaml | $(KCTL) apply -f -
+	sed 's/replaced-by-make/$(OBS_CONFIG_HASH)/' $(OBS_DIR)/12-prometheus.yaml | $(KCTL) apply -f -
+	sed 's/replaced-by-make/$(OBS_GRAFANA_HASH)/' $(OBS_DIR)/22-grafana.yaml   | $(KCTL) apply -f -
+	$(KCTL) rollout status deployment/prometheus -n $(OBS_NS) --timeout=300s
+	$(KCTL) rollout status deployment/grafana    -n $(OBS_NS) --timeout=300s
+	@echo
+	@echo "Grafana:    make grafana     -> http://127.0.0.1:$(GRAFANA_PORT)"
+	@echo "Prometheus: make prometheus  -> http://127.0.0.1:$(PROM_PORT)"
+
+.PHONY: observability-status
+observability-status: ## Pods, and whether Prometheus can actually reach its targets
+	@$(KCTL) get pods,svc -n $(OBS_NS)
+	@echo
+	@echo "scrape targets:"
+	@$(KCTL) exec -n $(OBS_NS) deploy/prometheus -- \
+		wget -qO- 'http://localhost:9090/api/v1/targets?state=any' \
+		| tr ',' '\n' | grep -E '"(job|health|lastError|scrapeUrl)"' || true
+
+.PHONY: observability-down
+observability-down: ## Remove Prometheus and Grafana (this deletes the metric history)
+	# The namespace takes the PersistentVolumeClaim with it, and with it every sample
+	# Prometheus has taken. Said out loud because `-down` on every other target here is
+	# cheap and this one is not.
+	$(KCTL) delete namespace $(OBS_NS) --ignore-not-found
+	$(KCTL) delete clusterrole ashml-prometheus --ignore-not-found
+	$(KCTL) delete clusterrolebinding ashml-prometheus --ignore-not-found
+
+.PHONY: grafana
+grafana: ## Port-forward Grafana to http://127.0.0.1:$(GRAFANA_PORT)
+	# A port-forward rather than a NodePort: this Grafana has anonymous viewing switched
+	# on, and a NodePort would put every graph on the network for anyone who can reach
+	# the node. Ctrl-C to stop.
+	$(KCTL) port-forward -n $(OBS_NS) svc/grafana $(GRAFANA_PORT):3000
+
+.PHONY: prometheus
+prometheus: ## Port-forward Prometheus to http://127.0.0.1:$(PROM_PORT)
+	$(KCTL) port-forward -n $(OBS_NS) svc/prometheus $(PROM_PORT):9090
