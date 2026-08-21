@@ -218,6 +218,30 @@ cluster advertises `nvidia.com/gpu: 0`. AshML handles this the honest way: such 
 **queued with an explanation**, never placed onto a GPU the cluster will not grant
 (ADR 0008). Preemption is stored but not driven (Phase 5).
 
+### Watching it work
+
+```bash
+make observability-images   # pull Prometheus and Grafana, import them into k3d
+make observability          # apply the stack, wait for both rollouts
+make grafana                # port-forward -> http://127.0.0.1:3000
+```
+
+Four dashboards, provisioned from [`deploy/observability/`](deploy/observability/) and
+kept in git as JSON: **Cluster & GPU**, **Job pipeline**, **Training curves**, and
+**Inference**.
+
+Grafana has **two datasources**, and that is the whole design rather than an
+inconvenience. Prometheus scrapes the control plane's `/metrics` — queue depth, replica
+counts, pass durations, GPU telemetry, things whose value at a moment is the whole truth
+about them. The **training curves come from PostgreSQL**, plotted against the `step`
+column the run itself reported, because a loss belongs to a step and a scraper sampling on
+a timer would record it against a clock and drop every step in between (ADR 0009,
+[ADR 0010](docs/adr/0010-two-datasources-one-story.md)).
+
+Two numbers sit next to each other on the cluster dashboard: `ashml_gpu_visible` (2) and
+`ashml_gpu_schedulable` (0). Both are true on this host, and either one alone is a lie
+about it.
+
 Measured numbers — API latency, scheduling latency, an inference batch-size sweep, and the
 ResNet run's own throughput — are in [`docs/benchmarks.md`](docs/benchmarks.md), produced
 by `make bench` rather than typed. There is no GPU figure in it, for the reason above.
@@ -320,12 +344,14 @@ packages/server/src/
   routes/     HTTP surface and JSON Schema
   gpu/        provider seam: nvidia (real), sim (flagged)
   k8s/        execution seam: kubernetes (real), sim (flagged); manifest translation
+  observability/  the Prometheus registry and the scrape-time snapshot collector
   domain/     also placement and quota — pure, and the differentiating logic
   db/         connection pool and transaction helper
 packages/cli/      `ash` command-line client
 db/migrations/     PostgreSQL schema
 api/openapi.yaml   generated from route schemas — do not hand-edit
-deploy/local/      docker-compose for Postgres + MinIO
+deploy/local/      docker-compose for Postgres + MinIO, and the CoreDNS host alias
+deploy/observability/  Prometheus, Grafana, and the dashboards as JSON
 examples/training/ job manifests
 docs/              architecture, roadmap, ADRs
 ```
@@ -407,6 +433,22 @@ ASHML_API_ADVERTISE_URL=http://$HOST_IP:8080 ASHML_S3_ENDPOINT=http://$HOST_IP:9
 ```
 
 Deployed inside the cluster, both are ordinary Service URLs and this note stops applying.
+
+### When `host.k3d.internal` stops resolving
+
+The default advertise URL uses `host.k3d.internal`, which is how anything in k3d reaches
+the workstation. k3d installs that name by writing it into CoreDNS' `NodeHosts` entry —
+which k3s **owns and rewrites** from the node list whenever the node set changes, so it
+disappears on a cluster restart and takes k3d's line with it.
+
+The failure is quiet in the worst way: the pod starts, trains, and reports nothing,
+because the SDK cannot resolve the endpoint it was given. Prometheus stops scraping at the
+same moment, so the graphs that would have shown it go blank too.
+
+```bash
+make cluster-dns-check   # asks a Pod, which is the only place the answer matters
+make cluster-dns         # restores it (deploy/local/coredns-host-alias.yaml)
+```
 
 ## Development
 

@@ -277,8 +277,10 @@ Spec milestones 8, 9, 10.
 - ~~`ash model deploy` → inference Deployment + Service, health/readiness probes~~ **done**
 - ~~`ash predict` → the §50 journey's step 7, answered by a real pod~~ **done**
 - Model router (own Fastify service) with weighted version routing
-- Prometheus + Grafana + DCGM-exporter; Loki for logs; OTel traces
-- Dashboards: cluster/GPU, job pipeline, training curves, inference latency
+- ~~Prometheus + Grafana~~ **done** — `deploy/observability/`; DCGM-exporter, Loki and
+  OTel traces are deferred, see below
+- ~~Dashboards: cluster/GPU, job pipeline, training curves, inference latency~~ **done** —
+  four dashboards, provisioned from JSON in git
 - ~~Failure recovery: retry policy, checkpoint resume~~ **done**; GPU-unhealthy handling
 - ~~Chaos scripts: kill training pod, kill inference pod, restart scheduler~~ **done**
 - ~~**Benchmarks with measured numbers** (spec §37) — never invented~~ **done** —
@@ -531,6 +533,50 @@ short. The reason is carried on `DEGRADED` and withheld on `PROGRESSING`: "has n
 ready yet" is what every cold start looks like, and recording that as an error teaches an
 operator to ignore the field on the day it matters.
 
+### Observing it, as built
+
+`/metrics` on the control plane and a Prometheus + Grafana stack in
+[`deploy/observability/`](../deploy/observability/) that reads it. `make observability`
+applies it; `make grafana` opens it.
+
+**The important decision is that Grafana has two datasources** ([ADR 0010](adr/0010-two-datasources-one-story.md)).
+Prometheus scrapes what is infrastructure. The training curves are read from
+`training_metrics` in PostgreSQL and plotted against the `step` column the run reported.
+That is ADR 0009 made visible rather than a redundancy: a loss belongs to a step, and the
+obvious unification — a Prometheus Pushgateway — destroys exactly what the push was
+protecting, because it keeps only the most recent value per label set and stamps it with
+the scraper's clock. Two steps four milliseconds apart become one sample at the wrong
+time. Making the step a label instead is one series per step, forty thousand for one
+ResNet epoch, and Prometheus' own documentation names it as the thing not to do.
+
+The stack is plain YAML and the dashboards are `.json` files in git, provisioned with
+`allowUiUpdates: false`. No operator: `kube-prometheus-stack` would bring a controller and
+about forty pods to run one Prometheus scraping four targets, and would hide the scrape
+config — the part worth reading — inside a CRD. A panel that exists only in someone's
+browser is a panel nobody else has.
+
+What the dashboards refuse to pretend, in the same spirit as the rest of this phase:
+
+- **`ashml_gpu_visible` (2) sits next to `ashml_gpu_schedulable` (0)** on the cluster
+  dashboard. Both are true on this host and either alone is a lie about it (ADR 0008).
+- **cAdvisor is scraped and DCGM-exporter is not.** cAdvisor answers something the
+  control plane cannot — what a container *used*, against the request the scheduler
+  admitted it on. DCGM would export zeroes here, because no device plugin means no GPU
+  reaches a node, and an exporter that reports nothing is decoration.
+- **Alert rules ship and Alertmanager does not**, which the rules file says in its first
+  line. A rule that looks like an alert and reaches nobody is worse than no rule, because
+  it gets trusted.
+
+Two defects were found by deploying it rather than by writing it. Four instruments —
+`ashml_prediction_*` and `ashml_job_terminations_total` — had been declared in the
+exporter and never updated, so they scraped as permanent zeros, which reads as *answered*
+rather than as missing. And `host.k3d.internal` had silently stopped resolving inside the
+cluster: k3d installs that name in CoreDNS' `NodeHosts`, k3s owns and rewrites that entry
+from the node list, and it was dropped when the cluster came back after Docker was
+reinstalled. Nothing could scrape the control plane — and, far worse, **no training pod
+could reach the endpoint it is handed as `ASHML_ENDPOINT`**: it would run, train, and
+report nothing. `make cluster-dns-check` asks a Pod; `make cluster-dns` restores it.
+
 ### Deferred within this phase, so far
 
 - **Weighted routing.** `deployment_targets` carries the weight column and a deployment
@@ -549,6 +595,14 @@ operator to ignore the field on the day it matters.
   cluster cannot produce one: no device reaches a k3d node (ADR 0008), so a job never
   fails for a reason a GPU could cause. Writing the pattern blind would be a guess about
   a string we have never seen.
+- **DCGM-exporter, Loki and OTel traces.** DCGM is covered above: it would export zeroes.
+  Loki and tracing are the two that are genuinely just not done — the control plane
+  already emits structured JSON logs with `request_id`/`job_id` correlation, so shipping
+  them is a collector and a query language rather than a design, and a trace crossing the
+  API, the executor and a Pod is a `traceparent` that has to be threaded through the
+  manifest. Both are worth doing and neither is claimed.
+- **Alertmanager.** Rules exist and page nobody. Where an alert goes and who is on call
+  are decisions this cluster cannot answer.
 
 ---
 
