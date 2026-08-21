@@ -35,6 +35,8 @@ import { registerMetricRoutes } from './routes/metrics.js';
 import { registerArtifactRoutes } from './routes/artifacts.js';
 import { registerModelRoutes } from './routes/models.js';
 import { registerDeploymentRoutes } from './routes/deployments.js';
+import { registerObservabilityRoutes } from './routes/observability.js';
+import { createMetrics } from './observability/metrics.js';
 import { createPool } from './db/pool.js';
 import { IllegalTransitionError } from './domain/job-state.js';
 
@@ -68,12 +70,17 @@ export const errorSchema = {
  *   from config
  * @param {object} [options.store] inject an artifact store; otherwise one is built
  *   from config
+ * @param {boolean} [options.collectDefaultMetrics] register prom-client's process
+ *   collectors. Off in tests, where several apps exist at once and per-process metrics
+ *   would describe the test runner rather than a server
  *
  * Note this does not start the executor loop — that belongs to index.js, alongside
  * binding a port, so that building an app for a test never starts claiming jobs off
  * a shared queue.
  */
-export async function buildApp(config, { logger = true, pool = null, k8s = null, store = null } = {}) {
+export async function buildApp(config, {
+  logger = true, pool = null, k8s = null, store = null, collectDefaultMetrics = true,
+} = {}) {
   const app = Fastify({
     logger: logger === false ? false : { level: config.logLevel },
     // Correlates every log line for a request; carried into job_id/experiment_id
@@ -124,6 +131,30 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null,
     );
   }
   app.decorate('artifactStore', artifactStore);
+
+  // One registry per app. prom-client throws on a duplicate metric name, and tests build
+  // several apps in one process, so this cannot be a module-level singleton.
+  const metrics = createMetrics({ collectDefaults: collectDefaultMetrics });
+  app.decorate('metrics', metrics);
+
+  /**
+   * Times every request by *route*, never by URL.
+   *
+   * `request.routeOptions.url` is the pattern — `/api/v1/jobs/:id` — so one job is one
+   * sample on one series. Labelling by `request.url` instead gives a new series per job
+   * id, which is the standard way a metrics endpoint grows until it is the largest thing
+   * in a Prometheus instance and the first thing to be turned off.
+   */
+  app.addHook('onResponse', async (request, reply) => {
+    const route = request.routeOptions?.url;
+    // No route means nothing matched: a 404 on an arbitrary path, which must not be
+    // allowed to mint a series for whatever was typed.
+    if (!route || route === '/metrics') return;
+    metrics.httpRequestDuration.observe(
+      { method: request.method, route, status: String(reply.statusCode) },
+      reply.elapsedTime / 1000,
+    );
+  });
 
   // An injected pool belongs to the caller; one we create is ours to close. Same rule
   // for the artifact store, whose S3 client holds sockets open.
@@ -201,6 +232,7 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null,
   });
 
   await app.register(registerHealthRoutes);
+  await app.register(registerObservabilityRoutes);
   await app.register(registerGpuRoutes);
   await app.register(registerProjectRoutes);
   await app.register(registerDatasetRoutes);

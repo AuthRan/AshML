@@ -153,9 +153,11 @@ export async function reconcileJob(pool, backend, job, { logger = null, apiUrl =
  *
  * @param {object} [options]
  * @param {number} [options.maxLaunches] how many queued jobs to admit this pass
+ * @param {object} [options.metrics] the Prometheus registry's instruments, or null. The
+ *   executor works identically without them; nothing here may depend on being observed
  * @returns {Promise<{reconciled: number, launched: number, requeued: number, retried: number, errors: number}>}
  */
-export async function runOnce(pool, backend, { logger = null, maxLaunches = 10, apiUrl = null } = {}) {
+export async function runOnce(pool, backend, { logger = null, maxLaunches = 10, apiUrl = null, metrics = null } = {}) {
   const summary = { reconciled: 0, launched: 0, requeued: 0, retried: 0, errors: 0 };
 
   const active = await jobService.listJobsToReconcile(pool);
@@ -215,12 +217,22 @@ export async function runOnce(pool, backend, { logger = null, maxLaunches = 10, 
         // Nothing fit, or the project is over quota. The job is back in the queue with
         // a recorded reason; move on to whatever is behind it.
         summary.requeued += 1;
+        metrics?.jobLaunches.inc({ outcome: 'requeued' });
         refused.push(job.id);
         continue;
       }
       summary.launched += 1;
+      metrics?.jobLaunches.inc({ outcome: 'launched' });
+      // Queued to launched, which is what an operator means by "how long before my job
+      // started". `queued_at` and not `created_at`: submission and queueing happen in
+      // one transaction today, and measuring from the wrong one would silently start
+      // being wrong the day admission gains a step between them.
+      if (job.queued_at) {
+        metrics?.schedulingLatency.observe((Date.now() - Date.parse(job.queued_at)) / 1000);
+      }
     } catch (err) {
       summary.errors += 1;
+      metrics?.jobLaunches.inc({ outcome: 'error' });
       // The job stays SCHEDULING and is retried by the next pass's reconcile. It is
       // deliberately not failed here: an unreachable API server is a platform problem,
       // and failing the user's job for it would be blaming them for our outage.
@@ -241,24 +253,35 @@ export async function runOnce(pool, backend, { logger = null, maxLaunches = 10, 
  *
  * @returns {{ stop: () => Promise<void> }}
  */
-export function startExecutor(pool, backend, { logger = null, intervalMs = 2000, maxLaunches = 10, apiUrl = null } = {}) {
+export function startExecutor(pool, backend, {
+  logger = null, intervalMs = 2000, maxLaunches = 10, apiUrl = null, metrics = null,
+} = {}) {
   let stopped = false;
   let timer = null;
   let settled = Promise.resolve();
 
   async function tick() {
     if (stopped) return;
+    // Timed around the whole pass rather than around runOnce's parts. What matters to
+    // the interval is how long the loop is busy for: a pass that takes longer than
+    // `intervalMs` does not overlap the next one, it delays it, and this histogram next
+    // to the configured interval is what shows that happening.
+    const startedAt = process.hrtime.bigint();
     try {
-      const summary = await runOnce(pool, backend, { logger, maxLaunches, apiUrl });
+      const summary = await runOnce(pool, backend, { logger, maxLaunches, apiUrl, metrics });
+      metrics?.executorPasses.inc({ outcome: summary.errors > 0 ? 'partial' : 'ok' });
       if (summary.launched > 0 || summary.reconciled > 0 || summary.errors > 0
         || summary.requeued > 0 || summary.retried > 0) {
         logger?.debug({ ...summary, backend: backend.name }, 'executor pass');
       }
     } catch (err) {
+      metrics?.executorPasses.inc({ outcome: 'failed' });
       // runOnce already isolates per-job failures; reaching here means the database
       // itself is unreachable. Keep looping — it may come back, and stopping would
       // require an operator to notice and restart the server.
       logger?.error({ err }, 'executor pass failed');
+    } finally {
+      metrics?.executorPassDuration.observe(Number(process.hrtime.bigint() - startedAt) / 1e9);
     }
     if (!stopped) {
       timer = setTimeout(() => { settled = tick(); }, intervalMs);

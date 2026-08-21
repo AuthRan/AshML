@@ -56,6 +56,7 @@ if (config.executorEnabled) {
 
   executor = startExecutor(app.db, app.k8s, {
     logger: app.log,
+    metrics: app.metrics,
     intervalMs: config.executorIntervalMs,
     // What training pods are told to report back to (see config.apiAdvertiseUrl).
     apiUrl: config.apiAdvertiseUrl,
@@ -63,6 +64,7 @@ if (config.executorEnabled) {
 
   deploymentSync = startDeploymentSync(app.db, app.k8s, {
     logger: app.log,
+    metrics: app.metrics,
     intervalMs: config.deploymentSyncIntervalMs,
   });
 }

@@ -388,13 +388,14 @@ export async function undeploy(pool, backend, projectName, name) {
  *
  * @returns {{ stop: () => Promise<void> }}
  */
-export function startDeploymentSync(pool, backend, { logger = null, intervalMs = 10_000 } = {}) {
+export function startDeploymentSync(pool, backend, { logger = null, intervalMs = 10_000, metrics = null } = {}) {
   let stopped = false;
   let timer = null;
   let settled = Promise.resolve();
 
   async function tick() {
     if (stopped) return;
+    const startedAt = process.hrtime.bigint();
     try {
       const summary = await syncDeployments(pool, backend, { logger });
       if (summary.changed > 0) {
@@ -406,6 +407,8 @@ export function startDeploymentSync(pool, backend, { logger = null, intervalMs =
       // leave every deployment's status frozen at whatever it last was — which is worse
       // than late, because it looks current.
       logger?.error({ err }, 'deployment sync pass failed');
+    } finally {
+      metrics?.deploymentSyncDuration.observe(Number(process.hrtime.bigint() - startedAt) / 1e9);
     }
     if (!stopped) {
       timer = setTimeout(() => { settled = tick(); }, intervalMs);
