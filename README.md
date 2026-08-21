@@ -218,6 +218,10 @@ cluster advertises `nvidia.com/gpu: 0`. AshML handles this the honest way: such 
 **queued with an explanation**, never placed onto a GPU the cluster will not grant
 (ADR 0008). Preemption is stored but not driven (Phase 5).
 
+Measured numbers — API latency, scheduling latency, an inference batch-size sweep, and the
+ResNet run's own throughput — are in [`docs/benchmarks.md`](docs/benchmarks.md), produced
+by `make bench` rather than typed. There is no GPU figure in it, for the reason above.
+
 See [`docs/roadmap.md`](docs/roadmap.md) for the phase plan and
 [`docs/architecture/architecture.md`](docs/architecture/architecture.md) for the design.
 

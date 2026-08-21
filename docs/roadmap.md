@@ -281,7 +281,8 @@ Spec milestones 8, 9, 10.
 - Dashboards: cluster/GPU, job pipeline, training curves, inference latency
 - ~~Failure recovery: retry policy, checkpoint resume~~ **done**; GPU-unhealthy handling
 - ~~Chaos scripts: kill training pod, kill inference pod, restart scheduler~~ **done**
-- **Benchmarks with measured numbers** (spec §37) — never invented
+- ~~**Benchmarks with measured numbers** (spec §37) — never invented~~ **done** —
+  [`docs/benchmarks.md`](benchmarks.md), produced by `scripts/bench.mjs`
 
 **Exit criteria:** the full §50 user journey runs start to finish, including a killed
 pod recovering, with real numbers in `docs/benchmarks.md`.
@@ -477,6 +478,28 @@ written by a control plane re-deriving state from the cluster, which is what wou
 the event log from a history of what happened into a log of what was noticed. The run
 finished, having lost 63 metric points to the outage and reported exactly 63, because a
 curve with a hole in it looks like a training problem until you know it was a network one.
+
+### Benchmarks, and one that was wrong first
+
+[`docs/benchmarks.md`](benchmarks.md) records API latency, scheduling latency, an
+inference batch-size sweep and the ResNet run's own throughput. Every figure names the
+command that produces it, and the document leads with the fact that the cluster runs on
+the machine being measured — so every hop in it is loopback, and the numbers are a floor
+rather than a forecast. There is no GPU figure anywhere in it, because no GPU reaches a
+node here and a projected one is precisely what Rule 5 forbids.
+
+Two results are worth pulling out. Inference at batch 64 costs 9.4 ms per image, which
+corroborates the 8.7 ms recorded for the 1 000-image serving run above by a different
+method — and 120-160 ms of every `ash predict` request is *not* the model, it is the API
+server proxy and this control plane, which is the measured form of "this is not the
+serving path".
+
+The scheduling benchmark reported a p50 of 178 ms in its first version, and that number
+was an artefact: submitting each job the moment the previous one started running
+phase-locks every submission to the same point in the poll cycle, so the benchmark
+sampled one phase and called it a distribution. Spacing submissions randomly across one
+interval gives 1083 ms — half of the 2000 ms poll, which is the number that can be
+derived from first principles. The flattering one could not be, and that is the tell.
 
 ### The outage nobody scheduled
 

@@ -157,6 +157,13 @@ chaos-resume-resnet: ## The same chaos, against ResNet-18: weights, optimizer an
 	# nothing about restoring a state dict into a freshly built architecture.
 	CHAOS_WORKLOAD=resnet CHAOS_TIMEOUT_MS=600000 node scripts/chaos-resume.mjs
 
+.PHONY: bench
+bench: ## Measured benchmarks against a running control plane (see docs/benchmarks.md)
+	# Needs a control plane already running, because what is being measured includes the
+	# event loop that is also running a scheduler. Set BENCH_PROJECT to a project with a
+	# READY deployment to include the inference sweep.
+	node scripts/bench.mjs
+
 .PHONY: openapi
 openapi: ## Regenerate api/openapi.yaml from the route schemas
 	npm run openapi
