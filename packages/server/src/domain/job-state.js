@@ -71,6 +71,22 @@ export function isTerminal(state) {
   return isValidState(state) && TRANSITIONS[state].length === 0;
 }
 
+/**
+ * The states that end an *attempt*, which is not the same set as the terminal ones.
+ *
+ * FAILED is here and is not terminal, because `FAILED -> RETRYING` is a legal edge. That
+ * is right for the transition table and wrong for anything counting outcomes: a job that
+ * failed, retried and failed again ended two attempts, and both of them failed. Counting
+ * only the sinks would leave every failure out of the one number an operator looks at
+ * first.
+ */
+export const OUTCOME_STATES = Object.freeze([JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED]);
+
+/** @returns {boolean} whether reaching `state` ends an attempt. */
+export function isOutcome(state) {
+  return OUTCOME_STATES.includes(state);
+}
+
 /** @returns {string[]} the states reachable from `state`. */
 export function nextStates(state) {
   return isValidState(state) ? [...TRANSITIONS[state]] : [];

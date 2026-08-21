@@ -316,6 +316,7 @@ export async function registerDeploymentRoutes(app) {
         projectName: request.params.name,
         deploymentName: request.params.deployment,
         instances: body.instances,
+        metrics: app.metrics,
         ...(body.timeout_ms ? { timeoutMs: body.timeout_ms } : {}),
       });
 

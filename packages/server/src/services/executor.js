@@ -15,7 +15,7 @@
 
 import { Phase } from '../k8s/backend.js';
 import { buildJobManifest, kubeJobName } from '../k8s/manifest.js';
-import { JobState } from '../domain/job-state.js';
+import { JobState, isOutcome } from '../domain/job-state.js';
 import * as jobService from './jobs.js';
 import { scheduleJob, Placement } from './scheduler.js';
 
@@ -165,6 +165,12 @@ export async function runOnce(pool, backend, { logger = null, maxLaunches = 10, 
     try {
       const changed = await reconcileJob(pool, backend, job, { logger, apiUrl });
       if (changed) summary.reconciled += 1;
+      // Counted here rather than derived from the `ashml_jobs` gauge, because a job that
+      // succeeds and is deleted between two scrapes never appears in that gauge at all —
+      // and "how many jobs failed today" must not depend on scrape timing. Only a state
+      // *change* is counted, so a job re-observed in the same state on a later pass
+      // (which `reconcileJob` reports as null) cannot inflate the total.
+      if (changed && isOutcome(changed)) metrics?.jobTerminations.inc({ state: changed });
     } catch (err) {
       summary.errors += 1;
       logger?.error({ err, job_id: job.id, state: job.state }, 'reconcile failed');

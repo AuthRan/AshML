@@ -56,18 +56,29 @@ function lastObserved(deployment) {
     + `${deployment.ready_replicas}/${deployment.replicas} replicas ready, ${when}`;
 }
 
+/** Finds the deployment, then asks it. The two halves are separable; see `resolve`. */
+async function call(pool, backend, { projectName, deploymentName, ...rest }) {
+  const deployment = await resolve(pool, backend, projectName, deploymentName);
+  return { deployment, response: await callResolved(backend, deployment, rest) };
+}
+
 /**
- * Makes one HTTP call to the Service behind a deployment.
+ * Finds the deployment and refuses the two cases where no pod can be reached at all.
  *
- * Notably it does **not** refuse early on a deployment AshML believes is not ready. That
- * check was written and then removed: readiness here is up to a sync interval old, so
- * refusing on it means a prediction denied because of a ten-second-old observation —
- * confidently wrong, and about a pod that is answering perfectly well. The cluster is
- * asked instead, and it answers a request to a Service with no ready endpoints
- * immediately rather than hanging. What AshML knows is attached to the failure instead of
- * being used to pre-empt it, which is the useful half without the wrong half.
+ * Notably it does **not** refuse on a deployment AshML believes is not ready. That check
+ * was written and then removed: readiness here is up to a sync interval old, so refusing
+ * on it means a prediction denied because of a ten-second-old observation — confidently
+ * wrong, and about a pod that is answering perfectly well. The cluster is asked instead,
+ * and it answers a request to a Service with no ready endpoints immediately rather than
+ * hanging. What AshML knows is attached to the failure instead of being used to pre-empt
+ * it, which is the useful half without the wrong half.
+ *
+ * It is a step of its own because of what may be *labelled*. A metric carrying the name
+ * from the URL would mint a series for every name anyone types, which is the same
+ * unbounded-cardinality mistake as labelling HTTP by URL instead of by route. A name
+ * that does not resolve is not a deployment, so nothing is timed until one has.
  */
-async function call(pool, backend, { projectName, deploymentName, path, method = 'GET', body = null, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+async function resolve(pool, backend, projectName, deploymentName) {
   const deployment = await getDeploymentByName(pool, projectName, deploymentName);
 
   if (!deployment.k8s_name || !deployment.namespace) {
@@ -85,9 +96,12 @@ async function call(pool, backend, { projectName, deploymentName, path, method =
     );
   }
 
-  let response;
+  return deployment;
+}
+
+async function callResolved(backend, deployment, { path, method = 'GET', body = null, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   try {
-    response = await backend.callService(deployment.namespace, deployment.k8s_name, {
+    return await backend.callService(deployment.namespace, deployment.k8s_name, {
       path, method, body, timeoutMs,
     });
   } catch (err) {
@@ -101,8 +115,6 @@ async function call(pool, backend, { projectName, deploymentName, path, method =
       502,
     );
   }
-
-  return { deployment, response };
 }
 
 /**
@@ -161,7 +173,7 @@ function relayFailure(deployment, response) {
  * model server refuses what it cannot use, and that refusal is relayed verbatim.
  */
 export async function predict(pool, backend, {
-  projectName, deploymentName, instances, timeoutMs = DEFAULT_TIMEOUT_MS,
+  projectName, deploymentName, instances, timeoutMs = DEFAULT_TIMEOUT_MS, metrics = null,
 }) {
   if (!Array.isArray(instances) || instances.length === 0) {
     throw new ValidationError(
@@ -170,34 +182,81 @@ export async function predict(pool, backend, {
     );
   }
 
+  // Resolved before the clock starts, and before any label exists. A request that names
+  // a deployment which does not exist never reached a pod, and timing it would put a
+  // rejection that cost nothing into the same histogram as a forward pass — as well as
+  // minting a series for a name someone mistyped.
+  const deployment = await resolve(pool, backend, projectName, deploymentName);
+  const labels = { project: deployment.project, deployment: deployment.name };
+
   const startedAt = Date.now();
-  const { deployment, response } = await call(pool, backend, {
-    projectName,
-    deploymentName,
-    path: '/predict',
-    method: 'POST',
-    body: { instances },
-    timeoutMs,
-  });
+  try {
+    const response = await callResolved(backend, deployment, {
+      path: '/predict',
+      method: 'POST',
+      body: { instances },
+      timeoutMs,
+    });
 
-  if (response.status < 200 || response.status >= 300) relayFailure(deployment, response);
+    if (response.status < 200 || response.status >= 300) relayFailure(deployment, response);
 
-  const answer = response.body ?? {};
-  return {
-    predictions: answer.predictions ?? [],
-    // The model server's own measurement of the forward pass, and ours of the whole
-    // round trip. Reporting only the first would credit the platform with a latency it
-    // does not deliver; only the second hides where the time went.
-    latency_ms: answer.latency_ms ?? null,
-    round_trip_ms: Date.now() - startedAt,
-    // The pod's answer about what ran, next to AshML's record of what should have. They
-    // are separate fields because they have separate authorities.
-    arch: answer.arch ?? null,
-    served_by: servedBy(deployment),
-    // A backend that fabricates says so, and it travels with the answer rather than
-    // being something the caller has to know to ask about (spec Rule 5).
-    ...(response.simulated ? { simulated: true } : {}),
-  };
+    const answer = response.body ?? {};
+    observePrediction(metrics, labels, 'ok', startedAt);
+    // Counted only on success, because this is the denominator of per-image cost and a
+    // batch that was refused predicted on nothing.
+    metrics?.predictionInstances.inc(labels, instances.length);
+    // The pod's own measurement, kept as a series of its own. Subtracting it from the
+    // round trip is what makes "this is not the serving path" a number rather than a
+    // claim: the difference is this control plane and the API server's proxy.
+    if (typeof answer.latency_ms === 'number') {
+      metrics?.predictionUpstreamDuration.observe(labels, answer.latency_ms / 1000);
+    }
+
+    return {
+      predictions: answer.predictions ?? [],
+      // The model server's own measurement of the forward pass, and ours of the whole
+      // round trip. Reporting only the first would credit the platform with a latency it
+      // does not deliver; only the second hides where the time went.
+      latency_ms: answer.latency_ms ?? null,
+      round_trip_ms: Date.now() - startedAt,
+      // The pod's answer about what ran, next to AshML's record of what should have. They
+      // are separate fields because they have separate authorities.
+      arch: answer.arch ?? null,
+      served_by: servedBy(deployment),
+      // A backend that fabricates says so, and it travels with the answer rather than
+      // being something the caller has to know to ask about (spec Rule 5).
+      ...(response.simulated ? { simulated: true } : {}),
+    };
+  } catch (err) {
+    observePrediction(metrics, labels, outcomeOf(err), startedAt);
+    throw err;
+  }
+}
+
+/**
+ * Records how long a prediction took and how it ended.
+ *
+ * Failures are timed too, and deliberately: a deployment that is refusing in 4 ms and one
+ * that is timing out at 15 s are both "failing", and a histogram that only saw successes
+ * would show neither. `outcome` is what keeps them from being averaged together.
+ */
+function observePrediction(metrics, labels, outcome, startedAt) {
+  metrics?.predictionDuration.observe({ ...labels, outcome }, (Date.now() - startedAt) / 1000);
+}
+
+/**
+ * Three outcomes, which is as many as a label may usefully have here.
+ *
+ * Not the error code: the vocabulary is small today and would grow with every new
+ * refusal, and each new value is a new series on every deployment. The division that
+ * matters on a dashboard is who has to act — the caller sent a batch the model cannot
+ * use, or the platform failed to deliver it — and `status` is already the field that
+ * decides that everywhere else in this API.
+ */
+function outcomeOf(err) {
+  const status = err?.statusCode;
+  if (typeof status !== 'number') return 'server_error';
+  return status >= 400 && status < 500 ? 'client_error' : 'server_error';
 }
 
 /**

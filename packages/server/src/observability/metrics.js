@@ -30,7 +30,7 @@
 
 import { Registry, Counter, Gauge, Histogram, collectDefaultMetrics } from 'prom-client';
 
-import { JobState } from '../domain/job-state.js';
+import { JobState, OUTCOME_STATES } from '../domain/job-state.js';
 import { ArtifactStatus } from '../domain/artifact-status.js';
 import { ModelStatus } from '../domain/model-status.js';
 import { OCCUPYING_STATES } from '../repos/nodes.js';
@@ -118,7 +118,7 @@ export function createMetrics({ collectDefaults = true } = {}) {
 
     jobTerminations: new Counter({
       name: `${PREFIX}job_terminations_total`,
-      help: 'Jobs reaching a terminal state, by that state',
+      help: 'Attempts that ended, by the state they ended in. FAILED counts even when a retry follows: the attempt did fail',
       labelNames: ['state'],
       registers: [registry],
     }),
@@ -313,6 +313,16 @@ export function createMetrics({ collectDefaults = true } = {}) {
       registers: [registry],
     }),
   };
+
+  // Counters whose label vocabulary is known up front are created at zero, for the same
+  // reason every state gets a zero gauge: a panel reading "No data" and a panel reading
+  // "0 failures" say different things, and only one of them is what an empty
+  // `rate(ashml_job_terminations_total{state="FAILED"}[5m])` actually means. Where the
+  // vocabulary is not known up front — a deployment's name — nothing is invented.
+  for (const state of OUTCOME_STATES) instruments.jobTerminations.inc({ state }, 0);
+  for (const outcome of ['launched', 'requeued', 'error']) instruments.jobLaunches.inc({ outcome }, 0);
+  for (const outcome of ['ok', 'partial', 'failed']) instruments.executorPasses.inc({ outcome }, 0);
+  for (const source of ['database', 'gpu']) instruments.scrapeErrors.inc({ source }, 0);
 
   return { registry, ...instruments, ...snapshots, _instruments: instruments, _snapshots: snapshots };
 }
