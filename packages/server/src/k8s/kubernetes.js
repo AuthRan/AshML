@@ -147,8 +147,12 @@ function parseMemory(quantity) {
  * @param {string} [options.namespace] namespace training Jobs are created in
  * @param {string} [options.kubeconfig] path to a kubeconfig; defaults to the standard
  *   resolution order, which also picks up in-cluster credentials
+ * @param {string} [options.kubeconfigContext] which context in that file to use;
+ *   defaults to whatever `current-context` says
  */
-export function createKubernetesBackend({ namespace = 'ashml-jobs', kubeconfig = null } = {}) {
+export function createKubernetesBackend({
+  namespace = 'ashml-jobs', kubeconfig = null, kubeconfigContext = null,
+} = {}) {
   // Credentials are resolved on first use, not here. Constructing a backend is
   // therefore pure, which is what lets `buildApp` decorate one unconditionally —
   // including in tests and on machines with no kubeconfig at all. A genuinely missing
@@ -166,6 +170,19 @@ export function createKubernetesBackend({ namespace = 'ashml-jobs', kubeconfig =
       // Handles both a developer's ~/.kube/config and the service-account credentials
       // mounted into a Pod, so the server runs unchanged in either place.
       kc.loadFromDefault();
+    }
+
+    if (kubeconfigContext) {
+      // Checked rather than set blindly. `setCurrentContext` accepts any string, and a
+      // typo would surface much later as a null cluster inside an unrelated call.
+      const known = kc.getContexts().map((context) => context.name);
+      if (!known.includes(kubeconfigContext)) {
+        throw new Error(
+          `ASHML_KUBECONFIG_CONTEXT="${kubeconfigContext}" is not in this kubeconfig `
+          + `(it has: ${known.join(', ') || 'no contexts'})`,
+        );
+      }
+      kc.setCurrentContext(kubeconfigContext);
     }
 
     clients = {
@@ -249,6 +266,28 @@ export function createKubernetesBackend({ namespace = 'ashml-jobs', kubeconfig =
   return {
     name: 'kubernetes',
     namespace,
+
+    /**
+     * Which cluster this backend is actually talking to.
+     *
+     * Logged at startup, and that is the entire point. `current-context` is a global
+     * setting owned by whoever last ran `kubectl config use-context`, so a control plane
+     * started without ASHML_KUBECONFIG_CONTEXT can come back from a restart pointed at a
+     * different cluster than the one it was creating Jobs in — and every symptom of that
+     * is misleading. Nodes vanish, running jobs report their Kubernetes Job as gone, and
+     * nothing anywhere says "different cluster". One line in the startup log turns that
+     * into something an operator sees before it costs them an afternoon.
+     */
+    describeTarget() {
+      const { config } = connect();
+      const context = config.getCurrentContext();
+      return {
+        context,
+        cluster: config.getCurrentCluster()?.name ?? null,
+        server: config.getCurrentCluster()?.server ?? null,
+        pinned: kubeconfigContext !== null,
+      };
+    },
 
     /** Creates the namespace if it is absent. Safe to call on every startup. */
     async ensureNamespace() {

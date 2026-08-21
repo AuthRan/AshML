@@ -89,11 +89,26 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 
 try {
   await app.listen({ port: config.port, host: config.host });
+  // Which cluster, by name and address, in the line an operator reads first. Not doing
+  // this is how a control plane spends an afternoon reporting that every node has
+  // vanished, when what happened is that someone ran `kubectl config use-context`.
+  let target = null;
+  try {
+    target = app.k8s.describeTarget?.() ?? null;
+  } catch (err) {
+    app.log.warn({ err: err.message }, 'could not determine which cluster this is');
+  }
+
   app.log.info(
     {
       gpu_provider: config.gpuProvider,
       k8s_backend: config.k8sBackend,
       k8s_namespace: config.k8sNamespace,
+      k8s_context: target?.context ?? null,
+      k8s_server: target?.server ?? null,
+      // False means the context came from the kubeconfig's current-context, which
+      // something outside this process can change between restarts.
+      k8s_context_pinned: target?.pinned ?? false,
       executor: config.executorEnabled ? `every ${config.executorIntervalMs}ms` : 'disabled',
       version: config.version,
     },

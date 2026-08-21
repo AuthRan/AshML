@@ -21,6 +21,7 @@
  *     observeDeployment(namespace, name): Promise<DeploymentObservation|null>,
  *     deleteDeployment(namespace, name): Promise<void>,
  *     callService(namespace, name, options): Promise<ServiceResponse>,
+ *     describeTarget(): { context, cluster, server, pinned },
  *     close(): Promise<void>,
  *   }
  *
@@ -58,6 +59,12 @@
  * `endpoint_url` from inside the cluster. `body` is null when the answer was not JSON,
  * which a proxy error page will not be, and `text` is kept either way because that is
  * what explains it.
+ *
+ * `describeTarget` says which cluster the backend is actually talking to, so that the
+ * server can log it at startup. It exists because `current-context` in a kubeconfig is a
+ * global setting owned by whoever last ran `kubectl config use-context`: a control plane
+ * that is restarted can come back pointed at a different cluster, and every symptom of
+ * that reads as something else.
  *
  * A `NodeInfo` is what the scheduler needs to know about a machine, already converted
  * out of Kubernetes' quantity strings into plain numbers:

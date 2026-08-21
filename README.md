@@ -343,6 +343,7 @@ from anywhere and importing nothing.
 | `ASHML_K8S_BACKEND` | `kubernetes` | `kubernetes` or `sim` |
 | `ASHML_K8S_NAMESPACE` | `ashml-jobs` | Namespace training Jobs are created in |
 | `ASHML_KUBECONFIG` | — | Kubeconfig path; unset uses `$KUBECONFIG`, `~/.kube/config`, then in-cluster credentials |
+| `ASHML_KUBECONFIG_CONTEXT` | — | Which context in that file. Unset follows `current-context` — see below |
 | `ASHML_EXECUTOR_ENABLED` | `true` | Set false for a read-only API replica that runs nothing |
 | `ASHML_EXECUTOR_INTERVAL_MS` | `2000` | Status-sync interval; sets the floor on scheduling latency (ADR 0007) |
 | `ASHML_DISCOVERY_INTERVAL_MS` | `15000` | How often node and GPU inventory is refreshed |
@@ -359,6 +360,27 @@ from anywhere and importing nothing.
 | `ASHML_PROJECT` | — | Default project for project-scoped `ash` commands |
 
 `config.js` is the only module that reads the environment.
+
+### Pin the context on a machine with more than one cluster
+
+`current-context` is a *global* setting in a kubeconfig, owned by whoever last ran
+`kubectl config use-context`. A control plane started without
+`ASHML_KUBECONFIG_CONTEXT` therefore follows it — and can come back from a restart
+talking to a different cluster than the one its jobs are running in. Every symptom of
+that reads as something else: nodes vanish, running jobs report their Kubernetes Job as
+gone, and nothing anywhere says "different cluster".
+
+So the cluster is now named in the line the server logs on startup, pinned or not:
+
+```json
+{"msg":"ashml-server ready","k8s_context":"k3d-ashml",
+ "k8s_server":"https://127.0.0.1:6550","k8s_context_pinned":true}
+```
+
+`k8s_context_pinned: false` means the context came from `current-context` and something
+outside this process can change it between restarts. A context that is not in the file
+is a startup failure listing the ones that are, rather than a null cluster surfacing
+inside an unrelated call later.
 
 ### Two addresses that are not the control plane's own
 

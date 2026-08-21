@@ -104,6 +104,7 @@ export async function buildApp(config, { logger = true, pool = null, k8s = null,
     backend = k8s ?? createBackend(config.k8sBackend, {
       namespace: config.k8sNamespace,
       kubeconfig: config.kubeconfig,
+      kubeconfigContext: config.kubeconfigContext,
     });
   } catch (err) {
     throw new Error(

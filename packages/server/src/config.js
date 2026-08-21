@@ -34,6 +34,11 @@ export function loadConfig(env = process.env) {
     // Unset means the standard resolution order: $KUBECONFIG, ~/.kube/config, then
     // the in-cluster service account.
     kubeconfig: env.ASHML_KUBECONFIG ?? null,
+    // Which context inside that file to use. Unset follows `current-context`, which is
+    // a global setting belonging to whoever last ran `kubectl config use-context` —
+    // so on a workstation with more than one cluster, leaving this unset means a
+    // control plane that comes back from a restart pointed somewhere else.
+    kubeconfigContext: env.ASHML_KUBECONFIG_CONTEXT ?? null,
 
     // The executor is what makes jobs actually run. It is disabled only for a server
     // deliberately brought up as a read-only API replica.

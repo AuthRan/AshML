@@ -63,6 +63,17 @@ export function createSimBackend({
     namespace,
     simulated: true,
 
+    /** There is no cluster. Saying so is the honest answer, and it is what gets logged. */
+    describeTarget() {
+      return {
+        context: null,
+        cluster: 'sim (no cluster: nothing here runs)',
+        server: null,
+        pinned: true,
+        simulated: true,
+      };
+    },
+
     async ensureNamespace() {},
 
     async listNodes() {
