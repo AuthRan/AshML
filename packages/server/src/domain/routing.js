@@ -243,10 +243,22 @@ function pick(eligible, point) {
 /**
  * Whether a deployment needs a router in front of it.
  *
- * One version at 100 does not: the Service selects its pods and there is nothing to
- * decide. The moment there are two, something has to choose per request, and that is the
- * whole reason the router exists.
+ * The test is how many versions are *taking traffic*, not how many targets exist. One
+ * version at 100 does not need a router: the Service selects its pods and there is
+ * nothing to decide. The moment a second version starts taking a share, something has to
+ * choose per request, and that is the whole reason the router exists.
+ *
+ * Written first as `targets.length > 1`, which is wrong in the case that happens after
+ * every finished rollout: promoting v7 leaves v6 as a target at weight 0, kept so that
+ * going back is a weight change rather than a redeploy. Counting it would keep a router
+ * — a hop and two pods — in front of a deployment with one version, permanently, for a
+ * decision with one possible answer.
+ *
+ * Taking the router back out costs something, and it is worth naming: raising v6's weight
+ * again means creating the router and waiting for it to be ready before the split takes
+ * effect. Nothing drops while that happens — the front door only moves onto a ready
+ * router — so the cost is latency to effect, not availability.
  */
 export function needsRouter(targets) {
-  return targets.length > 1;
+  return targets.filter((t) => t.weight > 0).length > 1;
 }

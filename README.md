@@ -161,6 +161,63 @@ sync loop reading `readyReplicas` back from the cluster may say `READY`. `DEGRAD
 was serving, now short of replicas — is kept distinct from `PROGRESSING`, because one
 word for both hides an outage inside something that sounds like startup.
 
+### Splitting traffic between versions
+
+A deployment can serve more than one version, and the split is a share of the traffic
+rather than a count of pods:
+
+```bash
+ash deployment rollout resnet18-cifar10 --version 2 --traffic 10   # canary
+ash deployment rollout resnet18-cifar10 --version 2 --traffic 50
+ash deployment promote resnet18-cifar10 --version 2                # v1 kept at 0%
+ash deployment rollout resnet18-cifar10 --version 1 --traffic 100  # and that is the rollback
+```
+
+Each version runs its own pods behind its own Service, and a **router** — a small Fastify
+service, `packages/router/` — chooses one per request. The tempting implementation is
+replica counts instead: three pods of v1 and one of v2 for 75/25. It needs a hundred pods
+for a 99/1 canary, and it makes resizing a version silently change the split, so weight and
+replicas are separate columns and something chooses per request.
+
+Weights must sum to exactly 100 and are never normalised. Accepting 100/10 and calling it
+91/9 is the friendly-looking option and is precisely how someone ends up with a split they
+did not choose. The refusal shows the arithmetic.
+
+The router picks at random by default, which is what makes a canary's error rate mean
+anything, and consistently when the caller supplies `X-AshML-Route-Key` — because an A/B
+test where the same user is routed to v1, then v2, then v1 is measuring a mixture.
+
+**The deployment's address never moves.** It is a Service whose *selector* moves: onto one
+version's pods while one version takes traffic, onto the router's the moment two do. It
+keeps its ClusterIP and its DNS name throughout, so nothing holding the address notices —
+and the address only ever moves onto something with a ready pod. That is what makes a
+version change a blue/green: v2 starts alongside v1, the address moves when v2 answers,
+then v1 scales to zero. It costs both versions' capacity for a few seconds and removes the
+window in which some requests are answered by one version and some by the other with
+nothing recording which. For a model, that window is predictions nobody can attribute.
+
+A router exists only while there is something to decide, and is removed when a promotion
+leaves one version taking traffic — with the previous version kept at 0%, so going back is
+a weight change and a scale-up rather than an image pull.
+
+Every answer carries `X-AshML-Served-By`, and nothing is added to the response body: a
+client parsing a field the router injected would break the moment the deployment dropped
+back to one version and the router left the path. `ash predict` reads that header back, so
+`served_by` reports the version that actually answered rather than the one AshML expected.
+
+A version that **did not answer** is failed over to another, once. A version that answered
+badly is not. Those are one line apart and the difference is the whole value of a canary: a
+500 from v2 is the single most important thing a canary produces, and serving that request
+from v1 instead would hide exactly the failure it was deployed to find.
+
+If the control plane goes away, the router keeps applying the last split it fetched. It
+does not empty its table and it does not fail readiness — either would make a control-plane
+restart an outage for every deployment behind a router. What it does instead is say how
+stale it is, in `/-/routing` and in `ashml_router_config_age_seconds`, because a wrong
+split is bad and an outage is worse, and neither is improved by being silent.
+
+[ADR 0011](docs/adr/0011-a-router-only-when-there-is-a-choice.md) has the rest.
+
 ### Surviving a killed pod
 
 A job with `max_retries` above zero, whose failure a retry could plausibly survive, comes
@@ -317,6 +374,10 @@ ash deployment metadata resnet18-cifar10  # what the pod says it actually loaded
 ash predict resnet18-cifar10 --image test-00001-ship.png
 ash predict resnet18-cifar10 --instances batch.json   # any other architecture's shape
 
+ash deployment rollout resnet18-cifar10 --version 2 --traffic 10   # canary
+ash deployment promote resnet18-cifar10 --version 2                # end the rollout
+ash deployment retire  resnet18-cifar10 --version 1                # and reclaim its objects
+
 ash node list            # cluster capacity: what is free, what is committed
 ash project quota vision --gpu 2 --jobs 4
 ash gpu list
@@ -381,6 +442,7 @@ from anywhere and importing nothing.
 | `ASHML_S3_BUCKET` | `ashml` | Bucket checkpoints and models are written to |
 | `ASHML_S3_ENDPOINT` | `http://127.0.0.1:9000` | The dev MinIO. **Unset it for real AWS**, where the SDK resolves the host itself. Must be reachable *from a training pod* — see below |
 | `ASHML_DEPLOYMENT_SYNC_INTERVAL_MS` | `10000` | How often deployment status is read back from the cluster. Slower than the executor: a deployment sits READY for days |
+| `ASHML_ROUTING_REFRESH_MS` | `5000` | Set on the **router's** pods, not the control plane's: how often it re-reads the traffic split. A rollout takes effect within one of these |
 | `ASHML_API_ADVERTISE_URL` | `http://host.k3d.internal:8080` | What training pods are told to report to, injected as `ASHML_ENDPOINT`. In a cluster, the Service URL |
 | `ASHML_S3_REGION` | `us-east-1` | |
 | `ASHML_S3_ACCESS_KEY` / `ASHML_S3_SECRET_KEY` | dev MinIO credentials | Unset both to use the SDK credential chain (an IAM role in a cluster) |

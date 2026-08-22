@@ -205,4 +205,16 @@ describe('whether a router is needed', () => {
     assert.equal(needsRouter([t(7, 100)]), false);
     assert.equal(needsRouter([t(6, 90), t(7, 10)]), true);
   });
+
+  test('a version kept at zero for a rollback does not need one', () => {
+    // The state after every finished rollout. Counting targets rather than traffic would
+    // leave a router — a hop and two pods — in front of a decision with one answer,
+    // permanently, because someone kept the previous version available to go back to.
+    assert.equal(needsRouter([t(6, 0), t(7, 100)]), false);
+    assert.equal(needsRouter([t(5, 0), t(6, 0), t(7, 100)]), false);
+  });
+
+  test('a version coming back off zero needs one again', () => {
+    assert.equal(needsRouter([t(6, 20), t(7, 80)]), true);
+  });
 });

@@ -44,6 +44,18 @@ over the public API.
          Training Job    Inference Deploy   GPU devices
               │               │               │
               └──── MinIO ────┴──── Prometheus / Loki / Tempo
+
+An inference deployment, once it serves more than one version:
+
+         deployment Service        ── the address callers hold; never moves
+                    │
+         ┌──────────▼──────────┐
+         │    ashml-router     │  ── weighted choice, per request
+         └──────────┬──────────┘   reads the split from ashml-server
+              ┌─────┴─────┐
+           v6 Service  v7 Service  ── one Deployment and Service per version
+              │            │
+           v6 pods      v7 pods
 ```
 
 ## 3. Component boundaries
@@ -55,6 +67,7 @@ over the public API.
 | `GpuProvider` | Device discovery and telemetry | Know about Kubernetes or jobs |
 | Python SDK | Reporting metrics, checkpoints, artifacts | Read the database or call Kubernetes |
 | CLI | Rendering, auth token handling | Contain business logic |
+| `ashml-router` | Choosing which model version answers a request, and saying which did | Hold a model, transform a payload, or decide what the split should be |
 
 Only `ashml-scheduler` writes placement fields. Only `ashml-server` accepts user input.
 Every state change appends to `job_events` — no silent mutations.

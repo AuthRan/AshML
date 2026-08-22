@@ -276,7 +276,8 @@ Spec milestones 8, 9, 10.
 
 - ~~`ash model deploy` → inference Deployment + Service, health/readiness probes~~ **done**
 - ~~`ash predict` → the §50 journey's step 7, answered by a real pod~~ **done**
-- Model router (own Fastify service) with weighted version routing
+- ~~Model router (own Fastify service) with weighted version routing~~ **done** —
+  `packages/router/`, and [ADR 0011](adr/0011-a-router-only-when-there-is-a-choice.md)
 - ~~Prometheus + Grafana~~ **done** — `deploy/observability/`; DCGM-exporter, Loki and
   OTel traces are deferred, see below
 - ~~Dashboards: cluster/GPU, job pipeline, training curves, inference latency~~ **done** —
@@ -387,6 +388,61 @@ first eight right — which is what a 65.59% model looks like, and what a demo s
 would be hiding. Measured: ~270 ms in the pod for one image, ~350 ms for eight, and the
 API server proxy adds 15-25 ms of that. The per-request floor dominates at this batch
 size; the 8.7 ms per image recorded earlier was over a much larger run.
+
+### Routing, as built
+
+`ash deployment rollout resnet-cifar --version 7 --traffic 10` is the spec's worked
+sequence, and it does what §21 asks: 10, then 50, then `promote`. What it changes is one
+row. The router reads the split from the control plane every few seconds, so a canary step
+does not restart the thing measuring the canary.
+
+**A version is a thing with an address.** Each gets its own Deployment and Service, because
+a share of traffic can only be given to something that can be reached. The alternative —
+one Service and replica counts — makes a 99/1 canary cost a hundred pods and makes
+resizing a version silently change the split.
+
+**The deployment's own address never moves.** It is a Service whose *selector* moves: onto
+one version's pods when one version is taking traffic, onto the router's when more than one
+is. It keeps its `clusterIP` and its DNS name throughout, so nothing holding the address
+notices. The one trap is that a merge patch merges maps, which would leave a stale
+`ashml.io/model-version` key behind and produce a selector matching nothing — a routine
+rollout becoming an outage with no error anywhere. `$patch: replace` is in the request for
+that reason alone.
+
+**The address only moves onto something that is ready**, which is what makes a version
+change a blue/green rather than a rolling update: v2's pods start alongside v1's, the
+address moves when v2 answers, then v1 scales to zero. It costs both versions' capacity for
+the length of the switch and it removes the window in which some requests are answered by
+one version and some by the other with nothing recording which. For a model, that window is
+predictions nobody can attribute.
+
+Two consequences that look like special cases and are the same sentence — *nothing that is
+answering is taken away*: the outgoing version keeps its pods while the address still points
+at it, and the reaper spares whatever the address currently selects.
+
+**A router exists only while there is something to decide.** `needsRouter` counts the
+versions taking traffic, not the targets — written the other way first, which would have
+left a router permanently in front of every promoted deployment, because promoting keeps
+the previous version at weight 0 as the rollback.
+
+**The router itself** is 300 lines of Fastify that forwards and attributes. Three things
+it does beyond forwarding:
+
+- **Every answer says which version produced it**, in `X-AshML-Served-By` and never in the
+  body. A client parsing a field the router injected would break the moment the deployment
+  dropped back to one version and the router left the path.
+- **A version that did not answer is failed over; a version that answered badly is not.**
+  One line apart, and the whole value of a canary: a 500 from v7 is the single most
+  important thing a canary produces, and serving that request from v6 instead would hide
+  exactly the failure the canary was deployed to find.
+- **It keeps serving on a stale split when the control plane is gone**, rather than
+  emptying its table or failing readiness — which would make a control-plane restart an
+  outage for every deployment behind a router. It reports the age of what it is applying
+  instead: `age_seconds` on `/-/routing`, `ashml_router_config_age_seconds` in Prometheus.
+
+A version at weight 0 keeps its objects at zero replicas, so a rollback is a weight change
+and a scale-up rather than an image pull. `ash deployment retire` removes one for good, and
+is refused while it takes traffic or while the address still resolves to it.
 
 ### Recovery, as built
 

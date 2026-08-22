@@ -599,7 +599,16 @@ export function createKubernetesBackend({
               // A proxy error page, or a service that does not speak JSON. The status
               // and the raw text are still what the caller needs to explain it.
             }
-            resolve({ status: response.statusCode, body: parsed, text });
+            // Headers are carried through because the model router puts its
+            // attribution in them: `x-ashml-served-by` is which version actually
+            // answered, which with a split in place is something only the router knows
+            // and the control plane must not guess at.
+            resolve({
+              status: response.statusCode,
+              headers: response.headers ?? {},
+              body: parsed,
+              text,
+            });
           });
         });
 
@@ -612,6 +621,57 @@ export function createKubernetesBackend({
         if (payload) request.write(payload);
         request.end();
       });
+    },
+
+    /**
+     * Moves a Service's selector to point at different pods.
+     *
+     * This is how a deployment changes what it serves without changing where it is. A
+     * Service's `clusterIP` and DNS name survive a selector change, so every caller
+     * holding the address keeps working; deleting and recreating the Service to point
+     * somewhere else would issue a new IP and break every open connection and cached
+     * lookup at once.
+     *
+     * A patch rather than a replace, for the reason `applyService` gives for not
+     * replacing: the manifest AshML holds has no `clusterIP`, and sending it back would
+     * be rejected. Patching sends only the field that is actually changing, which is also
+     * what makes this safe against a Service an operator has since annotated.
+     *
+     * `$patch: replace` is the whole point of the call. A selector is a map, and both
+     * merge-patch flavours *merge* maps: patching `{a, b}` over `{a, b, c}` leaves `c`
+     * in place. That is exactly the failure this operation must not have — moving the
+     * front door from a version's pods to the router's drops the `ashml.io/model-version`
+     * key, and a merge that kept it would leave a selector matching nothing at all,
+     * turning a routine rollout into an outage with no error anywhere. The directive
+     * replaces the map wholesale, so the selector afterwards is what was asked for.
+     */
+    async patchServiceSelector(ns, name, selector) {
+      const { core } = connect();
+      await core.patchNamespacedService(
+        { namespace: ns, name, body: { spec: { selector: { $patch: 'replace', ...selector } } } },
+        k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.StrategicMergePatch),
+      );
+    },
+
+    /**
+     * Names every Deployment in a namespace carrying the given labels.
+     *
+     * Used to find Kubernetes objects AshML created and no longer has a row for — a
+     * version removed from a split, or objects left behind by a process that died
+     * between creating them and recording them. Asking the cluster what exists is the
+     * only way to find the second kind: anything derived from the database can only
+     * report what the database already knows about.
+     *
+     * @param {object} labels e.g. `{ 'ashml.io/deployment-id': id }`
+     */
+    async listDeploymentNames(ns, labels) {
+      const { apps } = connect();
+      const labelSelector = Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(',');
+      const listed = await apps.listNamespacedDeployment({ namespace: ns, labelSelector });
+      return (listed.items ?? []).map((item) => ({
+        name: item.metadata.name,
+        labels: item.metadata.labels ?? {},
+      }));
     },
 
     /**

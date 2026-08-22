@@ -70,7 +70,17 @@ export async function deploymentsByStatus(client, statuses) {
  */
 export async function deploymentReplicas(client) {
   const { rows } = await client.query(
-    `SELECT p.name AS project, d.name, d.status, d.replicas::int AS desired,
+    `SELECT p.name AS project, d.name, d.status,
+            -- Summed over the versions taking traffic, not read off the deployment:
+            -- \`deployments.replicas\` is the count each version runs, so a deployment
+            -- splitting between two versions at one replica each wants two pods.
+            -- Reporting 1 would make a split with half of it failed look complete, and
+            -- the alert that matters here is exactly ready < desired.
+            COALESCE((
+              SELECT SUM(t.replicas)::int
+                FROM deployment_targets t
+               WHERE t.deployment_id = d.id AND t.traffic_weight > 0
+            ), 0) AS desired,
             d.ready_replicas::int AS ready
        FROM deployments d
        JOIN projects p ON p.id = d.project_id

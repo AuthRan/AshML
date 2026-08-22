@@ -137,7 +137,13 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
       payload: {},
     });
     assert.equal(deployed.statusCode, 200, deployed.payload);
-    return deployed.json();
+    const deployment = deployed.json();
+
+    // A ready pod behind the address, so that what these tests exercise is the proxy and
+    // not a Service with no endpoints. Predicting through a deployment that has not come
+    // up yet is its own test, further down.
+    backend._setReady(NAMESPACE, deployment.targets[0].k8s_name, deployment.replicas);
+    return deployment;
   }
 
   const predict = (name, payload = { instances: INSTANCES }) => app.inject({
@@ -172,7 +178,7 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
     assert.equal(body.served_by.deployment, deployment.name);
     assert.equal(body.served_by.model, deployment.model);
     assert.equal(body.served_by.version, 1);
-    assert.equal(body.served_by.artifact_id, deployment.target.artifact_id);
+    assert.equal(body.served_by.artifact_id, deployment.targets[0].artifact_id);
     assert.equal(body.arch, 'resnet18-cifar');
   });
 
@@ -317,7 +323,7 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
       status: 200,
       body: {
         arch: 'resnet18-cifar',
-        artifact_id: deployment.target.artifact_id,
+        artifact_id: deployment.targets[0].artifact_id,
         ready: true,
         source_uri: 'file:///models/model.pt',
       },
@@ -325,8 +331,8 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
     }));
 
     const body = (await metadata(deployment.name)).json();
-    assert.equal(body.artifact_id, deployment.target.artifact_id);
-    assert.equal(body.reported.artifact_id, deployment.target.artifact_id);
+    assert.equal(body.artifact_id, deployment.targets[0].artifact_id);
+    assert.equal(body.reported.artifact_id, deployment.targets[0].artifact_id);
     assert.equal(body.matches_record, true);
   });
 

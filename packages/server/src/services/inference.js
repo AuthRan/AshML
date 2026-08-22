@@ -29,14 +29,62 @@ import { getDeploymentByName } from './deployments.js';
  */
 export const DEFAULT_TIMEOUT_MS = 15_000;
 
-/** What AshML believes is loaded in there, and how long ago it last checked. */
-function servedBy(deployment) {
+/**
+ * The target the deployment's front Service currently selects.
+ *
+ * Not "the deployment's version" — a deployment can serve several — and not the one an
+ * operator most recently asked for either. It is the version the address actually
+ * resolves to right now, because that is the one that answers the request this is
+ * attached to. During a blue/green switch those are different versions for a few
+ * seconds, and reporting the desired one would attribute a prediction to a version that
+ * did not make it.
+ */
+function frontTarget(deployment) {
+  const targets = deployment.targets ?? [];
+  if (deployment.serving_version != null) {
+    const selected = targets.find((t) => t.version === deployment.serving_version);
+    if (selected) return selected;
+  }
+  // Nothing recorded yet: with one version taking traffic there is only one answer, and
+  // with more than one there is no answer worth guessing at.
+  const serving = targets.filter((t) => t.traffic_weight > 0);
+  return serving.length === 1 ? serving[0] : null;
+}
+
+/**
+ * Which version answered.
+ *
+ * With one version taking traffic, AshML's record of where its address resolves is the
+ * answer and there is nothing to disagree with. With a split there is: the router chose,
+ * per request, and it is the only thing that knows which way. It says so in
+ * `x-ashml-served-by`, and that header is preferred over anything derived from the
+ * database — a prediction attributed to the version AshML *expected* would be a canary
+ * whose results are all recorded against the incumbent, which is worse than no
+ * attribution at all because it looks like attribution.
+ *
+ * `source` says which of the two it was, because "the router told us" and "we worked it
+ * out from the deployment" are different degrees of confidence and collapsing them hides
+ * the case where the router was in the path and said nothing.
+ */
+function servedBy(deployment, response = null) {
+  const claimed = response?.headers?.['x-ashml-served-by'];
+  const routed = typeof claimed === 'string' && /^v\d+$/.test(claimed);
+  const version = routed ? Number(claimed.slice(1)) : null;
+
+  const target = routed
+    ? (deployment.targets ?? []).find((t) => t.version === version) ?? null
+    : frontTarget(deployment);
+
   return {
     deployment: deployment.name,
     model: deployment.model,
-    version: deployment.target?.version ?? null,
-    artifact_id: deployment.target?.artifact_id ?? null,
-    arch: deployment.target?.arch ?? null,
+    version: target?.version ?? version,
+    artifact_id: target?.artifact_id ?? null,
+    arch: target?.arch ?? null,
+    source: routed ? 'router' : 'deployment-record',
+    ...(routed && response.headers['x-ashml-route-reason']
+      ? { route_reason: response.headers['x-ashml-route-reason'] }
+      : {}),
   };
 }
 
@@ -52,8 +100,15 @@ function lastObserved(deployment) {
   const at = deployment.updated_at ?? deployment.created_at;
   const seconds = at ? Math.round((Date.now() - Date.parse(at)) / 1000) : null;
   const when = seconds === null ? 'at an unknown time' : `${seconds}s ago`;
+  // Desired is summed across the versions taking traffic rather than read off the
+  // deployment, which carries the per-version count: a deployment splitting between two
+  // versions at one replica each wants two pods, and reporting "1 desired" would make a
+  // half-failed split look whole.
+  const desired = (deployment.targets ?? [])
+    .filter((t) => t.traffic_weight > 0)
+    .reduce((sum, t) => sum + (t.replicas ?? 0), 0);
   return `AshML last observed it ${deployment.status} with `
-    + `${deployment.ready_replicas}/${deployment.replicas} replicas ready, ${when}`;
+    + `${deployment.ready_replicas}/${desired} replicas ready, ${when}`;
 }
 
 /** Finds the deployment, then asks it. The two halves are separable; see `resolve`. */
@@ -222,7 +277,7 @@ export async function predict(pool, backend, {
       // The pod's answer about what ran, next to AshML's record of what should have. They
       // are separate fields because they have separate authorities.
       arch: answer.arch ?? null,
-      served_by: servedBy(deployment),
+      served_by: servedBy(deployment, response),
       // A backend that fabricates says so, and it travels with the answer rather than
       // being something the caller has to know to ask about (spec Rule 5).
       ...(response.simulated ? { simulated: true } : {}),
@@ -276,7 +331,7 @@ export async function servedMetadata(pool, backend, { projectName, deploymentNam
   if (response.status < 200 || response.status >= 300) relayFailure(deployment, response);
 
   const reported = response.body ?? {};
-  const expected = servedBy(deployment);
+  const expected = servedBy(deployment, response);
   return {
     ...expected,
     reported,

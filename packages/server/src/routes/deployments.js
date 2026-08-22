@@ -32,12 +32,16 @@ const deploymentSchema = {
         + 'serving and is now short of replicas.',
     },
     image: { type: 'string' },
-    replicas: { type: 'integer', description: 'Replicas asked for' },
+    replicas: {
+      type: 'integer',
+      description: 'Replicas asked for, per version. Each target runs this many.',
+    },
     ready_replicas: {
       type: 'integer',
       description:
         'Replicas that passed their readiness probe — which for a model server means '
-        + 'the weights are loaded, not merely that the pod exists',
+        + 'the weights are loaded, not merely that the pod exists — summed over the '
+        + 'versions taking traffic',
     },
     cpu: { type: 'number' },
     memory_bytes: { type: 'integer' },
@@ -52,21 +56,69 @@ const deploymentSchema = {
       type: ['string', 'null'],
       description: 'Why it is not serving. Cleared when it is, so it cannot go stale.',
     },
-    target: {
-      type: ['object', 'null'],
-      description: 'The model version this deployment serves.',
-      properties: {
-        model_version_id: { type: 'string', format: 'uuid' },
-        version: { type: 'integer' },
-        version_status: { type: 'string' },
-        traffic_weight: { type: 'integer' },
-        artifact_id: { type: 'string', format: 'uuid' },
-        artifact_status: { type: 'string' },
-        arch: {
-          type: ['string', 'null'],
-          description: 'The architecture the training run recorded on the artifact',
+    serving_version: {
+      type: ['integer', 'null'],
+      description:
+        'The version the deployment\'s address currently resolves to. This is observed '
+        + 'state: during a switch it is still the outgoing version, which is the one '
+        + 'actually answering, and it lags what the targets ask for until the incoming '
+        + 'version has a ready pod.',
+    },
+    targets: {
+      type: 'array',
+      description:
+        'The model versions this deployment serves, and the share of traffic each is '
+        + 'meant to take. Weights sum to 100 and are never normalised; a version at 0 '
+        + 'is out of rotation and scaled to no pods, kept so that putting it back is a '
+        + 'weight change rather than a redeploy.',
+      items: {
+        type: 'object',
+        properties: {
+          model_version_id: { type: 'string', format: 'uuid' },
+          version: { type: 'integer' },
+          version_status: { type: 'string' },
+          traffic_weight: { type: 'integer' },
+          replicas: { type: 'integer' },
+          status: {
+            type: 'string',
+            enum: Object.values(deploymentService.DeploymentStatus),
+            description: 'This version\'s own pods, observed separately from the deployment\'s',
+          },
+          ready_replicas: { type: 'integer' },
+          last_error: { type: ['string', 'null'] },
+          k8s_name: { type: ['string', 'null'] },
+          endpoint_url: {
+            type: ['string', 'null'],
+            description:
+              'This version\'s own address. Not the one callers use — that is the '
+              + 'deployment\'s — but the one traffic is forwarded to.',
+          },
+          artifact_id: { type: 'string', format: 'uuid' },
+          artifact_status: { type: 'string' },
+          arch: {
+            type: ['string', 'null'],
+            description: 'The architecture the training run recorded on the artifact',
+          },
         },
       },
+    },
+    router_status: {
+      type: ['string', 'null'],
+      enum: [...Object.values(deploymentService.DeploymentStatus), null],
+      description:
+        'The router\'s own pods, when there is a router. It is in front of every request '
+        + 'once a deployment splits traffic, so its health is part of the deployment\'s '
+        + 'and is observed rather than assumed.',
+    },
+    router_ready_replicas: { type: 'integer' },
+    router_k8s_name: { type: ['string', 'null'] },
+    dropped_versions: {
+      type: 'array',
+      items: { type: 'integer' },
+      description:
+        'Versions this deploy took out of rotation. Deploying is a rollout to 100%, so '
+        + 'anything that was taking traffic stops — named here rather than dropping to '
+        + 'zero quietly. They keep their rows and their objects, at no replicas.',
     },
     created_at: { type: 'string', format: 'date-time' },
     updated_at: { type: ['string', 'null'], format: 'date-time' },
@@ -145,13 +197,211 @@ export async function registerDeploymentRoutes(app) {
         {
           deployment_id: deployment.id,
           model: deployment.model,
-          version: deployment.target?.version,
+          version: deployment.serving_version,
+          targets: deployment.targets.map((t) => `v${t.version}@${t.traffic_weight}`),
           replicas: deployment.replicas,
           endpoint: deployment.endpoint_url,
         },
         'model deployed',
       );
       return deployment;
+    },
+  );
+
+  const deploymentParam = {
+    type: 'object',
+    required: ['name', 'deployment'],
+    properties: { name: { type: 'string' }, deployment: { type: 'string' } },
+  };
+
+  app.post(
+    '/api/v1/projects/:name/deployments/:deployment/rollout',
+    {
+      schema: {
+        tags: ['deployments'],
+        summary: 'Move a share of the traffic onto one version',
+        description:
+          'Names one version and the share it should take; the rest of the split is taken '
+          + 'from the other versions in proportion to what they already have. Weights are '
+          + 'shares of traffic, not replica counts, and they always sum to exactly 100 — '
+          + 'they are never normalised, because a share adjusted for you is a split you '
+          + 'did not choose.\n\n'
+          + 'A version not already served is added, and is validated exactly as deploying '
+          + 'it would be: a canary that fails because its artifact was never confirmed '
+          + 'looks like the model is bad, which is the worst possible outcome for a '
+          + 'mechanism whose only purpose is to find out whether the model is bad.',
+        params: deploymentParam,
+        body: {
+          type: 'object',
+          required: ['version', 'traffic'],
+          properties: {
+            version: { type: 'integer', minimum: 1 },
+            traffic: { type: 'integer', minimum: 0, maximum: 100 },
+          },
+        },
+        response: {
+          200: { $ref: 'Deployment#' },
+          400: { $ref: 'Error#' },
+          404: { $ref: 'Error#' },
+          409: { $ref: 'Error#' },
+        },
+      },
+    },
+    async (request) => deploymentService.rollout(app.db, app.k8s, {
+      projectName: request.params.name,
+      deploymentName: request.params.deployment,
+      version: request.body.version,
+      traffic: request.body.traffic,
+      apiUrl: app.apiAdvertiseUrl,
+      namespace: app.k8s.namespace,
+    }),
+  );
+
+  app.post(
+    '/api/v1/projects/:name/deployments/:deployment/promote',
+    {
+      schema: {
+        tags: ['deployments'],
+        summary: 'End a rollout: one version takes all the traffic',
+        description:
+          'The other versions go to weight 0 rather than being removed, so the version '
+          + 'that was serving a minute ago is still there to go back to. Removing one is '
+          + '`retire`, and it is deliberately a separate decision.',
+        params: deploymentParam,
+        body: {
+          type: 'object',
+          required: ['version'],
+          properties: { version: { type: 'integer', minimum: 1 } },
+        },
+        response: {
+          200: { $ref: 'Deployment#' },
+          404: { $ref: 'Error#' },
+          409: { $ref: 'Error#' },
+        },
+      },
+    },
+    async (request) => deploymentService.promote(app.db, app.k8s, {
+      projectName: request.params.name,
+      deploymentName: request.params.deployment,
+      version: request.body.version,
+      apiUrl: app.apiAdvertiseUrl,
+      namespace: app.k8s.namespace,
+    }),
+  );
+
+  app.delete(
+    '/api/v1/projects/:name/deployments/:deployment/targets/:version',
+    {
+      schema: {
+        tags: ['deployments'],
+        summary: 'Stop serving a version entirely, and remove its pods',
+        description:
+          'Refused while the version is taking traffic, and refused while the '
+          + "deployment's address still resolves to it. Both refusals exist because the "
+          + 'alternative is an outage caused by tidying up.',
+        params: {
+          type: 'object',
+          required: ['name', 'deployment', 'version'],
+          properties: {
+            name: { type: 'string' },
+            deployment: { type: 'string' },
+            version: { type: 'integer' },
+          },
+        },
+        response: {
+          200: { $ref: 'Deployment#' },
+          404: { $ref: 'Error#' },
+          409: { $ref: 'Error#' },
+        },
+      },
+    },
+    async (request) => deploymentService.retire(app.db, app.k8s, {
+      projectName: request.params.name,
+      deploymentName: request.params.deployment,
+      version: Number(request.params.version),
+      namespace: app.k8s.namespace,
+    }),
+  );
+
+  app.get(
+    '/api/v1/deployments/:id/routing',
+    {
+      schema: {
+        tags: ['deployments'],
+        summary: 'The traffic split a router should apply',
+        description:
+          'Read by the model router, once every few seconds, and by nothing else. It is '
+          + 'addressed by **id** rather than by project and name because that is what the '
+          + "router pod is given: a name is a thing an operator can change, and a router "
+          + 'asking about a name that has moved would quietly stop working at the exact '
+          + 'moment nobody was watching it.\n\n'
+          + 'The document is deliberately small. Everything a router needs to choose a '
+          + 'target and nothing it does not — no artifact metadata, no status history, no '
+          + 'resource limits. It is fetched on a timer by every router pod, and a payload '
+          + 'that grew with the deployment would make that a cost that grew too.',
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: { id: { type: 'string', format: 'uuid' } },
+        },
+        response: {
+          200: {
+            type: 'object',
+            required: ['deployment_id', 'targets'],
+            properties: {
+              deployment_id: { type: 'string', format: 'uuid' },
+              deployment: { type: 'string' },
+              model: { type: 'string' },
+              updated_at: { type: ['string', 'null'], format: 'date-time' },
+              targets: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    version: { type: 'integer' },
+                    weight: {
+                      type: 'integer',
+                      description: 'Share of traffic, 0-100. The weights sum to exactly 100.',
+                    },
+                    url: {
+                      type: ['string', 'null'],
+                      description: "This version's own in-cluster Service",
+                    },
+                    ready: {
+                      type: 'boolean',
+                      description:
+                        'What AshML last observed, which is up to a sync interval old. A '
+                        + 'hint the router uses to keep traffic off a version whose pods '
+                        + 'are not up — never a reason to keep it off one that has come '
+                        + 'back, since the router finds that out first.',
+                    },
+                    artifact_id: { type: ['string', 'null'], format: 'uuid' },
+                    model_version_id: { type: 'string', format: 'uuid' },
+                  },
+                },
+              },
+            },
+          },
+          404: { $ref: 'Error#' },
+        },
+      },
+    },
+    async (request) => {
+      const deployment = await deploymentService.getDeployment(app.db, request.params.id);
+      return {
+        deployment_id: deployment.id,
+        deployment: deployment.name,
+        model: deployment.model,
+        updated_at: deployment.updated_at,
+        targets: deployment.targets.map((target) => ({
+          version: target.version,
+          weight: target.traffic_weight,
+          url: target.endpoint_url,
+          ready: target.status === deploymentService.DeploymentStatus.READY,
+          artifact_id: target.artifact_id,
+          model_version_id: target.model_version_id,
+        })),
+      };
     },
   );
 
@@ -286,7 +536,12 @@ export async function registerDeploymentRoutes(app) {
               },
               served_by: {
                 type: 'object',
-                description: 'What AshML records this deployment as serving',
+                description:
+                  'Which version produced this answer. With a split in place that is '
+                  + "the router's word, taken from the response it returned; with one "
+                  + "version taking traffic it is AshML's record of where the address "
+                  + 'resolves. `source` says which, because the two are different degrees '
+                  + 'of confidence.',
                 additionalProperties: true,
                 properties: {
                   deployment: { type: 'string' },
@@ -294,6 +549,13 @@ export async function registerDeploymentRoutes(app) {
                   version: { type: ['integer', 'null'] },
                   artifact_id: { type: ['string', 'null'] },
                   arch: { type: ['string', 'null'] },
+                  source: { type: 'string', enum: ['router', 'deployment-record'] },
+                  route_reason: {
+                    type: 'string',
+                    description:
+                      'Why the router chose this version: weighted, sticky, only-ready, '
+                      + 'sole-target, or failover',
+                  },
                 },
               },
               simulated: {

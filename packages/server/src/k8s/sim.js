@@ -42,6 +42,18 @@ export function createSimBackend({
   /** `${namespace}/${name}` -> record. Deployments outlive jobs, so they are separate. */
   const deployments = new Map();
 
+  /**
+   * `${namespace}/${name}` -> `{ selector }`.
+   *
+   * Services are modelled as their own objects rather than as a flag on a Deployment,
+   * because with weighted routing they stop being one-to-one: a deployment's front
+   * Service selects a version's pods and then the router's, and the versions have
+   * Services of their own. A flag cannot express "this address currently resolves to
+   * those pods", which is the only interesting thing a Service does — and it is exactly
+   * what a rollout moves.
+   */
+  const services = new Map();
+
   const simNodes = nodes ?? [{
     name: 'sim-node-0',
     ready: true,
@@ -57,6 +69,23 @@ export function createSimBackend({
   let responder = null;
 
   const key = (ns, name) => `${ns}/${name}`;
+
+  /**
+   * The Deployments whose pods a selector would match, and which have a ready pod.
+   *
+   * This is kube-proxy's half of the job, and modelling it is what makes a moved front
+   * door observable: after `patchServiceSelector` the same Service name resolves to
+   * different pods, exactly as it would in a cluster.
+   */
+  function endpointsFor(ns, selector) {
+    const wanted = Object.entries(selector ?? {});
+    if (wanted.length === 0) return [];
+    return [...deployments.values()].filter((record) => (
+      record.namespace === ns
+      && record.ready > 0
+      && wanted.every(([k, v]) => record.podLabels[k] === v)
+    ));
+  }
 
   return {
     name: 'sim',
@@ -130,12 +159,12 @@ export function createSimBackend({
     async applyDeployment(manifest) {
       const ns = manifest.metadata.namespace ?? namespace;
       const id = key(ns, manifest.metadata.name);
-      const existing = deployments.get(id);
 
       // Replaces rather than ignores when it already exists, matching the real backend:
       // a Deployment is a mutable object, and a rollout is an update to it.
       deployments.set(id, {
         manifest,
+        namespace: ns,
         desired: manifest.spec?.replicas ?? 1,
         // A rollout starts with nothing ready, even when replacing something that was.
         // Reporting the old ready count against the new manifest would make a
@@ -143,14 +172,45 @@ export function createSimBackend({
         // worth simulating.
         ready: 0,
         observations: 0,
-        services: existing?.services ?? false,
+        // The labels its pods would carry. This is what a Service's selector matches
+        // against, so it is read from the pod template rather than from the Deployment's
+        // own metadata — the two are usually the same and the distinction is the whole
+        // reason a selector can be wrong.
+        podLabels: manifest.spec?.template?.metadata?.labels ?? {},
       });
     },
 
     async applyService(manifest) {
       const ns = manifest.metadata.namespace ?? namespace;
-      const record = deployments.get(key(ns, manifest.metadata.name));
-      if (record) record.services = true;
+      const id = key(ns, manifest.metadata.name);
+      // Created if absent, left alone if present — matching the real backend, where a
+      // Service's assigned clusterIP makes a replace impossible. Moving one is
+      // `patchServiceSelector`, which is a different operation on purpose.
+      if (!services.has(id)) {
+        services.set(id, { selector: { ...(manifest.spec?.selector ?? {}) } });
+      }
+    },
+
+    async patchServiceSelector(ns, name, selector) {
+      const record = services.get(key(ns, name));
+      if (!record) throw new Error(`sim: no such service ${key(ns, name)}`);
+      // Replaced wholesale, not merged, for the reason the real backend spells out: a
+      // merged selector keeps a key the new one dropped and ends up matching nothing.
+      record.selector = { ...selector };
+    },
+
+    async listDeploymentNames(ns, labels) {
+      const wanted = Object.entries(labels);
+      return [...deployments.values()]
+        .filter((record) => record.namespace === ns)
+        .filter((record) => {
+          const own = record.manifest.metadata.labels ?? {};
+          return wanted.every(([k, v]) => own[k] === v);
+        })
+        .map((record) => ({
+          name: record.manifest.metadata.name,
+          labels: record.manifest.metadata.labels ?? {},
+        }));
     },
 
     async observeDeployment(ns, name) {
@@ -179,6 +239,7 @@ export function createSimBackend({
 
     async deleteDeployment(ns, name) {
       deployments.delete(key(ns, name));
+      services.delete(key(ns, name));
     },
 
     /**
@@ -195,21 +256,38 @@ export function createSimBackend({
      * than in a backend a demo might be pointed at by accident.
      */
     async callService(ns, name, options = {}) {
-      const record = deployments.get(key(ns, name));
-      if (!record) {
+      const service = services.get(key(ns, name));
+      if (!service) {
         return {
           status: 404,
           body: { error: `sim: no such service ${key(ns, name)}` },
+          headers: {},
           text: `sim: no such service ${key(ns, name)}`,
           simulated: true,
         };
       }
-      if (responder) return { ...(await responder(ns, name, options)), simulated: true };
+      // A responder is a fixture a test installed deliberately, and it stands in for the
+      // pod itself — so it answers whether or not this fake cluster has endpoints, in the
+      // same way a real pod answers whether or not anyone modelled kube-proxy.
+      if (responder) return { headers: {}, ...(await responder(ns, name, options)), simulated: true };
+
+      // A Service with no ready endpoints is not a 404 — the name resolves, nothing
+      // answers — and the two are worth telling apart here for the same reason they are
+      // in the real backend: one is a deployment that does not exist and the other is a
+      // deployment that is not ready, and an operator does different things about them.
+      if (endpointsFor(ns, service.selector).length === 0) {
+        const message = `sim: ${key(ns, name)} resolves to no ready pods`;
+        return {
+          status: 503, headers: {}, body: { error: message }, text: message, simulated: true,
+        };
+      }
 
       const message = 'sim: no container is running, so there is nothing to answer this. '
         + 'The sim backend fabricates cluster state (ASHML_K8S_BACKEND=sim); it will not '
         + 'fabricate model output. Set ASHML_K8S_BACKEND=kubernetes to ask a real pod.';
-      return { status: 501, body: { error: message }, text: message, simulated: true };
+      return {
+        status: 501, headers: {}, body: { error: message }, text: message, simulated: true,
+      };
     },
 
     /**
@@ -238,6 +316,7 @@ export function createSimBackend({
     async close() {
       jobs.clear();
       deployments.clear();
+      services.clear();
     },
 
     /** Test seam: drive a job to a phase directly, bypassing autoAdvance. */

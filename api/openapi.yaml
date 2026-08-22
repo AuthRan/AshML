@@ -523,11 +523,12 @@ components:
           type: string
         replicas:
           type: integer
-          description: Replicas asked for
+          description: Replicas asked for, per version. Each target runs this many.
         ready_replicas:
           type: integer
           description: Replicas that passed their readiness probe — which for a model
             server means the weights are loaded, not merely that the pod exists
+            — summed over the versions taking traffic
         cpu:
           type: number
         memory_bytes:
@@ -552,31 +553,99 @@ components:
             - "null"
             - string
           description: Why it is not serving. Cleared when it is, so it cannot go stale.
-        target:
+        serving_version:
           type:
             - "null"
-            - object
-          description: The model version this deployment serves.
-          properties:
-            model_version_id:
-              type: string
-              format: uuid
-            version:
-              type: integer
-            version_status:
-              type: string
-            traffic_weight:
-              type: integer
-            artifact_id:
-              type: string
-              format: uuid
-            artifact_status:
-              type: string
-            arch:
-              type:
-                - "null"
-                - string
-              description: The architecture the training run recorded on the artifact
+            - integer
+          description: "The version the deployment's address currently resolves to. This
+            is observed state: during a switch it is still the outgoing version,
+            which is the one actually answering, and it lags what the targets
+            ask for until the incoming version has a ready pod."
+        targets:
+          type: array
+          description: The model versions this deployment serves, and the share of traffic
+            each is meant to take. Weights sum to 100 and are never normalised;
+            a version at 0 is out of rotation and scaled to no pods, kept so
+            that putting it back is a weight change rather than a redeploy.
+          items:
+            type: object
+            properties:
+              model_version_id:
+                type: string
+                format: uuid
+              version:
+                type: integer
+              version_status:
+                type: string
+              traffic_weight:
+                type: integer
+              replicas:
+                type: integer
+              status:
+                type: string
+                enum:
+                  - PENDING
+                  - PROGRESSING
+                  - READY
+                  - DEGRADED
+                  - FAILED
+                  - STOPPED
+                description: This version's own pods, observed separately from the deployment's
+              ready_replicas:
+                type: integer
+              last_error:
+                type:
+                  - "null"
+                  - string
+              k8s_name:
+                type:
+                  - "null"
+                  - string
+              endpoint_url:
+                type:
+                  - "null"
+                  - string
+                description: This version's own address. Not the one callers use — that is the
+                  deployment's — but the one traffic is forwarded to.
+              artifact_id:
+                type: string
+                format: uuid
+              artifact_status:
+                type: string
+              arch:
+                type:
+                  - "null"
+                  - string
+                description: The architecture the training run recorded on the artifact
+        router_status:
+          type:
+            - "null"
+            - string
+          enum:
+            - PENDING
+            - PROGRESSING
+            - READY
+            - DEGRADED
+            - FAILED
+            - STOPPED
+            - null
+          description: The router's own pods, when there is a router. It is in front of
+            every request once a deployment splits traffic, so its health is
+            part of the deployment's and is observed rather than assumed.
+        router_ready_replicas:
+          type: integer
+        router_k8s_name:
+          type:
+            - "null"
+            - string
+        dropped_versions:
+          type: array
+          items:
+            type: integer
+          description: Versions this deploy took out of rotation. Deploying is a rollout
+            to 100%, so anything that was taking traffic stops — named here
+            rather than dropping to zero quietly. They keep their rows and their
+            objects, at no replicas.
         created_at:
           type: string
           format: date-time
@@ -2010,6 +2079,254 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/deployments/{deployment}/rollout:
+    post:
+      summary: Move a share of the traffic onto one version
+      tags:
+        - deployments
+      description: >-
+        Names one version and the share it should take; the rest of the split is
+        taken from the other versions in proportion to what they already have.
+        Weights are shares of traffic, not replica counts, and they always sum
+        to exactly 100 — they are never normalised, because a share adjusted for
+        you is a split you did not choose.
+
+
+        A version not already served is added, and is validated exactly as
+        deploying it would be: a canary that fails because its artifact was
+        never confirmed looks like the model is bad, which is the worst possible
+        outcome for a mechanism whose only purpose is to find out whether the
+        model is bad.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - version
+                - traffic
+              properties:
+                version:
+                  type: integer
+                  minimum: 1
+                traffic:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: deployment
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-9"
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/deployments/{deployment}/promote:
+    post:
+      summary: "End a rollout: one version takes all the traffic"
+      tags:
+        - deployments
+      description: The other versions go to weight 0 rather than being removed, so the
+        version that was serving a minute ago is still there to go back to.
+        Removing one is `retire`, and it is deliberately a separate decision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - version
+              properties:
+                version:
+                  type: integer
+                  minimum: 1
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: deployment
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-9"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/deployments/{deployment}/targets/{version}:
+    delete:
+      summary: Stop serving a version entirely, and remove its pods
+      tags:
+        - deployments
+      description: Refused while the version is taking traffic, and refused while the
+        deployment's address still resolves to it. Both refusals exist because
+        the alternative is an outage caused by tidying up.
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: deployment
+          required: true
+        - schema:
+            type: integer
+          in: path
+          name: version
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-9"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/deployments/{id}/routing:
+    get:
+      summary: The traffic split a router should apply
+      tags:
+        - deployments
+      description: >-
+        Read by the model router, once every few seconds, and by nothing else.
+        It is addressed by **id** rather than by project and name because that
+        is what the router pod is given: a name is a thing an operator can
+        change, and a router asking about a name that has moved would quietly
+        stop working at the exact moment nobody was watching it.
+
+
+        The document is deliberately small. Everything a router needs to choose
+        a target and nothing it does not — no artifact metadata, no status
+        history, no resource limits. It is fetched on a timer by every router
+        pod, and a payload that grew with the deployment would make that a cost
+        that grew too.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - deployment_id
+                  - targets
+                properties:
+                  deployment_id:
+                    type: string
+                    format: uuid
+                  deployment:
+                    type: string
+                  model:
+                    type: string
+                  updated_at:
+                    type:
+                      - "null"
+                      - string
+                    format: date-time
+                  targets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        version:
+                          type: integer
+                        weight:
+                          type: integer
+                          description: Share of traffic, 0-100. The weights sum to exactly 100.
+                        url:
+                          type:
+                            - "null"
+                            - string
+                          description: This version's own in-cluster Service
+                        ready:
+                          type: boolean
+                          description: What AshML last observed, which is up to a sync interval old. A
+                            hint the router uses to keep traffic off a version
+                            whose pods are not up — never a reason to keep it
+                            off one that has come back, since the router finds
+                            that out first.
+                        artifact_id:
+                          type:
+                            - "null"
+                            - string
+                          format: uuid
+                        model_version_id:
+                          type: string
+                          format: uuid
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
   /api/v1/projects/{name}/deployments:
     get:
       summary: List a project's deployments
@@ -2208,7 +2525,11 @@ paths:
                     description: The architecture the answering pod says it is running
                   served_by:
                     type: object
-                    description: What AshML records this deployment as serving
+                    description: Which version produced this answer. With a split in place that is
+                      the router's word, taken from the response it returned;
+                      with one version taking traffic it is AshML's record of
+                      where the address resolves. `source` says which, because
+                      the two are different degrees of confidence.
                     additionalProperties: true
                     properties:
                       deployment:
@@ -2227,6 +2548,15 @@ paths:
                         type:
                           - "null"
                           - string
+                      source:
+                        type: string
+                        enum:
+                          - router
+                          - deployment-record
+                      route_reason:
+                        type: string
+                        description: "Why the router chose this version: weighted, sticky, only-ready,
+                          sole-target, or failover"
                   simulated:
                     type: boolean
                     description: Present and true only when no real pod answered (spec Rule 5)

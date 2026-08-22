@@ -221,12 +221,16 @@ export function buildJobManifest(job, { namespace = 'ashml-jobs', nodeName = nul
 export const SERVING_PORT = 8081;
 
 /**
- * Builds the Kubernetes name shared by a deployment's Deployment and Service.
+ * Builds the Kubernetes name a deployment's front Service answers on.
  *
- * Same construction as `kubeJobName` and for the same reasons, minus the attempt
- * suffix: a deployment is long-lived and updated in place, so there is no attempt to
- * disambiguate. Deployment and Service share the name because they are one thing to an
- * operator, and `kubectl get all -l ashml.io/deployment-id=<id>` is how you find both.
+ * This is the deployment's address, and it is the one thing here that must never change
+ * for the life of the deployment: a deployment's name is what callers hold, so renaming
+ * it would silently point them at nothing. The construction matches `kubeJobName` minus
+ * the attempt suffix — a deployment is long-lived and updated in place.
+ *
+ * What is *behind* this name changes constantly: one version's pods, then another's,
+ * then a router. That is the point of the indirection, and `serving_version` on the row
+ * is what records which of those it currently is.
  */
 export function kubeDeploymentName(deployment) {
   const id8 = String(deployment.id).replaceAll('-', '').slice(0, 8);
@@ -239,6 +243,44 @@ export function kubeDeploymentName(deployment) {
 }
 
 /**
+ * Builds the name of one version's Deployment and Service.
+ *
+ * A version gets its own objects because a traffic weight is a share of requests, and
+ * requests can only be divided between things that have addresses. Putting two versions
+ * in one Kubernetes Deployment is not possible at all — a Deployment has one pod
+ * template — and putting them behind one Service with different replica counts is the
+ * mistake `domain/routing.js` refuses: it makes the split a function of capacity.
+ *
+ * The version number is in the name rather than a hash of it, because the first thing an
+ * operator does when a rollout misbehaves is `kubectl get pods` and read.
+ */
+export function kubeTargetName(deployment, version) {
+  const id8 = String(deployment.id).replaceAll('-', '').slice(0, 8);
+  const suffix = `-${id8}-v${version}`;
+  const prefix = `${MANAGED_BY}-svc-`;
+  const budget = MAX_NAME - prefix.length - suffix.length;
+
+  const stem = String(deployment.name).slice(0, Math.max(1, budget)).replace(/-+$/, '');
+  return `${prefix}${stem}${suffix}`;
+}
+
+/**
+ * The labels that identify one version's pods.
+ *
+ * `ashml.io/model-version` is what makes the per-version Service select this version and
+ * not its sibling, so it is in the Deployment's `spec.selector` — which Kubernetes makes
+ * immutable, and which is safe here precisely because a target's version never changes.
+ * A target *is* a version; rolling out a different one creates a different target.
+ */
+function targetSelector(deployment, target) {
+  return {
+    'app.kubernetes.io/managed-by': MANAGED_BY,
+    'ashml.io/deployment-id': deployment.id,
+    'ashml.io/model-version': String(target.version),
+  };
+}
+
+/**
  * The environment that tells a model server which model it is.
  *
  * The server is handed an artifact *id*, not a URL. It exchanges that for a
@@ -247,13 +289,13 @@ export function kubeDeploymentName(deployment) {
  * expire and the pod would crash-loop on a dead signature long after anyone had stopped
  * associating the two.
  */
-function servingEnv(deployment, { apiUrl = null } = {}) {
+function servingEnv(deployment, target, { apiUrl = null } = {}) {
   const env = [
-    { name: 'ASHML_MODEL_ARCH', value: String(deployment.target.arch) },
-    { name: 'ASHML_ARTIFACT_ID', value: String(deployment.target.artifact_id) },
+    { name: 'ASHML_MODEL_ARCH', value: String(target.arch) },
+    { name: 'ASHML_ARTIFACT_ID', value: String(target.artifact_id) },
     { name: 'ASHML_PORT', value: String(SERVING_PORT) },
     { name: 'ASHML_DEPLOYMENT_ID', value: String(deployment.id) },
-    { name: 'ASHML_MODEL_VERSION', value: String(deployment.target.version) },
+    { name: 'ASHML_MODEL_VERSION', value: String(target.version) },
   ];
   // Omitted rather than guessed when unconfigured, exactly as for training jobs: the
   // server then says it was never told where to fetch from, instead of failing with a
@@ -304,44 +346,41 @@ function servingProbes() {
 }
 
 /**
- * Builds the Kubernetes Deployment for a model deployment.
+ * Builds the Kubernetes Deployment that runs one version of a deployment's model.
  *
- * @param {object} deployment a deployment row joined with its single target
- * @param {object} [options]
+ * @param {object} deployment a deployment row
+ * @param {object} target one of its targets, resolved through to the artifact
  * @returns {object} a Kubernetes apps/v1 Deployment
  */
-export function buildDeploymentManifest(deployment, { namespace = 'ashml-jobs', apiUrl = null } = {}) {
+export function buildTargetManifest(deployment, target, { namespace = 'ashml-jobs', apiUrl = null } = {}) {
   if (!deployment.image) {
     throw new Error(`deployment ${deployment.id}: image is required`);
   }
-  if (!deployment.target?.artifact_id) {
-    throw new Error(`deployment ${deployment.id}: target.artifact_id is required`);
+  if (!target?.artifact_id) {
+    throw new Error(`deployment ${deployment.id}: target v${target?.version} has no artifact_id`);
   }
 
-  const name = kubeDeploymentName(deployment);
+  const name = kubeTargetName(deployment, target.version);
+  const selector = targetSelector(deployment, target);
 
   // `ashml.io/deployment-id` is the link back to the database row, read by the status
   // loop rather than parsing the name — same contract as `ashml.io/job-id`.
   const labels = {
-    'app.kubernetes.io/managed-by': MANAGED_BY,
+    ...selector,
     'app.kubernetes.io/component': 'model-server',
-    'ashml.io/deployment-id': deployment.id,
     'ashml.io/project': deployment.project,
-  };
-
-  // The selector must be stable for the life of the Deployment: `spec.selector` is
-  // immutable in Kubernetes, so anything that can change on an update — the version,
-  // the artifact — must not appear in it.
-  const selector = {
-    'app.kubernetes.io/managed-by': MANAGED_BY,
-    'ashml.io/deployment-id': deployment.id,
   };
 
   const annotations = {
     'ashml.io/deployment-name': deployment.name,
     'ashml.io/model': String(deployment.model ?? ''),
-    'ashml.io/model-version': String(deployment.target.version),
-    'ashml.io/artifact-id': String(deployment.target.artifact_id),
+    'ashml.io/model-version': String(target.version),
+    'ashml.io/artifact-id': String(target.artifact_id),
+    // What share of the deployment's traffic this version is meant to take. An
+    // annotation, not a label: it changes on every rollout step, and a label that
+    // changed that often would churn every selector an operator had written by hand.
+    // It is here so that `kubectl describe` explains a pod's existence.
+    'ashml.io/traffic-weight': String(target.traffic_weight),
   };
 
   const container = {
@@ -349,7 +388,7 @@ export function buildDeploymentManifest(deployment, { namespace = 'ashml-jobs', 
     image: deployment.image,
     imagePullPolicy: deployment.image_pull_policy ?? 'IfNotPresent',
     ports: [{ name: 'http', containerPort: SERVING_PORT }],
-    env: servingEnv(deployment, { apiUrl }),
+    env: servingEnv(deployment, target, { apiUrl }),
     resources: resourceRequirements({
       cpu: deployment.cpu,
       memory_bytes: deployment.memory_bytes,
@@ -363,10 +402,22 @@ export function buildDeploymentManifest(deployment, { namespace = 'ashml-jobs', 
     kind: 'Deployment',
     metadata: { name, namespace, labels, annotations },
     spec: {
-      replicas: deployment.replicas,
+      // A version at weight 0 is one an operator has taken out of rotation, and running
+      // pods for it is capacity spent on nothing. Scaled to zero rather than deleted, so
+      // that putting it back is a weight change rather than a redeploy — which is what
+      // makes a rollback fast at the moment it is most needed.
+      //
+      // With one exception, and it is the same exception the reaper makes: the version
+      // the deployment's address currently resolves to keeps its pods whatever its
+      // weight says. During a switch the outgoing version has already been taken out of
+      // rotation and is still the only thing answering, and scaling it to zero there
+      // would drop every request in flight — an outage caused by tidying up early.
+      replicas: (target.traffic_weight > 0 || target.version === deployment.serving_version)
+        ? (target.replicas ?? deployment.replicas)
+        : 0,
       selector: { matchLabels: selector },
       template: {
-        metadata: { labels: { ...labels, ...selector }, annotations },
+        metadata: { labels, annotations },
         spec: { containers: [container] },
       },
     },
@@ -374,14 +425,82 @@ export function buildDeploymentManifest(deployment, { namespace = 'ashml-jobs', 
 }
 
 /**
- * Builds the Service that gives a deployment a stable address.
+ * Builds the Service that gives one version its own address.
+ *
+ * This is not the address callers use — that is the deployment's front Service. This one
+ * exists so the router has something to forward to, and so an operator can ask a single
+ * version a question without the split getting in the way.
+ */
+export function buildTargetServiceManifest(deployment, target, { namespace = 'ashml-jobs' } = {}) {
+  const name = kubeTargetName(deployment, target.version);
+
+  return {
+    apiVersion: 'v1',
+    kind: 'Service',
+    metadata: {
+      name,
+      namespace,
+      labels: {
+        ...targetSelector(deployment, target),
+        'app.kubernetes.io/component': 'model-server',
+        'ashml.io/project': deployment.project,
+      },
+    },
+    spec: {
+      type: 'ClusterIP',
+      selector: targetSelector(deployment, target),
+      ports: [{ name: 'http', port: 80, targetPort: SERVING_PORT, protocol: 'TCP' }],
+    },
+  };
+}
+
+/**
+ * The selector the deployment's front Service should carry.
+ *
+ * With `version` given the front door selects that version's pods directly: there is one
+ * version taking traffic, nothing to decide, and a router in the path would be a hop and
+ * a dependency bought for nothing. With `version` null it selects the router's pods,
+ * which is what happens the moment a second version starts taking traffic and something
+ * has to choose per request.
+ *
+ * Both branches are fully specified. A selector that came out empty — or with only
+ * `managed-by` — would match every pod AshML has ever created in the namespace, which is
+ * worse than matching none: a deployment would front another model's pods and answer
+ * with them.
+ *
+ * @param {object} deployment
+ * @param {number|null} version the version to select directly, or null for the router
+ */
+export function frontSelector(deployment, version) {
+  const base = {
+    'app.kubernetes.io/managed-by': MANAGED_BY,
+    'ashml.io/deployment-id': deployment.id,
+  };
+  if (version == null) {
+    return { ...base, 'app.kubernetes.io/component': ROUTER_COMPONENT };
+  }
+  return {
+    ...base,
+    'app.kubernetes.io/component': 'model-server',
+    'ashml.io/model-version': String(version),
+  };
+}
+
+/**
+ * Builds the Service that gives a deployment its stable address.
  *
  * ClusterIP: this is the address other things *inside* the cluster call, and it is what
  * `endpoint_url` records. Exposing it outside the cluster is a gateway's job, not a
  * per-deployment one — a NodePort per model would hand out a different port for every
  * deployment and make the address depend on which node answered.
+ *
+ * Its selector is the only mutable thing about it, and moving it is how a deployment
+ * changes what it serves without changing where it is. A Service's `clusterIP` and DNS
+ * name survive a selector change, so callers holding the address never notice; deleting
+ * and recreating the Service to point somewhere else would give it a new IP and break
+ * every connection and cached lookup at once.
  */
-export function buildServiceManifest(deployment, { namespace = 'ashml-jobs' } = {}) {
+export function buildServiceManifest(deployment, { namespace = 'ashml-jobs', version = null } = {}) {
   const name = kubeDeploymentName(deployment);
 
   return {
@@ -399,21 +518,150 @@ export function buildServiceManifest(deployment, { namespace = 'ashml-jobs' } = 
     },
     spec: {
       type: 'ClusterIP',
-      selector: {
-        'app.kubernetes.io/managed-by': MANAGED_BY,
-        'ashml.io/deployment-id': deployment.id,
-      },
+      selector: frontSelector(deployment, version),
       ports: [{ name: 'http', port: 80, targetPort: SERVING_PORT, protocol: 'TCP' }],
     },
   };
 }
 
 /**
- * The in-cluster URL for a deployment's Service.
+ * The in-cluster URL for a deployment's front Service.
  *
  * Recorded on the row when the Service is created, so that reading a deployment does
  * not require reconstructing the naming scheme in a second place.
  */
 export function serviceUrl(deployment, { namespace = 'ashml-jobs' } = {}) {
   return `http://${kubeDeploymentName(deployment)}.${namespace}.svc.cluster.local`;
+}
+
+/** The in-cluster URL for one version's own Service — what the router forwards to. */
+export function targetServiceUrl(deployment, version, { namespace = 'ashml-jobs' } = {}) {
+  return `http://${kubeTargetName(deployment, version)}.${namespace}.svc.cluster.local`;
+}
+
+// ----------------------------------------------------------------------- router
+
+/** What the router's pods are labelled as, and what the front Service selects them by. */
+export const ROUTER_COMPONENT = 'model-router';
+
+/** The port the router listens on. Different from the model server's, so a pod that ended
+ * up running the wrong image fails to bind rather than answering as the wrong thing. */
+export const ROUTER_PORT = 8082;
+
+/**
+ * How many routers a deployment runs.
+ *
+ * Two, not one. The router is in front of every request the deployment answers, so a
+ * single replica makes an ordinary rolling restart — a node drain, an image change — into
+ * a gap in service for a deployment whose model pods were never touched. Two is the
+ * smallest number that survives one of them going away, and a router is a few tens of
+ * megabytes of Node forwarding HTTP, which is a cheap thing to have two of.
+ */
+export const ROUTER_REPLICAS = 2;
+
+/** The router's Kubernetes name. Distinct from every version's, and from the front door's. */
+export function kubeRouterName(deployment) {
+  const id8 = String(deployment.id).replaceAll('-', '').slice(0, 8);
+  const suffix = `-${id8}`;
+  const prefix = `${MANAGED_BY}-router-`;
+  const budget = MAX_NAME - prefix.length - suffix.length;
+
+  const stem = String(deployment.name).slice(0, Math.max(1, budget)).replace(/-+$/, '');
+  return `${prefix}${stem}${suffix}`;
+}
+
+/**
+ * Builds the Deployment that runs a deployment's routers.
+ *
+ * There is no Service of its own. The deployment's front Service selects these pods
+ * directly, which is what makes turning routing on a selector change rather than a new
+ * address — callers keep the name they had, and the hop appears underneath them.
+ *
+ * The router is told an **id** and an endpoint, and nothing about the split. It reads the
+ * weights from the control plane every few seconds, which is what makes
+ * `ash deployment rollout` take effect without restarting anything. Weights in the
+ * environment would mean every step of a canary restarted the thing measuring it.
+ */
+export function buildRouterManifest(deployment, { namespace = 'ashml-jobs', apiUrl = null, refreshMs = 5_000 } = {}) {
+  if (!deployment.router_image) {
+    throw new Error(`deployment ${deployment.id}: router_image is required`);
+  }
+  if (!apiUrl) {
+    // Refused rather than defaulted. A router that cannot reach the control plane never
+    // gets a routing table, so it never becomes ready, so the front Service is never
+    // moved onto it — the deployment goes on serving one version and nothing says why.
+    throw new Error(
+      `deployment ${deployment.id}: a router needs the control plane's address `
+      + '(ASHML_API_ADVERTISE_URL). Without it it can never fetch a split, and a router '
+      + 'with no split is a pod that starts, stays unready, and explains nothing.',
+    );
+  }
+
+  const name = kubeRouterName(deployment);
+  const selector = {
+    'app.kubernetes.io/managed-by': MANAGED_BY,
+    'ashml.io/deployment-id': deployment.id,
+    'app.kubernetes.io/component': ROUTER_COMPONENT,
+  };
+  const labels = { ...selector, 'ashml.io/project': deployment.project };
+
+  const container = {
+    name: 'model-router',
+    image: deployment.router_image,
+    imagePullPolicy: deployment.router_image_pull_policy ?? 'IfNotPresent',
+    ports: [{ name: 'http', containerPort: ROUTER_PORT }],
+    env: [
+      { name: 'ASHML_ENDPOINT', value: apiUrl },
+      { name: 'ASHML_DEPLOYMENT_ID', value: String(deployment.id) },
+      { name: 'ASHML_DEPLOYMENT_NAME', value: String(deployment.name) },
+      { name: 'ASHML_PORT', value: String(ROUTER_PORT) },
+      { name: 'ASHML_ROUTING_REFRESH_MS', value: String(refreshMs) },
+    ],
+    // Small and explicit. A router forwards bytes; it holds no model and does no
+    // arithmetic beyond picking a bucket, and sizing it like a model server would take
+    // capacity away from the pods actually doing the inference.
+    resources: {
+      requests: { cpu: '100m', memory: '134217728' },
+      limits: { memory: '268435456' },
+    },
+    readinessProbe: {
+      // 200 only once there is a split to apply and something to apply it to. Until
+      // then the pod is out of the front Service's endpoints, which is what stops the
+      // front door being moved onto a router that would answer 503 to everything.
+      httpGet: { path: '/readyz', port: ROUTER_PORT },
+      periodSeconds: 5,
+      failureThreshold: 3,
+    },
+    livenessProbe: {
+      httpGet: { path: '/healthz', port: ROUTER_PORT },
+      periodSeconds: 20,
+      failureThreshold: 3,
+    },
+    // No startup probe, unlike the model server. There is no slow first load to protect:
+    // the router's startup is one HTTP request, and a startup probe would only delay the
+    // first liveness check in exchange for nothing.
+  };
+
+  return {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: {
+      name,
+      namespace,
+      labels,
+      annotations: {
+        'ashml.io/deployment-name': deployment.name,
+        'ashml.io/model': String(deployment.model ?? ''),
+        'ashml.io/split': (deployment.targets ?? [])
+          .filter((t) => t.traffic_weight > 0)
+          .map((t) => `v${t.version}=${t.traffic_weight}`)
+          .join(','),
+      },
+    },
+    spec: {
+      replicas: ROUTER_REPLICAS,
+      selector: { matchLabels: selector },
+      template: { metadata: { labels }, spec: { containers: [container] } },
+    },
+  };
 }

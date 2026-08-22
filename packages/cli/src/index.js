@@ -1154,9 +1154,54 @@ const deploymentProjectOption = ['-p, --project <name>', 'project the deployment
  *
  * "1/3" says something "PROGRESSING" does not: which way it is going and how far it
  * has to go. The status column still carries the judgement.
+ *
+ * Desired is summed over the versions taking traffic, because that is how many pods the
+ * deployment is actually asking for: two versions at one replica each want two, and
+ * "1/1" while half the split has no pods would be a green number over an outage.
  */
 function readyLabel(d) {
-  return `${d.ready_replicas}/${d.replicas}`;
+  const desired = (d.targets ?? [])
+    .filter((t) => t.traffic_weight > 0)
+    .reduce((sum, t) => sum + (t.replicas ?? 0), 0);
+  return `${d.ready_replicas}/${desired || d.replicas}`;
+}
+
+/**
+ * The split, as an operator said it: `v6 90% · v7 10%`.
+ *
+ * Versions at weight 0 are shown too, greyed by the word rather than by colour — they
+ * are the rollback the operator kept, and hiding them makes a deployment look like it
+ * has forgotten a version it is still holding pods' worth of configuration for.
+ */
+function splitLabel(d) {
+  const targets = d.targets ?? [];
+  if (targets.length === 0) return '-';
+  if (targets.length === 1) return `v${targets[0].version}`;
+  return targets
+    .map((t) => (t.traffic_weight > 0 ? `v${t.version} ${t.traffic_weight}%` : `v${t.version} (out)`))
+    .join('  ');
+}
+
+/**
+ * Where the address resolves now, and where it should.
+ *
+ * Printed after anything that changes the split, because the split takes effect when the
+ * address moves and not when the weights are written — and the gap between those two is
+ * the part an operator would otherwise have to guess at. Moving waits for the destination
+ * to be ready, which is what stops a rollout from being an outage.
+ */
+function printFrontDoor(d) {
+  const routed = d.router_k8s_name != null;
+  if (d.serving_version != null) {
+    console.log(`the address resolves to v${d.serving_version}`);
+  } else if (routed) {
+    console.log(`the address resolves to the router (${d.router_ready_replicas} ready)`);
+  }
+
+  if (d.status !== 'READY') {
+    console.log(`status: ${d.status} — the split takes effect once what it points at is ready`);
+    console.log(`  ash deployment get ${d.name}`);
+  }
 }
 
 model
@@ -1189,10 +1234,19 @@ model
     });
 
     output(opts, d, () => {
-      console.log(`deploying ${d.model} v${d.target?.version} as ${d.name}`);
+      const version = d.targets?.[0]?.version;
+      console.log(`deploying ${d.model} v${version} as ${d.name}`);
       console.log(`  status:   ${d.status}`);
       console.log(`  replicas: ${readyLabel(d)}`);
       console.log(`  endpoint: ${d.endpoint_url ?? 'not assigned yet'}`);
+      if (d.dropped_versions?.length) {
+        // Deploying serves one version alone, so anything else the deployment was
+        // splitting traffic between has just stopped receiving any. Said out loud: an
+        // operator who was mid-canary has just ended it, and finding that out from a
+        // dashboard later is how a rollout becomes a mystery.
+        console.log(`  replaced: ${d.dropped_versions.map((v) => `v${v}`).join(', ')} `
+          + 'no longer serve; deploying names one version and serves it alone');
+      }
       console.log('');
       // PROGRESSING is the honest answer at this point and it is worth saying why, so
       // nobody reads it as a failure: the objects exist, and no pod has loaded a model
@@ -1214,12 +1268,12 @@ deployment
         console.log('No deployments in this project.');
         return;
       }
-      const table = newTable(['NAME', 'MODEL', 'VER', 'STATUS', 'READY', 'ENDPOINT', 'AGE']);
+      const table = newTable(['NAME', 'MODEL', 'SERVING', 'STATUS', 'READY', 'ENDPOINT', 'AGE']);
       for (const d of deployments) {
         table.push([
           d.name,
           d.model,
-          d.target?.version ?? '-',
+          splitLabel(d),
           d.status,
           readyLabel(d),
           d.endpoint_url ?? '-',
@@ -1240,18 +1294,119 @@ deployment
     output(opts, d, () => {
       console.log(`name:      ${d.name}`);
       console.log(`project:   ${d.project}`);
-      console.log(`model:     ${d.model} v${d.target?.version ?? '?'} (${d.target?.version_status ?? '?'})`);
+      console.log(`model:     ${d.model}`);
       console.log(`status:    ${d.status}`);
       console.log(`ready:     ${readyLabel(d)} replicas`);
       console.log(`endpoint:  ${d.endpoint_url ?? 'not assigned yet'}`);
       console.log(`image:     ${d.image}`);
-      console.log(`arch:      ${d.target?.arch ?? 'unknown'}`);
-      console.log(`artifact:  ${d.target?.artifact_id ?? '-'} (${d.target?.artifact_status ?? '-'})`);
       console.log(`resources: ${d.cpu} CPU, ${size(d.memory_bytes)}${d.gpu ? `, ${d.gpu} GPU` : ''}`);
+      console.log('');
+
+      const table = newTable(['VER', 'TRAFFIC', 'STATUS', 'READY', 'ARCH', 'ARTIFACT']);
+      for (const t of d.targets ?? []) {
+        table.push([
+          `v${t.version}${t.version === d.serving_version ? ' *' : ''}`,
+          t.traffic_weight > 0 ? `${t.traffic_weight}%` : 'out',
+          t.status,
+          `${t.ready_replicas}/${t.traffic_weight > 0 ? t.replicas : 0}`,
+          t.arch ?? 'unknown',
+          t.artifact_id ? `${t.artifact_id.slice(0, 8)} (${t.artifact_status})` : '-',
+        ]);
+      }
+      console.log(table.toString());
+
+      // The asterisk is where the address actually resolves, and it is not always where
+      // the weights say traffic should go: during a switch the front door is still on
+      // the outgoing version. Saying which is which is the difference between a rollout
+      // an operator can watch and one they have to guess at.
+      console.log('');
+      if (d.serving_version != null) {
+        console.log(`* the deployment's address currently resolves to v${d.serving_version}`);
+      } else if (d.router_k8s_name) {
+        console.log(`the address resolves to the router: ${d.router_status ?? 'PENDING'}, `
+          + `${d.router_ready_replicas} ready`);
+      }
+      // A router that exists but is not in the path is either on its way in or on its way
+      // out, and either way it is not what is answering. Saying so avoids reading a
+      // healthy router as evidence that the split is live.
+      if (d.router_k8s_name && d.serving_version != null) {
+        console.log(`a router exists (${d.router_status ?? 'PENDING'}) and the address does `
+          + 'not point at it yet, so the split is not in effect');
+      }
+      for (const t of d.targets ?? []) {
+        if (t.last_error) console.log(`v${t.version}: ${t.last_error}`);
+      }
       if (d.last_error) {
         console.log('');
         console.log(`not serving: ${d.last_error}`);
       }
+    });
+  });
+
+deployment
+  .command('rollout <name>')
+  .description('Move a share of the traffic onto one version')
+  .option(...deploymentProjectOption)
+  .requiredOption('--version <n>', 'the version to shift traffic onto')
+  .requiredOption('--traffic <pct>', 'the share it should take, 0-100')
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const project = requireProject(opts);
+    const d = await api(endpoint(), `/api/v1/projects/${project}/deployments/${name}/rollout`, {
+      method: 'POST',
+      body: { version: Number(opts.version), traffic: Number(opts.traffic) },
+    });
+
+    output(opts, d, () => {
+      console.log(`${d.name} now splits: ${splitLabel(d)}`);
+      console.log('');
+      printFrontDoor(d);
+    });
+  });
+
+deployment
+  .command('promote <name>')
+  .description('End a rollout: give one version all the traffic')
+  .option(...deploymentProjectOption)
+  .requiredOption('--version <n>', 'the version to promote')
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const project = requireProject(opts);
+    const d = await api(endpoint(), `/api/v1/projects/${project}/deployments/${name}/promote`, {
+      method: 'POST',
+      body: { version: Number(opts.version) },
+    });
+
+    output(opts, d, () => {
+      console.log(`${d.name} now serves v${opts.version} alone.`);
+      // The versions at 0 are the rollback, and saying so is the point: an operator who
+      // does not know they are there will reach for a redeploy to go back.
+      const kept = (d.targets ?? []).filter((t) => t.traffic_weight === 0).map((t) => `v${t.version}`);
+      if (kept.length) {
+        console.log(`${kept.join(', ')} kept at 0%: going back is a rollout, not a redeploy.`);
+        console.log(`  ash deployment rollout ${d.name} --version ${kept[0].slice(1)} --traffic 100`);
+      }
+      console.log('');
+      printFrontDoor(d);
+    });
+  });
+
+deployment
+  .command('retire <name>')
+  .description('Stop serving a version entirely and remove its pods')
+  .option(...deploymentProjectOption)
+  .requiredOption('--version <n>', 'the version to remove')
+  .option('--json', 'emit raw JSON')
+  .action(async (name, opts) => {
+    const project = requireProject(opts);
+    const d = await api(
+      endpoint(),
+      `/api/v1/projects/${project}/deployments/${name}/targets/${Number(opts.version)}`,
+      { method: 'DELETE' },
+    );
+    output(opts, d, () => {
+      console.log(`${d.name} no longer serves v${opts.version}; its pods are gone.`);
+      console.log(`now serving: ${splitLabel(d)}`);
     });
   });
 
