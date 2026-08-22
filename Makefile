@@ -14,6 +14,7 @@ RESNET_IMAGE ?= ashml/resnet-trainer:v1
 DATA_DIR     ?= data
 PNG_COUNT    ?= 10
 SERVER_IMAGE ?= ashml/model-server:v1
+ROUTER_IMAGE ?= ashml/model-router:v1
 TEST_DATABASE_URL ?= postgresql://ashml:ashml@127.0.0.1:5432/ashml_test
 NAMESPACE    ?= ashml-jobs
 
@@ -110,6 +111,13 @@ model-server-image: ## Build the inference image and load it into the cluster
 	# pip line — so this build is cheap once `resnet-image` has run.
 	docker build -t $(SERVER_IMAGE) -f deploy/images/model-server/Dockerfile .
 	k3d image import $(SERVER_IMAGE) -c $(CLUSTER)
+
+.PHONY: router-image
+router-image: ## Build the model router image and load it into the cluster
+	# Node, not Python: the router forwards HTTP and holds no model, so it shares
+	# nothing with the serving image and is a fraction of its size.
+	docker build -t $(ROUTER_IMAGE) -f deploy/images/router/Dockerfile .
+	k3d image import $(ROUTER_IMAGE) -c $(CLUSTER)
 
 # ------------------------------------------------------------------ database
 

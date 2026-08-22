@@ -1,0 +1,16 @@
+{
+  "name": "@ashml/router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AshML model router: weighted traffic splitting across model versions",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "fastify": "^5.2.1",
+    "prom-client": "^15.1.3"
+  }
+}

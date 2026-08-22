@@ -8,9 +8,23 @@ node_modules
 coverage
 *.log
 
-# Nothing in the control plane belongs in a training image.
+# The dataset reaches the ResNet image as a named build context (`--build-context
+# cifar=...`), which is the whole point of that flag: it is 341 MB, and without this line
+# it would be sent to the daemon again on every build of every other image.
+data
+
+# Nothing in the control plane belongs in a training or serving image.
 packages
 db
 api
 docs
 deploy/local
+
+# Except the router, which *is* a control-plane component and is built from here. It needs
+# its own package and one file from the server: `domain/routing.js`, which is pure and
+# imports nothing, so it travels alone. Copying it rather than reimplementing it is the
+# point — the control plane stores the weights and the router applies them, and two
+# implementations of what a weight means would be two answers to the question §21 exists
+# to make answerable.
+!packages/router
+!packages/server/src/domain/routing.js
