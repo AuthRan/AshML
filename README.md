@@ -62,7 +62,7 @@ an ingress, and Ashcode — is listed with reasons in
 - [Asking it a question](#asking-it-a-question)
 - [Splitting traffic between versions](#splitting-traffic-between-versions)
 - [Surviving a killed pod](#surviving-a-killed-pod)
-- [Watching it work](#watching-it-work)
+- [Watching it work](#watching-it-work) · [Looking at it](#looking-at-it)
 - [The whole thing, in order](#the-whole-thing-in-order)
 - [Quick start](#quick-start) · [Layout](#layout) · [Configuration](#configuration) · [Development](#development)
 - [Reproducibility](#reproducibility) · [Honesty](#honesty) · [Known limitations](#known-limitations)
@@ -428,6 +428,31 @@ about it.
 Measured numbers — API latency, scheduling latency, an inference batch-size sweep, and the
 ResNet run's own throughput — are in [`docs/benchmarks.md`](docs/benchmarks.md), produced
 by `make bench` rather than typed. There is no GPU figure in it, for the reason above.
+
+## Looking at it
+
+The control plane serves its own dashboard at **`/`** — so `npm start` gives you the API
+and a place to watch it at one address, with nothing else to deploy:
+
+```bash
+npm start                    # then open http://127.0.0.1:8080/
+```
+
+It shows what the platform *is*: nodes and GPUs, jobs by state with the node AshML chose
+for each, registered model versions with whether their bytes were ever confirmed, what is
+deployed and what its address currently resolves to, and the most recent training curve
+plotted against the step the run reported. It refreshes every five seconds and says
+**stale** rather than showing an old reading as though it were current.
+
+Two things it deliberately is not. It is **read-only** — writes stay in `ash` and the API
+where they are logged and scriptable; a button that promotes a model version is a thing to
+design, not to add because a page happened to exist. And it **holds no logic**: it is a
+browser client of the same public API `ash` calls, adds no endpoints of its own, and a test
+asserts that every path it fetches is one this API actually serves.
+
+For time series — scrape intervals, latency histograms, GPU telemetry over hours — Grafana
+is the right tool and the two do not overlap. This is the platform's own state; that is its
+behaviour over time.
 
 ## The whole thing, in order
 

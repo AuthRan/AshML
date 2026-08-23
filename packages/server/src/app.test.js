@@ -93,6 +93,48 @@ describe('ashml-server', () => {
     assert.ok(typeof body.error.message === 'string');
   });
 
+  test('GET / serves the dashboard', async () => {
+    const res = await app.inject({ method: 'GET', url: '/' });
+    assert.equal(res.statusCode, 200);
+    assert.match(res.headers['content-type'], /text\/html/);
+    assert.match(res.payload, /<title>AshML<\/title>/);
+    // It must never be cached: a dashboard showing a stale reading as though it were
+    // current is worse than one that fails to load.
+    assert.equal(res.headers['cache-control'], 'no-store');
+  });
+
+  test('the dashboard holds no logic — it only calls the public API', async () => {
+    // The rule the CLI already follows (spec §28), asserted rather than trusted, because
+    // the tempting shortcut when a page needs something awkward is to compute it in the
+    // page. Every path the page fetches must be one this API actually serves.
+    const res = await app.inject({ method: 'GET', url: '/' });
+    const paths = [...res.payload.matchAll(/(?:get|fetch)\(\s*[`'"]([^`'"$]*\/api\/v1[^`'"]*)/g)]
+      .map((m) => m[1].split('?')[0]);
+    assert.ok(paths.length > 0, 'the page fetches nothing, so something has gone wrong');
+
+    for (const path of paths) {
+      // Only the paths the page writes out whole — the project-scoped ones are built by
+      // interpolation and are covered by the model and deployment integration suites.
+      if (path.includes('${')) continue;
+
+      // Asked of the app rather than matched against a printed route tree: what matters
+      // is that a request to this path is *routed*, not that a string appears somewhere.
+      // Without a database most of these fail — the point is that they fail as the API,
+      // not as "no such route".
+      const probe = await app.inject({ method: 'GET', url: path });
+      assert.notEqual(
+        probe.json()?.error?.code, 'NOT_FOUND',
+        `the dashboard fetches ${path}, which this API does not serve`,
+      );
+    }
+  });
+
+  test('the dashboard stays out of the OpenAPI document', async () => {
+    // That document describes the API and is used to generate clients; an HTML page
+    // among the resources is noise in every one of them.
+    assert.ok(!app.swagger().paths['/'], 'the dashboard should not appear as an API resource');
+  });
+
   test('OpenAPI document is generated from the route schemas', async () => {
     const spec = app.swagger();
     assert.equal(spec.info.title, 'AshML API');

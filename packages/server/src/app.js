@@ -36,6 +36,7 @@ import { registerArtifactRoutes } from './routes/artifacts.js';
 import { registerModelRoutes } from './routes/models.js';
 import { registerDeploymentRoutes } from './routes/deployments.js';
 import { registerObservabilityRoutes } from './routes/observability.js';
+import { registerUiRoutes } from './routes/ui.js';
 import { createMetrics } from './observability/metrics.js';
 import { createPool } from './db/pool.js';
 import { IllegalTransitionError } from './domain/job-state.js';
@@ -233,6 +234,7 @@ export async function buildApp(config, {
 
   await app.register(registerHealthRoutes);
   await app.register(registerObservabilityRoutes);
+  await app.register(registerUiRoutes);
   await app.register(registerGpuRoutes);
   await app.register(registerProjectRoutes);
   await app.register(registerDatasetRoutes);

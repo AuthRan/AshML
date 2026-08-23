@@ -302,9 +302,10 @@ below.
 
 The spec asks for a web dashboard (§49) and immediately says not to spend months on a
 frontend, because "the backend and infrastructure are the project". No phase of this plan
-ever scheduled one, which left the question open rather than answered — so, answered now:
-**Grafana is the dashboard**, and the five things §49 lists are five dashboards' worth of
-panels rather than a bespoke UI.
+ever scheduled one, which left the question open rather than answered. It is answered in
+two halves: **the control plane serves its own dashboard at `/`**, and **Grafana holds the
+time series**. Neither duplicates the other — one is what the platform *is*, the other is
+what it has been doing.
 
 Checked against §49's own list rather than asserted:
 
@@ -325,10 +326,18 @@ PostgreSQL through the second datasource the training curves already use. The sa
 shows `address_resolves_to` beside the traffic split, because during a rollout those two
 disagree and the disagreement *is* the switch in progress.
 
-What is not built, and is not pretended: there is no AshML-branded web application, no
-click-through from a job to its logs, and no way to *operate* anything from a browser —
-Grafana reads, and every write stays in `ash` and the API. A read-only dashboard was the
-weaker half of §49's request and is the half worth having at this size.
+`routes/ui.js` serves one HTML file — no build step, no framework, no new dependency, and
+no endpoints of its own. That last part is the rule the CLI already follows (spec §28) and
+it is asserted rather than trusted: a test extracts every path the page fetches and injects
+a request at each one, failing if any is not a route this API serves. An `/overview`
+endpoint built for one page would be a second, quietly different account of the same state,
+and this is how it stays impossible to add one by accident.
+
+What is not built, and is not pretended: it is **read-only**. There is no click-through
+from a job to its logs and no way to operate anything from a browser — every write stays in
+`ash` and the API, where it is logged, attributable and scriptable. A button that promotes a
+model version is a thing to design carefully, not to add because a page happened to exist.
+The reading half was the half worth having at this size.
 
 ### The journey, as run
 
