@@ -6,10 +6,18 @@ import { loadConfig } from './config.js';
 
 // The sim provider keeps these tests hermetic — they must pass on a machine with
 // no GPU, which is exactly what CI is.
+//
+// The database URL is part of that and was missing: unset, it defaults to the *dev*
+// database, so the readiness test below asserted "the database is unreachable" against
+// whatever the developer had running. It passed in CI and on a laptop that had not run
+// `make db-up`, and failed on one that had — a test whose result depended on something
+// it was not testing. Port 1 is closed everywhere, so what it claims is now true
+// everywhere, and it never touches a real database to prove it.
 const testConfig = loadConfig({
   ASHML_GPU_PROVIDER: 'sim',
   ASHML_SIM_GPUS: '3',
   ASHML_VERSION: '0.0.0-test',
+  ASHML_DATABASE_URL: 'postgresql://ashml:ashml@127.0.0.1:1/ashml_not_listening',
 });
 
 describe('ashml-server', () => {

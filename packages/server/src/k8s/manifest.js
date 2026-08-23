@@ -221,6 +221,15 @@ export function buildJobManifest(job, { namespace = 'ashml-jobs', nodeName = nul
 export const SERVING_PORT = 8081;
 
 /**
+ * The name both serving containers give their port.
+ *
+ * One name, declared by the model server and by the router, so the deployment's front
+ * Service can target a port without knowing which of the two it is pointed at today.
+ * See `buildServiceManifest`.
+ */
+export const PORT_NAME = 'http';
+
+/**
  * Builds the Kubernetes name a deployment's front Service answers on.
  *
  * This is the deployment's address, and it is the one thing here that must never change
@@ -387,7 +396,7 @@ export function buildTargetManifest(deployment, target, { namespace = 'ashml-job
     name: 'model-server',
     image: deployment.image,
     imagePullPolicy: deployment.image_pull_policy ?? 'IfNotPresent',
-    ports: [{ name: 'http', containerPort: SERVING_PORT }],
+    ports: [{ name: PORT_NAME, containerPort: SERVING_PORT }],
     env: servingEnv(deployment, target, { apiUrl }),
     resources: resourceRequirements({
       cpu: deployment.cpu,
@@ -449,7 +458,7 @@ export function buildTargetServiceManifest(deployment, target, { namespace = 'as
     spec: {
       type: 'ClusterIP',
       selector: targetSelector(deployment, target),
-      ports: [{ name: 'http', port: 80, targetPort: SERVING_PORT, protocol: 'TCP' }],
+      ports: [{ name: PORT_NAME, port: 80, targetPort: PORT_NAME, protocol: 'TCP' }],
     },
   };
 }
@@ -499,6 +508,17 @@ export function frontSelector(deployment, version) {
  * name survive a selector change, so callers holding the address never notice; deleting
  * and recreating the Service to point somewhere else would give it a new IP and break
  * every connection and cached lookup at once.
+ *
+ * **The target port is the port's name, not a number**, and that is load-bearing rather
+ * than stylistic. This is the one Service whose backing pods change *kind*: a model
+ * server on SERVING_PORT while one version takes traffic, a router on ROUTER_PORT the
+ * moment two do. Written as a number it can only be right about one of them — and it was
+ * written as SERVING_PORT, so every request through a split deployment's address was
+ * refused by a router that was healthy, ready, and listening one port away. Nothing
+ * reported it: the pods were ready, AshML said READY, and the address answered
+ * ECONNREFUSED. A name is resolved against whichever pod the selector found, so the port
+ * follows the selector by construction rather than by anyone remembering to move it.
+ * Both containers name their port `http` for this reason.
  */
 export function buildServiceManifest(deployment, { namespace = 'ashml-jobs', version = null } = {}) {
   const name = kubeDeploymentName(deployment);
@@ -519,7 +539,7 @@ export function buildServiceManifest(deployment, { namespace = 'ashml-jobs', ver
     spec: {
       type: 'ClusterIP',
       selector: frontSelector(deployment, version),
-      ports: [{ name: 'http', port: 80, targetPort: SERVING_PORT, protocol: 'TCP' }],
+      ports: [{ name: PORT_NAME, port: 80, targetPort: PORT_NAME, protocol: 'TCP' }],
     },
   };
 }
@@ -609,7 +629,7 @@ export function buildRouterManifest(deployment, { namespace = 'ashml-jobs', apiU
     name: 'model-router',
     image: deployment.router_image,
     imagePullPolicy: deployment.router_image_pull_policy ?? 'IfNotPresent',
-    ports: [{ name: 'http', containerPort: ROUTER_PORT }],
+    ports: [{ name: PORT_NAME, containerPort: ROUTER_PORT }],
     env: [
       { name: 'ASHML_ENDPOINT', value: apiUrl },
       { name: 'ASHML_DEPLOYMENT_ID', value: String(deployment.id) },

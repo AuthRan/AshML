@@ -20,6 +20,7 @@ import {
   serviceUrl,
   targetServiceUrl,
   MANAGED_BY,
+  PORT_NAME,
   SERVING_PORT,
   ROUTER_COMPONENT,
   ROUTER_PORT,
@@ -261,11 +262,46 @@ describe("one version's Service", () => {
   });
 });
 
+const port = (service) => service.spec.ports[0];
+
 describe("the deployment's front Service", () => {
-  test('routes port 80 to the container port', () => {
+  test('routes port 80 to the container port, by name rather than by number', () => {
+    // By name because this Service's backing pods change *kind*: a model server on
+    // SERVING_PORT while one version takes traffic, a router on ROUTER_PORT the moment
+    // two do. A number can only be right about one of them.
     const port = buildServiceManifest(makeDeployment(), { version: 1 }).spec.ports[0];
     assert.equal(port.port, 80);
-    assert.equal(port.targetPort, SERVING_PORT);
+    assert.equal(port.targetPort, PORT_NAME);
+  });
+
+  test('reaches whichever kind of pod it is pointed at, on that pod’s own port', () => {
+    // The regression this replaces: the front Service hardcoded SERVING_PORT, so the
+    // moment the address moved onto the router every request through it was refused —
+    // by a router that was running, ready, and listening on ROUTER_PORT one port away.
+    // Nothing reported it. The pods were ready and AshML said READY.
+    //
+    // So the check is the one that would have caught it: whatever the front Service
+    // targets must be a port the selected pod actually declares, in *both* directions.
+    const deployment = makeDeployment();
+    const target = { ...port(buildServiceManifest(deployment, { version: 1 })) };
+    const routed = { ...port(buildServiceManifest(deployment, { version: null })) };
+
+    const serverPorts = buildTargetManifest(deployment, makeTarget())
+      .spec.template.spec.containers[0].ports;
+    const routerPorts = buildRouterManifest(
+      makeDeployment({ router_image: 'ashml/model-router:v1' }),
+      { apiUrl: 'http://ashml' },
+    ).spec.template.spec.containers[0].ports;
+
+    assert.ok(
+      serverPorts.some((p) => p.name === target.targetPort && p.containerPort === SERVING_PORT),
+      'the front door onto a version must name a port the model server declares',
+    );
+    assert.ok(
+      routerPorts.some((p) => p.name === routed.targetPort && p.containerPort === ROUTER_PORT),
+      'the front door onto the router must name a port the router declares',
+    );
+    assert.notEqual(SERVING_PORT, ROUTER_PORT, 'if these were equal the check above proves nothing');
   });
 
   test('selects the pods of the version it was pointed at', () => {
