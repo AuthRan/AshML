@@ -11,7 +11,7 @@ verify artifacts, version models, and serve them with real traffic splitting.**
 [![postgres](https://img.shields.io/badge/state-PostgreSQL%2016-336791)](db/migrations)
 [![license](https://img.shields.io/badge/license-Apache--2.0-green)](#license)
 
-[**▶ Live demo**](https://huggingface.co/spaces/AuthRan/AshML) ·
+[**▶ Live demo**](https://authran.github.io/AshML/demo/) ·
 [**Project site**](https://authran.github.io/AshML/) ·
 [**Architecture**](docs/architecture/architecture.md) ·
 [**Decisions (11 ADRs)**](docs/adr/) ·
@@ -52,6 +52,16 @@ an ingress, and Ashcode — is listed with reasons in
 > scheduler, the executor and the control-plane API need a Kubernetes cluster, and the
 > API is unauthenticated until Phase 10, so it is not something to put on a public URL.
 > What runs where is spelled out on the [project site](https://authran.github.io/AshML/).
+>
+> The demo page is on GitHub Pages rather than the Hugging Face Space, because Hugging
+> Face serves that Space under `default-src 'none'; sandbox` and a page whose scripts are
+> blocked is a demo that silently does nothing. The Space still hosts the 45 MB
+> `model.onnx` the page fetches, which keeps a large binary out of this repository.
+>
+> A browser cannot run `serve.py`, so the page runs the same *weights* through ONNX.
+> `make space-onnx` re-evaluates the torch model and the exported graph over the full
+> 10 000-image test set and refuses to write the export unless both reproduce what AshML
+> recorded — they do, `0.6428` each, agreeing on **100.00%** of predictions.
 >
 > It serves **its own artifact and its own number** — `resnet18-cifar10` v1 from artifact
 > `519cecd1`, one epoch, **64.28%** top-1 — not the 65.59% run described below. Those are
@@ -807,7 +817,7 @@ Apache-2.0
 <div align="center">
 
 Built by [Ashutosh Ranjan](https://github.com/AuthRan) ·
-[Live demo](https://huggingface.co/spaces/AuthRan/AshML) ·
+[Live demo](https://authran.github.io/AshML/demo/) ·
 [Project site](https://authran.github.io/AshML/) ·
 [Architecture](docs/architecture/architecture.md) ·
 [Roadmap](docs/roadmap.md)

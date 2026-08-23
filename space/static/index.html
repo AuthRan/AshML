@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AshML — ResNet-18 / CIFAR-10</title>
+</head>
+<body>
+
+<h1>AshML — ResNet-18 / CIFAR-10</h1>
+
+<p><strong>The interactive demo runs here:
+<a href="https://authran.github.io/AshML/demo/" target="_blank" rel="noopener">authran.github.io/AshML/demo/</a></strong></p>
+
+<p>Hugging Face serves this Space's files under
+<code>content-security-policy: default-src 'none'; sandbox</code>, which blocks scripts,
+styles and images alike — so the in-browser model cannot run on this page. Rather than
+ship something that silently does nothing, this page is a plain pointer, and the demo
+itself is hosted on GitHub Pages.</p>
+
+<p>This Space still does one real job: it hosts the 45&nbsp;MB
+<a href="https://huggingface.co/spaces/AuthRan/AshML/resolve/main/model.onnx">model.onnx</a>,
+which the demo page fetches cross-origin. That keeps a large binary out of the source
+repository while leaving it on a host that serves it with CORS.</p>
+
+<h2>What the model is</h2>
+
+<p>ResNet-18 (CIFAR variant: 3&times;3 stride-1 stem, no max-pool), trained for
+<strong>one epoch</strong> — 390 steps over all 50&nbsp;000 CIFAR-10 training images — by
+<a href="https://github.com/AuthRan/AshML">AshML</a>, a Kubernetes-native ML platform.
+AshML scheduled the job, ran it as a Pod, collected the metrics the run reported, verified
+the checkpoint against object storage, and promoted the resulting version to
+<code>PRODUCTION</code> in its registry.</p>
+
+<p><strong>This is not a CIFAR-10 result.</strong> The architecture reaches ~95% trained
+the 100&ndash;200 epochs the literature uses. One epoch on a CPU is undertrained on
+purpose: what was being demonstrated is that the platform carried a real workload end to
+end, not that the model is good. Expect roughly two answers in three to be right.</p>
+
+<h2>The run</h2>
+
+<ul>
+  <li>Artifact <code>519cecd1-9392-4e8e-89c6-b5c92563f42c</code> — verified by AshML against the bucket</li>
+  <li>Run <code>c370bc1d-b9a5-45df-b0d5-a5a12bcb7992</code>, experiment <code>resnet18-cifar10-1epoch</code></li>
+  <li>Dataset <code>cifar10:v1</code>, seed <code>1337</code>, image <code>ashml/resnet-trainer:v1</code></li>
+  <li>Test accuracy <strong>64.28%</strong>, test loss <strong>0.9933</strong>, over the full 10&nbsp;000-image test set</li>
+</ul>
+
+<h2>Why the ONNX export can be trusted</h2>
+
+<p>In the cluster this model is served by
+<a href="https://github.com/AuthRan/AshML/blob/main/deploy/images/model-server/serve.py">serve.py</a>,
+a PyTorch process. A browser cannot run that, so the demo runs the same <em>weights</em>
+through a different runtime. That substitution is only worth something if it is checked,
+so <code>scripts/export-onnx.py</code> re-evaluates both the torch model and the exported
+graph over the full test set and refuses to write the export unless they agree:</p>
+
+<ul>
+  <li>Recorded by AshML: <strong>0.6428</strong></li>
+  <li>PyTorch, re-evaluated: <strong>0.6428</strong></li>
+  <li>ONNX, re-evaluated: <strong>0.6428</strong></li>
+  <li>Predictions in agreement: <strong>100.00%</strong> of 10&nbsp;000 images</li>
+</ul>
+
+<h2>What this is not</h2>
+
+<p>It is not the platform. The scheduler that decides whether a job may run and where, the
+executor driving Kubernetes Jobs, artifact verification, the model registry and the
+traffic-splitting router all need a cluster, PostgreSQL and an object store. The control
+plane API also has no authentication until Phase&nbsp;10, so it is deliberately not on a
+public URL.</p>
+
+<ul>
+  <li><a href="https://github.com/AuthRan/AshML">Source on GitHub</a></li>
+  <li><a href="https://authran.github.io/AshML/">Project site</a></li>
+  <li><a href="https://authran.github.io/AshML/demo/">The interactive demo</a></li>
+</ul>
+
+</body>
+</html>

@@ -24,3 +24,7 @@ space/model.pt
 space/serve.py
 space/provenance.json
 space/examples/
+space/static/model.onnx
+space/static/provenance.json
+space/static/onnx-verification.json
+space/static/examples/

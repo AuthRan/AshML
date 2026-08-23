@@ -120,7 +120,7 @@
        traffic splitting.</p>
     <div class="cta">
       <a class="btn primary" href="https://github.com/AuthRan/AshML">View on GitHub</a>
-      <a class="btn" href="https://huggingface.co/spaces/AuthRan/AshML">▶ Live demo</a>
+      <a class="btn" href="https://authran.github.io/AshML/demo/">▶ Live demo</a>
       <a class="btn" href="https://github.com/AuthRan/AshML/blob/main/docs/architecture/architecture.md">Architecture</a>
       <a class="btn" href="https://github.com/AuthRan/AshML/tree/main/docs/adr">11 ADRs</a>
     </div>
@@ -358,12 +358,20 @@ confidence:  81.5%
   <section>
     <h2>What actually runs where</h2>
     <div class="note">
-      <h3>The live demo is the serving slice, not the platform</h3>
-      <p>The <a href="https://huggingface.co/spaces/AuthRan/AshML">Hugging Face Space</a>
-      runs AshML's <i>own</i> inference server —
-      <code>deploy/images/model-server/serve.py</code>, the same file the cluster deploys —
-      against the artifact this repository's training run produced. What you get there is a
-      real forward pass through the trained weights, attributed to a model version.</p>
+      <h3>The live demo is the model, not the platform</h3>
+      <p>The <a href="https://authran.github.io/AshML/demo/">demo page</a> runs the exact
+      artifact an AshML training run produced — the one its registry promoted to
+      <code>PRODUCTION</code> after verifying the bytes against object storage. Every
+      answer is attributed to that model version and artifact id, and it runs entirely in
+      your browser; nothing is uploaded anywhere.</p>
+      <p>The demo is on GitHub Pages, not the Hugging Face Space: Hugging Face serves that
+      Space under <code>default-src 'none'; sandbox</code>, which blocks its scripts
+      entirely. The Space still hosts the 45&nbsp;MB <code>model.onnx</code> the page
+      fetches. And because a browser cannot run <code>serve.py</code>, the page runs the
+      same <i>weights</i> through ONNX — an export that
+      <code>make space-onnx</code> refuses to write unless it reproduces the recorded
+      accuracy over all 10&nbsp;000 test images. It does: <b>0.6428</b> from both
+      runtimes, agreeing on <b>100.00%</b> of predictions.</p>
       <p>It serves <b>its own artifact and its own number</b> — <code>resnet18-cifar10</code>
       v1 from artifact <code>519cecd1</code>, one epoch, <b>64.28%</b> top-1 — not the
       65.59% run described above. Those are two separate one-epoch runs, and neither is
@@ -379,7 +387,7 @@ confidence:  81.5%
     </div>
     <table>
       <tr><th>Component</th><th>Where it runs</th></tr>
-      <tr><td>Model server</td><td>Live in the Space, and in-cluster as a Deployment</td></tr>
+      <tr><td>The trained model</td><td>Live in your browser (ONNX), and in-cluster behind <code>serve.py</code></td></tr>
       <tr><td>Control plane API + scheduler</td><td>Local only — needs Kubernetes; no auth until Phase 10</td></tr>
       <tr><td>Router / traffic splitting</td><td>Local only — needs two versions and real pods</td></tr>
       <tr><td>Prometheus + Grafana</td><td>Local only — <code>make observability</code>, dashboards in git as JSON</td></tr>
@@ -435,7 +443,7 @@ make journey        <span class="c"># the §50 user journey, all nine steps, ~8 
   <div class="wrap">
     <div class="links">
       <a href="https://github.com/AuthRan/AshML">Repository</a>
-      <a href="https://huggingface.co/spaces/AuthRan/AshML">Live demo</a>
+      <a href="https://authran.github.io/AshML/demo/">Live demo</a>
       <a href="https://github.com/AuthRan/AshML/blob/main/docs/architecture/architecture.md">Architecture</a>
       <a href="https://github.com/AuthRan/AshML/tree/main/docs/adr">Decision records</a>
       <a href="https://github.com/AuthRan/AshML/blob/main/docs/roadmap.md">Roadmap</a>

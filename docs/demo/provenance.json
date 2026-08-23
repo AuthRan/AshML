@@ -1,0 +1,29 @@
+{
+  "model": "resnet18-cifar10",
+  "version": 1,
+  "artifact_id": "519cecd1-9392-4e8e-89c6-b5c92563f42c",
+  "artifact_uri": "s3://ashml/ashml-demo/c370bc1d-b9a5-45df-b0d5-a5a12bcb7992/resnet18-cifar10.pt",
+  "artifact_verified": true,
+  "job_id": "c370bc1d-b9a5-45df-b0d5-a5a12bcb7992",
+  "experiment": "resnet18-cifar10-1epoch",
+  "seed": 1337,
+  "git_commit": "dd30e04",
+  "dataset": "cifar10:v1",
+  "framework": "pytorch 2.13.0+cpu",
+  "epochs": "1",
+  "last_logged_step": 380,
+  "logged_points": 39,
+  "image": "ashml/resnet-trainer:v1",
+  "accuracy": "64.28%",
+  "loss": "0.9933",
+  "metrics": {
+    "lr": 0.00021213172912943796,
+    "loss": 0.9873570799827576,
+    "val_loss": 0.993264182472229,
+    "batch_digest": 38896,
+    "val_accuracy": 0.6428,
+    "train_accuracy": 0.671875,
+    "steps_per_second": 0.5741658856349477
+  },
+  "built_at": "2026-08-23T17:37:34.901Z"
+}

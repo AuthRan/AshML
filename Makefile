@@ -147,6 +147,25 @@ space-verify: ## Re-evaluate space/model.pt over the full CIFAR-10 test set
 		-v "$(PWD)/scripts:/scripts:ro" \
 		$(SERVER_IMAGE) /scripts/verify-space.py
 
+.PHONY: space-onnx
+space-onnx: ## Export space/model.pt to ONNX for the browser demo, and verify it
+	# Writes nothing unless the exported graph reproduces, over all 10 000 test images,
+	# the accuracy AshML recorded for the artifact -- and agrees with torch prediction
+	# for prediction. A browser cannot run `serve.py`, so the demo substitutes a runtime;
+	# this target is what stops that substitution from being taken on trust.
+	docker run --rm --entrypoint bash \
+		-v "$(PWD)/space:/space" -v "$(PWD)/$(DATA_DIR):/data:ro" \
+		-v "$(PWD)/scripts:/scripts:ro" -e OUT_DIR=/space/static \
+		$(SERVER_IMAGE) -c "pip install --quiet --no-cache-dir onnx onnxruntime onnxscript && python /scripts/export-onnx.py"
+	cp space/provenance.json space/static/provenance.json
+	mkdir -p space/static/examples docs/demo/examples
+	cp space/examples/*.png space/static/examples/
+	# The page ships in the repository; the 45 MB of weights do not. `docs/demo/` is
+	# served by GitHub Pages and fetches `model.onnx` from the Hugging Face Space, which
+	# serves it with CORS.
+	cp space/static/provenance.json space/static/onnx-verification.json docs/demo/
+	cp space/examples/*.png docs/demo/examples/
+
 # ------------------------------------------------------------------ database
 
 .PHONY: db-up

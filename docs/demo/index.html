@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AshML — ResNet-18 / CIFAR-10</title>
+<style>
+  :root{
+    --bg:#fbfcfd;--panel:#fff;--line:#e3e8ef;--ink:#111721;--muted:#5b6675;
+    --accent:#2f6fd0;--accent-soft:#eaf1fc;--ok:#1a7f4b;--warn:#9a6206;--bar:#2f6fd0;
+    --code-bg:#f4f6f9;--shadow:0 1px 2px rgba(16,24,40,.05),0 8px 24px rgba(16,24,40,.05);
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#0d1117;--panel:#151b23;--line:#262d38;--ink:#e6edf3;--muted:#9aa7b6;
+      --accent:#6ea8fe;--accent-soft:#17233a;--ok:#4ec98a;--warn:#e3b341;--bar:#6ea8fe;
+      --code-bg:#11161d;--shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+       font-size:16px;line-height:1.6}
+  .wrap{max-width:940px;margin:0 auto;padding:0 20px}
+  a{color:var(--accent)}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:.12em .36em;
+       border-radius:5px;border:1px solid var(--line)}
+  header{padding:40px 0 26px;border-bottom:1px solid var(--line);
+         background:linear-gradient(180deg,var(--accent-soft),transparent 80%)}
+  h1{font-size:clamp(1.9rem,4.5vw,2.5rem);margin:0 0 10px;letter-spacing:-.03em}
+  .sub{color:var(--muted);max-width:62ch;margin:0 0 16px}
+  .links{display:flex;gap:14px;flex-wrap:wrap;font-size:14.5px}
+
+  main{padding:28px 0 60px}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  @media (max-width:760px){.cols{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        padding:18px;box-shadow:var(--shadow)}
+  h2{font-size:1.02rem;margin:0 0 12px;letter-spacing:-.01em}
+
+  #drop{border:2px dashed var(--line);border-radius:10px;padding:26px 18px;text-align:center;
+        color:var(--muted);cursor:pointer;transition:border-color .15s,background .15s;font-size:14.5px}
+  #drop:hover,#drop.over{border-color:var(--accent);background:var(--accent-soft)}
+  #drop input{display:none}
+
+  .previews{display:flex;gap:16px;align-items:center;margin-top:16px;flex-wrap:wrap}
+  .shot{text-align:center}
+  .shot canvas,.shot img{border:1px solid var(--line);border-radius:8px;display:block;
+       image-rendering:pixelated;background:var(--code-bg)}
+  .shot .lbl{font-size:11px;color:var(--muted);margin-top:5px;font-family:var(--mono)}
+
+  .examples{display:grid;grid-template-columns:repeat(6,1fr);gap:7px;margin-top:14px}
+  .examples img{width:100%;border-radius:6px;border:1px solid var(--line);cursor:pointer;
+       image-rendering:pixelated;transition:border-color .12s,transform .12s}
+  .examples img:hover{border-color:var(--accent);transform:scale(1.06)}
+
+  .row{display:flex;justify-content:space-between;align-items:baseline;
+       font-size:13.5px;margin-bottom:3px;font-family:var(--mono)}
+  .track{height:7px;background:var(--code-bg);border-radius:4px;overflow:hidden;
+         margin-bottom:9px;border:1px solid var(--line)}
+  .fill{height:100%;background:var(--bar);border-radius:4px;transition:width .25s}
+  .top .row{font-size:15px;font-weight:600}
+  .top .fill{background:var(--ok)}
+
+  .status{font-family:var(--mono);font-size:12.5px;color:var(--muted);margin-top:12px;
+          padding-top:12px;border-top:1px solid var(--line);white-space:pre-wrap}
+  .note{border-left:3px solid var(--warn);padding:12px 15px;background:var(--panel);
+        border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:9px;
+        margin-top:20px;font-size:14.3px;color:var(--muted)}
+  .note b{color:var(--ink)}
+  table{width:100%;border-collapse:collapse;font-size:13.3px;margin-top:4px}
+  td{padding:6px 0;border-bottom:1px solid var(--line);vertical-align:top}
+  td:first-child{color:var(--muted);width:44%;padding-right:10px}
+  td:last-child{font-family:var(--mono);font-size:12.4px;word-break:break-all}
+  .verdict{color:var(--ok);font-weight:600}
+  footer{border-top:1px solid var(--line);padding:24px 0 50px;color:var(--muted);font-size:13.5px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>AshML — ResNet-18 / CIFAR-10</h1>
+    <p class="sub">A model this platform trained on Kubernetes, verified against object
+    storage, and promoted to <code>PRODUCTION</code> in its registry — running here in your
+    browser. Nothing is uploaded anywhere.</p>
+    <div class="links">
+      <a href="https://github.com/AuthRan/AshML">Source</a>
+      <a href="https://authran.github.io/AshML/">Project site</a>
+      <a href="https://github.com/AuthRan/AshML/blob/main/docs/architecture/architecture.md">Architecture</a>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="cols">
+    <div class="card">
+      <h2>An image</h2>
+      <label id="drop">
+        <input type="file" id="file" accept="image/*">
+        <b>Drop an image</b> or click to choose<br>
+        <span style="font-size:13px">anything at all — it gets cropped to a square and averaged down to 32×32</span>
+      </label>
+      <div class="previews">
+        <div class="shot"><canvas id="asGiven" width="128" height="128"></canvas>
+          <div class="lbl">as given</div></div>
+        <div class="shot"><canvas id="asSeen" width="128" height="128"></canvas>
+          <div class="lbl">what the model sees (32×32)</div></div>
+      </div>
+      <h2 style="margin-top:20px">CIFAR-10 test images</h2>
+      <p style="font-size:13.4px;color:var(--muted);margin:0">The true label is in each
+      filename, so an answer can be checked rather than admired.</p>
+      <div class="examples" id="examples"></div>
+    </div>
+
+    <div class="card">
+      <h2>All ten classes</h2>
+      <div id="scores"></div>
+      <div class="status" id="status">loading the model…</div>
+    </div>
+  </div>
+
+  <div class="note" id="caveat">
+    <b>Read the answer sceptically.</b> This is <b>not a CIFAR-10 result</b>. ResNet-18
+    reaches ~95% trained the 100–200 epochs the literature uses; this is <b>one epoch on a
+    CPU</b>, undertrained on purpose, because what was being demonstrated is that the
+    platform carried a real workload end to end — not that the model is good. Expect
+    roughly two answers in three to be right.
+    <br><br>
+    CIFAR-10 is 32×32. Whatever you give it is centre-cropped and area-averaged down to
+    that first, and the panel says what it did. A confident prediction about a 32×32 crop
+    of a photograph is still a prediction about a 32×32 crop of a photograph.
+  </div>
+
+  <div class="cols" style="margin-top:20px">
+    <div class="card">
+      <h2>The run that produced these weights</h2>
+      <table id="provenance"></table>
+    </div>
+    <div class="card">
+      <h2>Why you can trust the export</h2>
+      <p style="font-size:14.2px;color:var(--muted);margin:0 0 10px">The cluster serves
+      this model with <code>serve.py</code>, a PyTorch process. A browser cannot run that,
+      so this page runs the same <i>weights</i> through a different runtime. That
+      substitution is only worth something if it is checked — so
+      <code>scripts/export-onnx.py</code> re-evaluates both over the full test set and
+      refuses to write the export unless they agree.</p>
+      <table id="verification"></table>
+    </div>
+  </div>
+</main>
+
+<footer class="wrap">
+  Built by <a href="https://github.com/AuthRan">Ashutosh Ranjan</a> · Apache-2.0 ·
+  weights from artifact <span id="artifactFoot"></span>, verified by AshML against the
+  object store before this page was built.
+</footer>
+
+<script type="module">
+import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.mjs";
+
+// Must match `serve.py`. The whole point of exporting the graph without the transform
+// baked in is that this stays one implementation traceable to one source of truth --
+// getting it wrong here is a silent accuracy loss that no error message would point at.
+const MEAN = [0.4914, 0.4822, 0.4465];
+const STD  = [0.2470, 0.2435, 0.2616];
+const CLASSES = ["airplane","automobile","bird","cat","deer","dog","frog","horse","ship","truck"];
+
+const EXAMPLES = ["test-00000-cat","test-00001-ship","test-00002-ship","test-00003-airplane",
+  "test-00004-frog","test-00005-frog","test-00006-automobile","test-00007-frog",
+  "test-00008-cat","test-00009-automobile","test-00010-airplane","test-00011-truck"];
+
+// The weights live in the Hugging Face Space rather than in this repository. 45 MB of
+// exported model is not something to carry in git for a page that can fetch it, and the
+// Hub serves it with `access-control-allow-origin: *`, so a cross-origin fetch from
+// GitHub Pages is a supported thing rather than a trick.
+const MODEL_URL = "https://huggingface.co/spaces/AuthRan/AshML/resolve/main/model.onnx";
+
+const $ = (id) => document.getElementById(id);
+const status = (text) => { $("status").textContent = text; };
+
+/**
+ * A faithful port of `packages/cli/src/png.js`: centre-crop to a square, then average
+ * each output pixel over the input area it covers.
+ *
+ * Not `drawImage` into a 32x32 canvas. That is the browser's own downscaler -- typically
+ * a bilinear step or two -- and it is a different filter from the one `ash predict` uses.
+ * The difference does not throw; it just moves the answers, which is the worst way for a
+ * demo to be wrong.
+ */
+function toTensor(source) {
+  const w = source.naturalWidth ?? source.width;
+  const h = source.naturalHeight ?? source.height;
+
+  const side = Math.min(w, h);
+  const left = Math.floor((w - side) / 2);
+  const top = Math.floor((h - side) / 2);
+
+  const scratch = document.createElement("canvas");
+  scratch.width = side; scratch.height = side;
+  const sctx = scratch.getContext("2d", { willReadFrequently: true });
+  sctx.drawImage(source, left, top, side, side, 0, 0, side, side);
+  const src = sctx.getImageData(0, 0, side, side).data;
+
+  const size = 32;
+  const scale = side / size;
+  const small = new Uint8ClampedArray(size * size * 4);
+  const data = new Float32Array(1 * 3 * size * size);
+
+  for (let ty = 0; ty < size; ty += 1) {
+    const y0 = ty * scale, y1 = (ty + 1) * scale;
+    for (let tx = 0; tx < size; tx += 1) {
+      const x0 = tx * scale, x1 = (tx + 1) * scale;
+      let r = 0, g = 0, b = 0, total = 0;
+
+      for (let sy = Math.floor(y0); sy < Math.min(side, Math.ceil(y1)); sy += 1) {
+        const coverY = Math.min(y1, sy + 1) - Math.max(y0, sy);
+        if (coverY <= 0) continue;
+        for (let sx = Math.floor(x0); sx < Math.min(side, Math.ceil(x1)); sx += 1) {
+          const coverX = Math.min(x1, sx + 1) - Math.max(x0, sx);
+          if (coverX <= 0) continue;
+          const weight = coverX * coverY;
+          const at = (sy * side + sx) * 4;
+          // Composite onto white rather than dropping alpha: whatever sits under a
+          // transparent pixel is usually black, and a black halo is a feature the model
+          // was never shown.
+          const alpha = src[at + 3] / 255;
+          r += (src[at] * alpha + 255 * (1 - alpha)) * weight;
+          g += (src[at + 1] * alpha + 255 * (1 - alpha)) * weight;
+          b += (src[at + 2] * alpha + 255 * (1 - alpha)) * weight;
+          total += weight;
+        }
+      }
+
+      const R = Math.round(r / total), G = Math.round(g / total), B = Math.round(b / total);
+      const px = (ty * size + tx) * 4;
+      small[px] = R; small[px + 1] = G; small[px + 2] = B; small[px + 3] = 255;
+
+      const plane = ty * size + tx;
+      data[plane]                 = (R / 255 - MEAN[0]) / STD[0];
+      data[size * size + plane]   = (G / 255 - MEAN[1]) / STD[1];
+      data[2 * size * size + plane] = (B / 255 - MEAN[2]) / STD[2];
+    }
+  }
+
+  const describe = [`${w}x${h}`];
+  if (w !== h) describe.push(`centre-cropped to ${side}x${side}`);
+  if (side !== size) describe.push("resized to 32x32 (area average)");
+
+  return { tensor: new ort.Tensor("float32", data, [1, 3, size, size]),
+           preview: new ImageData(small, size, size), describe: describe.join(", ") };
+}
+
+function paint(canvas, drawable) {
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (drawable instanceof ImageData) {
+    const buf = document.createElement("canvas");
+    buf.width = drawable.width; buf.height = drawable.height;
+    buf.getContext("2d").putImageData(drawable, 0, 0);
+    ctx.drawImage(buf, 0, 0, canvas.width, canvas.height);
+  } else {
+    const w = drawable.naturalWidth ?? drawable.width;
+    const h = drawable.naturalHeight ?? drawable.height;
+    const side = Math.min(w, h);
+    ctx.drawImage(drawable, Math.floor((w - side) / 2), Math.floor((h - side) / 2),
+                  side, side, 0, 0, canvas.width, canvas.height);
+  }
+}
+
+function render(probabilities) {
+  const order = [...probabilities.keys()].sort((a, b) => probabilities[b] - probabilities[a]);
+  $("scores").innerHTML = order.map((index, rank) => {
+    const pct = (probabilities[index] * 100).toFixed(1);
+    return `<div class="${rank === 0 ? "top" : ""}">
+      <div class="row"><span>${CLASSES[index]}</span><span>${pct}%</span></div>
+      <div class="track"><div class="fill" style="width:${Math.max(probabilities[index] * 100, 0.6)}%"></div></div>
+    </div>`;
+  }).join("");
+}
+
+let session = null;
+
+async function predict(source, label) {
+  if (!session) return;
+  const { tensor, preview, describe } = toTensor(source);
+  paint($("asGiven"), source);
+  paint($("asSeen"), preview);
+
+  const started = performance.now();
+  const out = await session.run({ pixels: tensor });
+  const logits = Array.from(out.logits.data);
+  const took = performance.now() - started;
+
+  const peak = Math.max(...logits);
+  const exps = logits.map((v) => Math.exp(v - peak));
+  const sum = exps.reduce((a, b) => a + b, 0);
+  const probabilities = exps.map((v) => v / sum);
+  render(probabilities);
+
+  const best = probabilities.indexOf(Math.max(...probabilities));
+  const truth = label && label.includes("-") ? label.split("-").pop().replace(".png", "") : null;
+  // The true label is in the filename for the examples, so say outright whether it was
+  // right. A demo that only ever shows confident output is not showing you the model.
+  const verdict = truth
+    ? (CLASSES[best] === truth ? `  ✓ correct (${truth})` : `  ✗ wrong — actually ${truth}`)
+    : "";
+
+  status(`input:       ${describe}\n`
+       + `prediction:  ${CLASSES[best]} at ${(probabilities[best] * 100).toFixed(1)}%${verdict}\n`
+       + `latency:     ${took.toFixed(1)} ms in this browser\n`
+       + `served by:   ${PROV.model} v${PROV.version} → artifact ${PROV.artifact_id}`);
+}
+
+let PROV = {};
+
+function table(id, rows) {
+  $(id).innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+}
+
+(async () => {
+  try {
+    const [prov, ver] = await Promise.all([
+      fetch("provenance.json").then((r) => r.json()),
+      fetch("onnx-verification.json").then((r) => r.json()),
+    ]);
+    PROV = prov;
+    $("artifactFoot").textContent = prov.artifact_id;
+
+    table("provenance", [
+      ["Trained by", "AshML — scheduled onto Kubernetes, reported by its Python SDK"],
+      ["Run", prov.job_id ?? "—"],
+      ["Experiment", prov.experiment ?? "—"],
+      ["Dataset", prov.dataset ?? "—"],
+      ["Seed", prov.seed ?? "—"],
+      ["Epochs", prov.epochs ?? "—"],
+      ["Test accuracy", prov.accuracy ?? "—"],
+      ["Test loss", prov.loss ?? "—"],
+      ["Trainer image", prov.image ?? "—"],
+      ["Framework", prov.framework ?? "—"],
+      ["Artifact", prov.artifact_id ?? "—"],
+      ["Artifact verified", prov.artifact_verified
+        ? '<span class="verdict">yes — AshML asked the bucket</span>' : "not confirmed"],
+    ]);
+
+    table("verification", [
+      ["Recorded by AshML", (ver.recorded_val_accuracy * 100).toFixed(2) + "%"],
+      ["PyTorch, re-evaluated", (ver.torch_accuracy * 100).toFixed(2) + "%"],
+      ["ONNX, re-evaluated", (ver.onnx_accuracy * 100).toFixed(2) + "%"],
+      ["Predictions in agreement",
+        `<span class="verdict">${(ver.runtime_agreement * 100).toFixed(2)}%</span>`],
+      ["Test images", ver.test_images.toLocaleString()],
+      ["Opset", ver.opset],
+    ]);
+  } catch (err) {
+    console.error(err);
+  }
+
+  $("examples").innerHTML = EXAMPLES.map((name) =>
+    `<img src="examples/${name}.png" alt="${name}" title="${name}" data-name="${name}.png">`
+  ).join("");
+
+  status("loading the model from Hugging Face (about 45 MB, once)…");
+  try {
+    // WebGPU where the browser has it, WASM everywhere else. The fallback is not a
+    // detail: without it this page is blank on any browser without WebGPU, which is
+    // most of them on most machines.
+    session = await ort.InferenceSession.create(MODEL_URL,
+      { executionProviders: ["webgpu", "wasm"] });
+  } catch (err) {
+    status(`the model failed to load: ${err.message}`);
+    return;
+  }
+  status("ready — drop an image, or pick one of the test images below.");
+
+  $("examples").addEventListener("click", (event) => {
+    const img = event.target.closest("img");
+    if (img) predict(img, img.dataset.name);
+  });
+
+  const drop = $("drop");
+  $("file").addEventListener("change", (event) => {
+    const file = event.target.files?.[0];
+    if (file) load(file);
+  });
+  ["dragenter", "dragover"].forEach((type) =>
+    drop.addEventListener(type, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((type) =>
+    drop.addEventListener(type, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", (e) => {
+    const file = e.dataTransfer?.files?.[0];
+    if (file) load(file);
+  });
+
+  function load(file) {
+    const img = new Image();
+    img.onload = () => { predict(img, null); URL.revokeObjectURL(img.src); };
+    img.src = URL.createObjectURL(file);
+  }
+})();
+</script>
+</body>
+</html>

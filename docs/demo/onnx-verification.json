@@ -1,0 +1,9 @@
+{
+  "artifact_id": "519cecd1-9392-4e8e-89c6-b5c92563f42c",
+  "recorded_val_accuracy": 0.6428,
+  "torch_accuracy": 0.6428,
+  "onnx_accuracy": 0.6428,
+  "runtime_agreement": 1.0,
+  "test_images": 10000,
+  "opset": 17
+}
