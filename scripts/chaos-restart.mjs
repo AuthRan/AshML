@@ -36,12 +36,14 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createWriteStream } from 'node:fs';
-import { promisify } from 'node:util';
 
-const exec = promisify(execFile);
+// kubectl is pinned to one context here rather than following `current-context`: this
+// script starts a control plane and asserts against the cluster, and the two must be the
+// same cluster. See scripts/lib/kubectl.mjs.
+import { kubectl, requireContext, KUBE_CONTEXT } from './lib/kubectl.mjs';
 
 const ENDPOINT = (process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 const PORT = Number(new URL(ENDPOINT).port || 8080);
@@ -69,11 +71,6 @@ async function api(method, path, body) {
   const text = await response.text();
   if (response.status >= 400) throw new Error(`${method} ${path} -> ${response.status}: ${text}`);
   return text ? JSON.parse(text) : {};
-}
-
-async function kubectl(...args) {
-  const { stdout } = await exec('kubectl', args);
-  return stdout.trim();
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -104,7 +101,11 @@ async function startControlPlane() {
   const log = createWriteStream(LOG_FILE, { flags: 'a' });
   const child = spawn('node', ['packages/server/src/index.js'], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: process.env,
+    // The control plane this script starts and the kubectl this script asserts with are
+    // pinned to one context together. Left to `current-context`, the two could disagree,
+    // and the experiment — kill the control plane, require the record to come back
+    // identical — would be reading a different cluster's record than the one it killed.
+    env: { ...process.env, ASHML_KUBECONFIG_CONTEXT: KUBE_CONTEXT },
   });
   child.stdout.pipe(log);
   child.stderr.pipe(log);
@@ -290,7 +291,10 @@ check('the run finishes, and says whether the outage cost it any metrics', async
 
 // ------------------------------------------------------------------- driver
 
-console.log(`\nchaos: killing the control plane mid-run  (job project ${project})\n`);
+await requireContext();
+
+console.log(`\nchaos: killing the control plane mid-run  (job project ${project})`);
+console.log(`  cluster: ${KUBE_CONTEXT}\n`);
 
 let passed = 0;
 let failed = 0;

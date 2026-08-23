@@ -28,10 +28,11 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 
-const exec = promisify(execFile);
+// kubectl is pinned to one context rather than following `current-context`, because this
+// script deletes a pod. See scripts/lib/kubectl.mjs.
+import { kubectl, requireContext, contextArgs, KUBE_CONTEXT } from './lib/kubectl.mjs';
 
 const ENDPOINT = (process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 const NAMESPACE = process.env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs';
@@ -52,11 +53,6 @@ async function api(method, path, body) {
   const text = await response.text();
   if (response.status >= 400) throw new Error(`${method} ${path} -> ${response.status}: ${text}`);
   return text ? JSON.parse(text) : {};
-}
-
-async function kubectl(...args) {
-  const { stdout } = await exec('kubectl', args);
-  return stdout.trim();
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -82,7 +78,7 @@ async function until(what, predicate, { timeout = TIMEOUT_MS, interval = 1000 } 
 async function portForward(service, port) {
   const child = spawn(
     'kubectl',
-    ['port-forward', '-n', NAMESPACE, `svc/${service}`, `${port}:80`],
+    [...contextArgs, 'port-forward', '-n', NAMESPACE, `svc/${service}`, `${port}:80`],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
 
@@ -285,7 +281,10 @@ check('the replacement answers with the same model, to the digit', async () => {
 
 // ------------------------------------------------------------------- driver
 
-console.log(`\nchaos: killing the pod serving ${PROJECT}/${DEPLOYMENT}\n`);
+await requireContext();
+
+console.log(`\nchaos: killing the pod serving ${PROJECT}/${DEPLOYMENT}`);
+console.log(`  cluster: ${KUBE_CONTEXT}\n`);
 
 let passed = 0;
 let failed = 0;

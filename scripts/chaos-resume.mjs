@@ -26,10 +26,11 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 
-const exec = promisify(execFile);
+// Asks kubectl directly, so no assertion here rests on AshML's own account of itself —
+// and pinned to one context rather than following `current-context`, because this script
+// deletes a pod. See scripts/lib/kubectl.mjs.
+import { kubectl, requireContext, KUBE_CONTEXT } from './lib/kubectl.mjs';
 
 const ENDPOINT = (process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 const NAMESPACE = process.env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs';
@@ -118,12 +119,6 @@ async function api(method, path, body) {
     throw new Error(`${method} ${path} -> ${response.status}: ${text}`);
   }
   return payload;
-}
-
-/** Asks kubectl directly, so no assertion here rests on AshML's own account of itself. */
-async function kubectl(...args) {
-  const { stdout } = await exec('kubectl', args);
-  return stdout.trim();
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -436,7 +431,10 @@ check('the finished run has the model the second attempt produced', async () => 
 
 // ------------------------------------------------------------------- driver
 
-console.log(`\nchaos: killing a training pod mid-run  (job project ${project})\n`);
+await requireContext();
+
+console.log(`\nchaos: killing a training pod mid-run  (job project ${project})`);
+console.log(`  cluster: ${KUBE_CONTEXT}\n`);
 
 let passed = 0;
 let failed = 0;

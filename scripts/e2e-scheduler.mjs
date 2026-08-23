@@ -23,8 +23,6 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 
 import { buildApp } from '../packages/server/src/app.js';
 import { loadConfig } from '../packages/server/src/config.js';
@@ -33,8 +31,10 @@ import { discoverCluster, listNodes } from '../packages/server/src/services/node
 import { getSchedulingHistory } from '../packages/server/src/services/scheduler.js';
 import { getJob, listJobs } from '../packages/server/src/services/jobs.js';
 import { JobState } from '../packages/server/src/domain/job-state.js';
-
-const run = promisify(execFile);
+// kubectl is pinned to the same context the control plane below is built with, so a
+// workstation with two clusters cannot assert against one while testing the other.
+// See scripts/lib/kubectl.mjs.
+import { kubectl, requireContext, KUBE_CONTEXT } from './lib/kubectl.mjs';
 
 const NAMESPACE = process.env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs';
 const IMAGE = process.env.TRAINER_IMAGE ?? 'ashml/trainer:v1';
@@ -45,15 +45,15 @@ const config = loadConfig({
   ASHML_GPU_PROVIDER: process.env.ASHML_GPU_PROVIDER ?? 'nvidia',
   ASHML_K8S_BACKEND: 'kubernetes',
   ASHML_K8S_NAMESPACE: NAMESPACE,
+  // One setting pins both halves of this test: the control plane built here, and the
+  // kubectl the assertions read the cluster back with. See scripts/lib/kubectl.mjs.
+  ASHML_KUBECONFIG_CONTEXT: KUBE_CONTEXT,
 });
+
+await requireContext();
 
 const app = await buildApp(config, { logger: false });
 await app.ready();
-
-async function kubectl(...args) {
-  const { stdout } = await run('kubectl', args);
-  return stdout.trim();
-}
 
 const suffix = Math.random().toString(36).slice(2, 8);
 const project = `sched-${suffix}`;

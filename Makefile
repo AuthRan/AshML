@@ -156,37 +156,37 @@ test-sdk: ## Python SDK tests (add ASHML_ENDPOINT to include the live suite)
 
 .PHONY: e2e
 e2e: ## End-to-end: submit a job, run it on k3d, assert it SUCCEEDED
-	node scripts/e2e.mjs
+	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/e2e.mjs
 
 .PHONY: e2e-scheduler
 e2e-scheduler: ## End-to-end: overfill the cluster, assert queueing and placement
-	node scripts/e2e-scheduler.mjs
+	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/e2e-scheduler.mjs
 
 .PHONY: chaos-resume
 chaos-resume: ## Chaos: kill a training pod, assert the retry resumes from its checkpoint
 	# Needs a control plane that is already *running* and reachable from a pod, because
 	# what is being proved is that the platform recovers on its own loop rather than
 	# when a test calls into it. See the header of the script for the two addresses.
-	node scripts/chaos-resume.mjs
+	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/chaos-resume.mjs
 
 .PHONY: chaos-restart
 chaos-restart: ## Chaos: SIGKILL the control plane mid-run, assert nothing was lost
 	# This one *starts* the control plane, because killing it is the experiment. It
 	# refuses to run if one is already answering, so stop yours first.
-	node scripts/chaos-restart.mjs
+	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/chaos-restart.mjs
 
 .PHONY: chaos-serving
 chaos-serving: ## Chaos: kill the pod serving a model, assert it returns serving the same one
 	# Needs a deployment that is already serving (`ash model deploy`) and a control plane
 	# running its deployment sync loop -- what is observed is that loop noticing.
-	node scripts/chaos-serving.mjs
+	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/chaos-serving.mjs
 
 .PHONY: chaos-resume-resnet
 chaos-resume-resnet: ## The same chaos, against ResNet-18: weights, optimizer and schedule
 	# Minutes rather than seconds, and it needs `make resnet-image`. Worth both: the
 	# smoke workload's whole state is one integer, so it proves the platform path and
 	# nothing about restoring a state dict into a freshly built architecture.
-	CHAOS_WORKLOAD=resnet CHAOS_TIMEOUT_MS=600000 node scripts/chaos-resume.mjs
+	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} CHAOS_WORKLOAD=resnet CHAOS_TIMEOUT_MS=600000 node scripts/chaos-resume.mjs
 
 .PHONY: bench
 bench: ## Measured benchmarks against a running control plane (see docs/benchmarks.md)
