@@ -72,6 +72,9 @@ const WORKLOADS = {
     // Its checkpoint carries a OneCycle schedule, so the resumed run's learning rate is
     // checkable evidence about what was restored — see the check that uses this.
     restoresSchedule: true,
+    // And it derives each epoch's order from (seed, epoch), so a second run from the same
+    // seed is a reference the resumed one can be compared against, step by step.
+    reportsBatchDigest: true,
     env: (w) => ({
       // Bounded by MAX_STEPS, so this trains nothing worth quoting and says so in its
       // own logs. What is under test is the resume, not the accuracy.
@@ -419,6 +422,68 @@ check('the learning-rate schedule continued rather than restarting', async () =>
 
   note(`lr across the kill: ${points.map((p) => `${p.step}:${p.value.toFixed(4)}`).join('  ')}`);
   note(`one cycle, not two: it opened at ${first.value.toFixed(5)} and was ${atResume.toFixed(5)} at the resume`);
+});
+
+check('the resumed run trained on the images it would have, in the order it would have', async () => {
+  if (!workload.reportsBatchDigest) {
+    note(`the ${WORKLOAD} workload reports no batch digest; nothing to compare here`);
+    return;
+  }
+
+  // This is the check the data-order fix exists for, and it needs a *reference*: nothing
+  // inside a single run can tell "resumed the epoch" from "restarted it with different
+  // images", because both produce a smooth loss curve and a plausible accuracy. So an
+  // uninterrupted twin is run from the same seed, and the two are compared step by step.
+  //
+  // Redrawing the remainder would train twice on some images and never on others. The
+  // only place that is visible is here.
+  const twin = await api('POST', '/api/v1/jobs', {
+    project,
+    name: `chaos-resume-${suffix}-reference`,
+    max_retries: 0,
+    resources: workload.resources,
+    spec: { image: workload.image, command: workload.command, env: workload.env(workload) },
+  });
+  note(`reference run ${twin.id.slice(0, 8)} submitted: same seed, nothing killed`);
+
+  const finished = await until('the reference run to finish', async () => {
+    const current = await api('GET', `/api/v1/jobs/${twin.id}`);
+    if (current.state === 'FAILED') throw new Error(`the reference run failed: ${current.failure_reason}`);
+    return current.state === 'SUCCEEDED' ? current : null;
+  }, { timeout: TIMEOUT_MS });
+  assert.equal(finished.attempt, 0, 'the reference run was itself retried, so it is not a reference');
+
+  const digests = async (id) => {
+    const body = await api('GET', `/api/v1/jobs/${id}/metrics?name=batch_digest&limit=20000`);
+    const points = (body.series ?? []).find((x) => x.name === 'batch_digest')?.points ?? [];
+    return new Map(points.map((point) => [point.step, point.value]));
+  };
+
+  const resumed = await digests(globalThis.__job);
+  const reference = await digests(twin.id);
+  assert.ok(reference.size > 0, 'the reference run reported no batch digests');
+  assert.ok(resumed.size > 0, 'the resumed run reported no batch digests');
+
+  const shared = [...reference.keys()].filter((step) => resumed.has(step)).sort((a, b) => a - b);
+  assert.ok(shared.length >= 3, `only ${shared.length} steps in common; not enough to compare`);
+
+  const after = shared.filter((step) => step >= globalThis.__checkpoint.step);
+  assert.ok(
+    after.length > 0,
+    'no compared step falls after the resume, so this proves nothing about the resumed part',
+  );
+
+  const differing = shared.filter((step) => resumed.get(step) !== reference.get(step));
+  assert.deepEqual(
+    differing, [],
+    `${differing.length} of ${shared.length} steps trained on different data from the `
+    + `reference run — first at step ${differing[0]}: resumed ${resumed.get(differing[0])}, `
+    + `reference ${reference.get(differing[0])}. The resumed epoch redrew its batches `
+    + 'instead of replaying the ones the killed attempt had not reached.',
+  );
+
+  note(`${shared.length} steps compared against the reference, ${after.length} of them after `
+    + `the resume at step ${globalThis.__checkpoint.step}: every digest identical`);
 });
 
 check('the finished run has the model the second attempt produced', async () => {

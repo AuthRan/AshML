@@ -115,9 +115,59 @@ def loaders():
     test = torchvision.datasets.CIFAR10(DATA_DIR, train=False, download=False, transform=eval_transform)
 
     workers = env_int("DATALOADER_WORKERS", 2)
-    return (
-        DataLoader(train, batch_size=BATCH_SIZE, shuffle=True, num_workers=workers, drop_last=True),
-        DataLoader(test, batch_size=256, shuffle=False, num_workers=workers),
+    return train, DataLoader(test, batch_size=256, shuffle=False, num_workers=workers)
+
+
+def batch_digest(labels):
+    """A small stable number identifying the batch this step trained on.
+
+    The labels rather than the images: it is two orders of magnitude cheaper, it is
+    already on the device, and for CIFAR-10's shuffled order a sequence of 128 labels is
+    as good a fingerprint of *which* examples these are as the pixels would be. Weighted
+    by position so that the same labels in a different order do not collide, and reduced
+    modulo a prime so it stays a float a metric column can hold exactly.
+    """
+    values = labels.detach().to(torch.int64).cpu()
+    weights = torch.arange(1, values.numel() + 1, dtype=torch.int64)
+    return float(int((values * weights).sum().item()) % 1_000_003)
+
+
+def epoch_order(size, epoch):
+    """The order this epoch visits the training set in, derived rather than drawn.
+
+    `shuffle=True` asks the DataLoader for a fresh permutation from global RNG every time
+    it is iterated, which makes the order of any given epoch unreproducible — and makes a
+    *resumed* epoch a different epoch, running images the interrupted attempt had already
+    trained on while skipping ones it never reached. That was the caveat attached to every
+    artifact a resumed run produced.
+
+    A permutation derived from `(SEED, epoch)` fixes both at once. Epoch 3 has one order,
+    the same order on every attempt and on every machine, so resuming is a matter of
+    knowing how far into it the last attempt got — no sampler state to serialise, nothing
+    version-specific in the checkpoint, and the property holds for a run that is
+    interrupted five times as readily as for one interrupted once.
+
+    The multiplier is a prime so that consecutive seeds and consecutive epochs do not
+    collide on the same stream: seed 1 epoch 2 and seed 2 epoch 1 are different orders.
+    """
+    generator = torch.Generator().manual_seed(SEED * 100003 + epoch)
+    return torch.randperm(size, generator=generator).tolist()
+
+
+def epoch_loader(dataset, epoch, *, skip_batches=0, workers=2):
+    """A loader over what is left of `epoch` after `skip_batches` have been trained on.
+
+    Slicing the epoch's own permutation is what makes a resume exact: the batches this
+    returns are the batches the interrupted attempt had not reached, in the order it
+    would have reached them.
+    """
+    order = epoch_order(len(dataset), epoch)[skip_batches * BATCH_SIZE:]
+    return DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        sampler=order,
+        num_workers=workers,
+        drop_last=True,
     )
 
 
@@ -176,16 +226,18 @@ def main() -> None:
     if not caveats:
         print("[resnet] full run: no step or evaluation limits applied", flush=True)
 
-    train_loader, test_loader = loaders()
+    train_set, test_loader = loaders()
+    workers = env_int("DATALOADER_WORKERS", 2)
 
     model = build_model().to(device)
     optimizer = torch.optim.SGD(
         model.parameters(), lr=LR, momentum=MOMENTUM, weight_decay=WEIGHT_DECAY, nesterov=True,
     )
-    total_steps = MAX_STEPS or (len(train_loader) * EPOCHS)
+    # Derived from the dataset rather than from a loader, because there is no longer one
+    # loader for the whole run: each epoch builds its own over its own slice.
+    steps_per_epoch = len(train_set) // BATCH_SIZE
+    total_steps = MAX_STEPS or (steps_per_epoch * EPOCHS)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=LR, total_steps=total_steps)
-
-    steps_per_epoch = len(train_loader)
 
     with ashml.init() as run:
         print(f"[resnet] reporting to job {run.job_id}", flush=True)
@@ -202,7 +254,22 @@ def main() -> None:
             # A resumed epoch runs the batches it has left, not a whole one — otherwise
             # a run interrupted five times trains for five extra epochs and the step
             # count stops meaning anything.
-            budget = steps_per_epoch - (step - epoch * steps_per_epoch)
+            done_before = step - epoch * steps_per_epoch
+            budget = steps_per_epoch - done_before
+
+            # The epoch resumes where it stopped instead of starting over. `done_before`
+            # is zero on a fresh epoch, so this is the ordinary path too — there is no
+            # separate resume branch to get wrong.
+            train_loader = epoch_loader(
+                train_set, epoch, skip_batches=done_before, workers=workers,
+            )
+            if done_before:
+                print(
+                    f"[resnet] epoch {epoch} resumes at batch {done_before} of "
+                    f"{steps_per_epoch}: the {budget} batches the last attempt did not reach",
+                    flush=True,
+                )
+
             done_this_epoch = 0
 
             for images, labels in train_loader:
@@ -225,6 +292,12 @@ def main() -> None:
                             "loss": loss.item(),
                             "train_accuracy": batch_accuracy,
                             "lr": scheduler.get_last_lr()[0],
+                            # Which images this step actually trained on, as one number.
+                            # Cheap, and it is the only thing that makes "the resumed run
+                            # continued the epoch" checkable rather than asserted: two runs
+                            # from the same seed must report the same digest at the same
+                            # step, whether or not one of them was killed in the middle.
+                            "batch_digest": batch_digest(labels),
                             # Measured over this attempt only. A resumed run's rate is
                             # not (steps so far / seconds since this process started),
                             # which would report a speed nothing ever ran at.
@@ -349,13 +422,21 @@ def restore(run, model, optimizer, scheduler, device, caveats, steps_per_epoch):
 
     `(0, 0)` on a first attempt, which is every attempt that was not retried.
 
-    What is restored is the model, the optimizer's moments and the learning-rate
-    schedule. What is **not** restored is the position in the shuffled training set: the
-    resumed epoch runs the number of batches it had left, drawn fresh, rather than the
-    exact images the killed attempt had not reached. Replaying those would mean
-    checkpointing the sampler's state and the RNG alongside the weights, and this run
-    does not, so the honest thing is to say so — it goes in the caveats, which travel
-    with every artifact the resumed attempt produces.
+    Restored: the model, the optimizer's moments, the learning-rate schedule, and — since
+    `epoch_order` derives each epoch's permutation from `(SEED, epoch)` rather than
+    drawing one — the position in the training set. The resumed epoch runs the exact
+    images the killed attempt had not reached, in the order it would have reached them.
+
+    That last one used to be a caveat on every artifact a resumed run produced, and it is
+    worth saying why it mattered. Redrawing the remainder trains twice on some images and
+    never on others, which is invisible: the loss curve is smooth, the accuracy is
+    plausible, and the only symptom is that the run is no longer the run its experiment
+    record describes. The `batch_digest` metric is what makes the fix checkable — two runs
+    from one seed report the same digest at the same step, interrupted or not.
+
+    The schedule is still checked for, because a checkpoint written by an older build may
+    not carry one, and a resumed run following a different learning-rate curve is exactly
+    the kind of wrongness nothing else reports.
     """
     path = run.fetch_resume()
     if path is None:
@@ -387,10 +468,13 @@ def restore(run, model, optimizer, scheduler, device, caveats, steps_per_epoch):
         + ("" if "scheduler" in state else " (no schedule in checkpoint; it restarts)"),
         flush=True,
     )
+    # Still recorded, because a resumed run is a fact about how this model was produced
+    # even when nothing was lost by it — but no longer a warning about the data order,
+    # which is now replayed exactly.
     added = [
-        f"resumed from a checkpoint at step {step} after an interruption; the resumed "
-        "epoch's remaining batches were drawn fresh rather than replayed, so the data "
-        "order differs from an uninterrupted run"
+        f"resumed from a checkpoint at step {step} after an interruption; the data order, "
+        "optimizer state and learning-rate schedule were restored, so this is the same "
+        "run continued rather than a second one"
     ]
     if "scheduler" not in state:
         added.append(

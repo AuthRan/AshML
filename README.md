@@ -253,7 +253,7 @@ back as a second attempt that starts where the first one stopped:
 
 ```bash
 make chaos-resume          # kills a training pod; asserts the retry resumes from step N
-make chaos-resume-resnet   # the same, against ResNet-18: weights, optimizer, schedule
+make chaos-resume-resnet   # the same, on ResNet-18: weights, optimizer, schedule, data order
 make chaos-serving         # kills the pod behind a live deployment
 make chaos-restart         # SIGKILLs the control plane itself, mid-run
 ```
@@ -281,6 +281,15 @@ with ashml.init() as run:
     if resume:
         state = torch.load(resume, weights_only=True)
 ```
+
+**The data order is restored too**, and getting that wrong is the quiet kind of wrong.
+A resumed epoch used to run the number of batches it had left, drawn fresh — training
+twice on some images and never on others, with a smooth loss curve and a plausible
+accuracy as the only evidence. The fix is not to checkpoint the sampler: each epoch's
+permutation is *derived* from `(seed, epoch)`, so resuming is slicing that order at the
+batch the last attempt reached, and a fresh epoch is the same code path with an offset of
+zero. `make chaos-resume-resnet` proves it against a reference run from the same seed that
+was never killed — every logged step's `batch_digest` matches, on both sides of the kill.
 
 `chaos-restart` checks the claim the other three rest on: **AshML keeps no state that
 exists only in its own process**. Across a 12-second outage the training pod did not

@@ -655,11 +655,24 @@ rate itself, across the kill —
 — steps 0 and 5 from the killed attempt, 10 onwards from the resumed one, and one
 OneCycle rather than two. A restarted schedule would repeat `.0059` at step 10.
 
-What is **not** restored is the position in the shuffled training set. The resumed epoch
-runs the batches it had left, drawn fresh, rather than the exact images the killed attempt
-had not reached; replaying those needs the sampler and RNG state checkpointed alongside
-the weights. So the run says so, in its own logs and in the caveat metadata attached to
-every artifact the resumed attempt produces.
+The position in the training set is restored too, and it was not always. A resumed epoch
+used to run the number of batches it had left, *drawn fresh* — training twice on some
+images and never on others. Nothing shows that: the loss curve is smooth, the accuracy is
+plausible, and the only consequence is that the run stops being the run its experiment
+record describes. It was a caveat on every artifact a resumed attempt produced, which was
+honest and was not a fix.
+
+The fix is not to checkpoint the sampler. Each epoch's permutation is **derived** from
+`(seed, epoch)` rather than drawn, so epoch 3 has one order on every attempt and on every
+machine, and resuming is a matter of slicing that order at the batch the last attempt
+reached. Nothing version-specific goes into the checkpoint, there is no separate resume
+branch — a fresh epoch is the same code path with an offset of zero — and the property
+holds for a run interrupted five times as readily as for one interrupted once.
+
+What makes it checkable rather than asserted is `batch_digest`, a position-weighted
+fingerprint of each logged step's batch. Two runs from one seed report the same digest at
+the same step whether or not one of them was killed, which is a thing a script can compare
+and `make chaos-resume-resnet` now does.
 
 One defect the first chaos run exposed, because it is the kind only a real kill finds. The
 first attempt's metrics for steps 0–14 existed nowhere: the SDK batches points, the pod
@@ -679,7 +692,7 @@ because a script that calls the recovery path proves the recovery path can be ca
 | `make …` | breaks | must survive |
 |---|---|---|
 | `chaos-resume` | the training pod, mid-run | the retry resumes from the last confirmed checkpoint (10/10) |
-| `chaos-resume-resnet` | the same, on ResNet-18 | weights, optimizer *and* schedule restored (10/10) |
+| `chaos-resume-resnet` | the same, on ResNet-18 | weights, optimizer, schedule *and* data order restored (11/11) |
 | `chaos-serving` | the pod behind a live deployment | DEGRADED reported, then the same model back, to the digit (6/6) |
 | `chaos-restart` | the control plane itself, SIGKILL | the pod keeps training; the record comes back identical (6/6) |
 
@@ -799,9 +812,6 @@ report nothing. `make cluster-dns-check` asks a Pod; `make cluster-dns` restores
   traffic at any volume, need a gateway.
 - **Autoscaling.** Replicas are what was asked for. Scaling on load needs the metrics
   that arrive later in this phase.
-- **Resuming the data order.** Covered above: a resumed epoch redraws its remaining
-  batches rather than replaying them. Fixing it means checkpointing the sampler and RNG
-  state, which is worth doing when a run is long enough for the difference to matter.
 - **GPU-unhealthy handling.** The retry classifier has no category for it, because this
   cluster cannot produce one: no device reaches a k3d node (ADR 0008), so a job never
   fails for a reason a GPU could cause. Writing the pattern blind would be a guess about
