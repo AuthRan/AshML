@@ -218,6 +218,31 @@ split is bad and an outage is worse, and neither is improved by being silent.
 
 [ADR 0011](docs/adr/0011-a-router-only-when-there-is-a-choice.md) has the rest.
 
+**Proven against real pods**, not against a simulated cluster: `make e2e-rollout` trains two
+versions, deploys one, canaries the other at 10% and then 50%, promotes, rolls back, and
+retires — measuring the split from live traffic through the deployment's own address. In
+the run recorded here a 10% canary took 13.0% of 400 requests and a 50% split took 52.0%,
+every response's `X-AshML-Served-By` matched the artifact id the answering pod
+independently reported having loaded, and the address kept one ClusterIP through all of it.
+The tolerance is four binomial sigmas computed from the sample size rather than a number
+chosen to fit, because asserting an exact percentage would be asserting that a random
+router is not random.
+
+Running it is what found the two defects below, and neither was reachable from any test
+that did not send a real request to a real address:
+
+- **The front Service targeted the model server's port in both of its states.** The moment
+  the address moved onto the router, every request through it was refused — by a router
+  that was running, ready, and listening one port away. Nothing reported it: the pods were
+  ready and AshML said `READY`. It now targets the port by *name*, which both containers
+  declare, so the port follows the selector by construction rather than by anyone
+  remembering to move it.
+- **`ash deployment rollout --version 2` printed `0.1.0` and exited 0.** Commander matched
+  the program's own `--version` before the subcommand's, so the rollout never happened and
+  the shell saw success — for all three of `rollout`, `promote` and `retire`, which is
+  every version-shifting command there is. The program now uses positional options, and
+  `packages/cli/src/cli.test.js` runs the real binary to keep it that way.
+
 ### Surviving a killed pod
 
 A job with `max_retries` above zero, whose failure a retry could plausibly survive, comes
@@ -325,7 +350,14 @@ npm start            # start the control plane (API + executor)
 `make e2e` runs the whole path against the real cluster — submit, run, log, fail,
 cancel — and cross-checks every assertion with `kubectl`. `make e2e-scheduler` overfills
 the cluster and asserts that jobs queue, run only as capacity allows, and land on the
-node AshML actually chose.
+node AshML actually chose. `make e2e-rollout` trains two versions of one model and puts
+live traffic through a canary, measuring the split from the responses.
+
+All three pin the cluster they talk to (`ASHML_KUBECONFIG_CONTEXT`, the same variable the
+control plane takes) rather than following `kubectl`'s `current-context`, which belongs to
+whoever last ran `kubectl config use-context`. On a workstation with two clusters that is
+the difference between asserting against the cluster under test and asserting against
+someone else's.
 
 Then, in another shell:
 

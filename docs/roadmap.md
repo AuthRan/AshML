@@ -277,7 +277,8 @@ Spec milestones 8, 9, 10.
 - ~~`ash model deploy` → inference Deployment + Service, health/readiness probes~~ **done**
 - ~~`ash predict` → the §50 journey's step 7, answered by a real pod~~ **done**
 - ~~Model router (own Fastify service) with weighted version routing~~ **done** —
-  `packages/router/`, and [ADR 0011](adr/0011-a-router-only-when-there-is-a-choice.md)
+  `packages/router/`, [ADR 0011](adr/0011-a-router-only-when-there-is-a-choice.md), and
+  `make e2e-rollout`, which measures the split against real pods
 - ~~Prometheus + Grafana~~ **done** — `deploy/observability/`; DCGM-exporter, Loki and
   OTel traces are deferred, see below
 - ~~Dashboards: cluster/GPU, job pipeline, training curves, inference latency~~ **done** —
@@ -443,6 +444,58 @@ it does beyond forwarding:
 A version at weight 0 keeps its objects at zero replicas, so a rollback is a weight change
 and a scale-up rather than an image pull. `ash deployment retire` removes one for good, and
 is refused while it takes traffic or while the address still resolves to it.
+
+### Routing, as run — and the two things a simulated cluster could not have found
+
+All of the above shipped with 68 tests behind it, and none of them had sent a request to a
+real address. `make e2e-rollout` does: it trains two versions, deploys one, canaries the
+other at 10% and then 50%, promotes, rolls back and retires, sampling the split from live
+traffic through the deployment's own Service. In the recorded run a 10% canary took 13.0%
+of 400 requests and a 50% split took 52.0%, and the address kept one ClusterIP from the
+first deploy to the last retire.
+
+The tolerance is four binomial sigmas computed from the sample size rather than a number
+chosen to fit, so raising `ROLLOUT_SAMPLES` tightens the test instead of leaving a band
+that passes whatever happens. Each sample asks `/metadata`, so every response carries two
+independent accounts of where it went — the router's `X-AshML-Served-By` and the pod's own
+statement of which artifact it loaded — and the check is that they agree. A router
+attributing requests to the wrong version satisfies either one alone.
+
+Running it found two defects, and the shape of both is the same: everything AshML could
+see said `READY`.
+
+**The front Service targeted a port by number, and it has two kinds of backend.** It
+selects a model server on `SERVING_PORT` while one version takes traffic and the router on
+`ROUTER_PORT` the moment two do — and it named the model server's port in both branches.
+So the instant the address moved onto the router, every request through it was refused, by
+a router that was running, ready, and listening one port away. Both pods were ready, both
+router replicas were passing their probes on the port they were actually serving, the
+deployment was `READY` — and the address answered `ECONNREFUSED`. The fix is to target the port by
+*name*: both containers declare `http`, a name resolves against whichever pod the selector
+found, and the port now follows the selector by construction rather than by anyone
+remembering to move it.
+
+**`ash deployment rollout --version 2` printed `0.1.0` and exited 0.** Commander recognises
+the program's own options after a subcommand too, so the program's `--version` matched
+before the subcommand's. The rollout never happened and the shell saw success — which is
+the worst possible failure for a command that scripts wrap. It hit `rollout`, `promote` and
+`retire`: every version-shifting command the CLI has, and the exact form written in §21, in
+this document and in the README. `enablePositionalOptions()` makes an option belong to the
+command it follows; the cost is that `--endpoint` must now precede the subcommand, where
+after one it is an error rather than a silent misparse.
+
+That is the argument for this script in one line. The rollout logic was tested from both
+ends and was correct; what was broken was the request it made of Kubernetes and the
+arguments it accepted from a person, and only running it touches either.
+
+A third, smaller thing came out of the same session: the e2e and chaos scripts all called
+bare `kubectl`, which follows `current-context` — a global setting owned by whoever last
+ran `kubectl config use-context`. On the development host that was a different cluster
+entirely. An e2e run would have asserted against one cluster while driving another, and
+`chaos-resume` and `chaos-serving` would have deleted a pod in it. They now share
+`scripts/lib/kubectl.mjs`, which reads the same `ASHML_KUBECONFIG_CONTEXT` the control
+plane takes, so a script that starts a control plane cannot point the two halves of its own
+test at different clusters.
 
 ### Recovery, as built
 

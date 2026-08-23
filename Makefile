@@ -162,6 +162,14 @@ e2e: ## End-to-end: submit a job, run it on k3d, assert it SUCCEEDED
 e2e-scheduler: ## End-to-end: overfill the cluster, assert queueing and placement
 	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/e2e-scheduler.mjs
 
+.PHONY: e2e-rollout
+e2e-rollout: ## End-to-end: a 10% canary against real pods, and measure the split
+	# Needs a control plane already running with its deployment sync loop, and the three
+	# images (`make resnet-image model-server-image router-image`). It trains the two
+	# versions it rolls out -- minutes, not seconds -- because two versions made by hand
+	# are a test of a hand-made setup. Pins the cluster the same way every target here does.
+	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/e2e-rollout.mjs
+
 .PHONY: chaos-resume
 chaos-resume: ## Chaos: kill a training pod, assert the retry resumes from its checkpoint
 	# Needs a control plane that is already *running* and reachable from a pod, because
