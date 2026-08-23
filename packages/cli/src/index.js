@@ -310,6 +310,7 @@ job
   .command('submit <file>')
   .description('Submit a training job from a YAML or JSON file')
   .option('--experiment <id>', 'attribute this run to an experiment, overriding the manifest')
+  .option('-p, --project <name>', 'submit into this project, overriding the manifest')
   .option('--json', 'emit raw JSON')
   .action(async (file, opts) => {
     const raw = await readFile(file, 'utf8');
@@ -321,6 +322,15 @@ job
     }
 
     if (opts.experiment) manifest.experiment = opts.experiment;
+    // The same override `--experiment` already gets, for the same reason. A manifest
+    // names a project, which makes it a description of one run rather than of a workload:
+    // the file that trains this model in `vision` is the file that should train it in
+    // staging, or in a throwaway project a test can clean up. Without this the only way
+    // to move one is to edit it, and an example file edited in place stops being the
+    // example. `$ASHML_PROJECT` deliberately does *not* apply here — an environment
+    // variable silently redirecting a submitted training run is a surprise nobody wants,
+    // so overriding a manifest stays something you type.
+    if (opts.project) manifest.project = opts.project;
 
     const submitted = await api(endpoint(), '/api/v1/jobs', { method: 'POST', body: manifest });
     output(opts, submitted, (j) => {

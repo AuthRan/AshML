@@ -75,6 +75,19 @@ describe('the CLI parses the arguments it documents', () => {
     assert.match(out, /^\d+\.\d+\.\d+/, 'the program keeps its own --version');
   });
 
+  test('`ash job submit --project` is accepted, and overrides the manifest', async () => {
+    // The override the §50 journey needs: an example manifest names `project: vision`,
+    // and the same file has to be submittable into a throwaway project. Reaching the API
+    // is all this can check from here — that the option parsed and the action ran; that
+    // it actually *lands* in the named project is asserted by `make journey`, whose
+    // step 2 fails with EXPERIMENT_PROJECT_MISMATCH if the manifest wins.
+    const { code, out } = await ash(
+      'job', 'submit', 'examples/training/sdk-smoke.yaml', '--project', 'somewhere-else',
+    );
+    assert.match(out, /cannot reach AshML/, `unexpected output: ${JSON.stringify(out)}`);
+    assert.notEqual(code, 0);
+  });
+
   test('a missing required option is refused rather than defaulted', async () => {
     // `--traffic` decides how much live traffic moves. Guessing a value for it is the
     // one thing worse than refusing.
