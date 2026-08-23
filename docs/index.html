@@ -364,6 +364,13 @@ confidence:  81.5%
       <code>deploy/images/model-server/serve.py</code>, the same file the cluster deploys —
       against the artifact this repository's training run produced. What you get there is a
       real forward pass through the trained weights, attributed to a model version.</p>
+      <p>It serves <b>its own artifact and its own number</b> — <code>resnet18-cifar10</code>
+      v1 from artifact <code>519cecd1</code>, one epoch, <b>64.28%</b> top-1 — not the
+      65.59% run described above. Those are two separate one-epoch runs, and neither is
+      rounded toward the other. <code>make space-verify</code> re-evaluates the shipped
+      weights over all 10 000 test images inside the serving image and has to reproduce
+      <code>0.6428</code> / <code>0.9933</code>, which is what AshML recorded for that
+      artifact.</p>
       <p>It is <b>not</b> the control plane. The scheduler, the executor and the REST API
       need a Kubernetes cluster, PostgreSQL and an object store; and the API is
       unauthenticated until Phase 10, so it is deliberately not something to put on a public
