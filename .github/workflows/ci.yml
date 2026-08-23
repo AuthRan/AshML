@@ -57,21 +57,6 @@ jobs:
           --health-timeout 5s
           --health-retries 20
 
-      # The artifact tests skip without a bucket rather than substituting a fake, because
-      # "did these bytes actually land" is the one question a fake store cannot answer
-      # (spec Rule 5). Giving CI a real one is what stops that skip becoming permanent.
-      minio:
-        image: bitnami/minio:latest
-        env:
-          MINIO_ROOT_USER: ashml
-          MINIO_ROOT_PASSWORD: ashml-dev-secret
-        ports: ['9000:9000']
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-
     env:
       # The dedicated test database, which the suite wipes. `test-support/db.js` refuses
       # to run against a database whose name does not say it is for testing, so this name
@@ -92,6 +77,40 @@ jobs:
       # `ci` rather than `install`: the lockfile is the input, and a run that silently
       # resolved a different tree from the one committed is testing something else.
       - run: npm ci
+
+      # The artifact tests skip without a bucket rather than substituting a fake, because
+      # "did these bytes actually land" is the one question a fake store cannot answer
+      # (spec Rule 5). Giving CI a real one is what stops that skip becoming permanent.
+      #
+      # `docker run`, not a `services:` entry, and the reason is the same one that made
+      # the first version of this file wrong. MinIO needs an argument -- `server /data` --
+      # and a service container has nowhere to put one: it can override the environment
+      # and the entrypoint flags, never the command. The original way round that was
+      # `bitnami/minio`, which reads its configuration from the environment and needs no
+      # argument; then Bitnami withdrew its public Docker Hub tags and `latest` stopped
+      # resolving, which is how a workflow that had never had a remote to run on failed
+      # on its first push. So this uses the same image as
+      # `deploy/local/docker-compose.yml` -- one artifact store definition for the
+      # workstation and for CI, rather than two that can drift apart quietly.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=ashml \
+            -e MINIO_ROOT_PASSWORD=ashml-dev-secret \
+            minio/minio:latest server /data
+          # Wait for it rather than assuming: the artifact suites' first act is to create
+          # a bucket, and a store that is listening but not serving yet fails in a way
+          # that reads like a credentials problem.
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1; then
+              echo "minio ready after ${i} attempt(s)"; exit 0
+            fi
+            sleep 2
+          done
+          echo "minio never became ready" >&2
+          docker logs minio >&2 || true
+          exit 1
 
       - name: Create and migrate the test database
         run: |
