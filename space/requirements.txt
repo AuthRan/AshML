@@ -1,0 +1,10 @@
+# The same wheels the trainer and model-server images install, and pinned for the same
+# reason they are there: serving a model on a different torch build than it was trained
+# on is a difference nothing in the pipeline would report. The CPU index keeps the image
+# to something a free Space can actually build -- the default PyPI wheel carries CUDA.
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
+gradio==5.14.0
+pillow

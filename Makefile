@@ -119,6 +119,34 @@ router-image: ## Build the model router image and load it into the cluster
 	docker build -t $(ROUTER_IMAGE) -f deploy/images/router/Dockerfile .
 	k3d image import $(ROUTER_IMAGE) -c $(CLUSTER)
 
+# ------------------------------------------------------------------ demo Space
+
+# The public demo is the *serving* slice of this platform and nothing more: the same
+# `serve.py` a Deployment runs, loading a model version this control plane registered.
+# The control plane itself is not deployable to a public URL -- it creates Kubernetes
+# Jobs and has no authentication until Phase 10 -- and the Space's README says so rather
+# than letting a live link imply otherwise.
+
+SPACE_PROJECT ?= ashml-demo
+SPACE_MODEL   ?= resnet18-cifar10
+
+.PHONY: space
+space: ## Assemble space/ from the PRODUCTION version of $(SPACE_MODEL)
+	# Refuses to build around an artifact AshML did not verify: a demo is the last place
+	# an unconfirmed checkpoint would be noticed.
+	node scripts/build-space.mjs --project $(SPACE_PROJECT) --model $(SPACE_MODEL)
+
+.PHONY: space-verify
+space-verify: ## Re-evaluate space/model.pt over the full CIFAR-10 test set
+	# Inside the serving image, on the pinned torch, through the same normalisation the
+	# pod applies. It has to reproduce the accuracy recorded for the artifact -- if it
+	# does not, the Space is serving something other than the model that was evaluated,
+	# which is exactly what the provenance chain exists to catch.
+	docker run --rm --entrypoint python -e ASHML_MAX_BATCH=500 \
+		-v "$(PWD)/space:/space:ro" -v "$(PWD)/$(DATA_DIR):/data:ro" \
+		-v "$(PWD)/scripts:/scripts:ro" \
+		$(SERVER_IMAGE) /scripts/verify-space.py
+
 # ------------------------------------------------------------------ database
 
 .PHONY: db-up

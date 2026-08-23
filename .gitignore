@@ -15,3 +15,12 @@ venv/
 # Local data
 data/
 checkpoints/
+
+# Hugging Face Space payload — built by `make space`, never committed.
+# `model.pt` is 45 MB of weights that belong in the artifact store, `serve.py` is a copy
+# of the model server (the original is the one under version control), and provenance
+# and examples are generated from whichever version is PRODUCTION at the time.
+space/model.pt
+space/serve.py
+space/provenance.json
+space/examples/
