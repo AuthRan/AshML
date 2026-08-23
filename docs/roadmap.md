@@ -18,7 +18,13 @@ of at month nine.
 ## Phase 0 — Foundation *(complete)*
 
 **Deliverables**
-- Repository, npm workspaces, CI skeleton, lint config
+- Repository, npm workspaces, ~~CI skeleton, lint config~~ — **these two were listed here
+  and never existed.** Found while auditing what was left at the end of v1; there was no
+  `.github/` at all and no lint config of any kind, so for five phases `npm test` was run
+  by whoever remembered to. Both are in now — `.github/workflows/ci.yml` and
+  `eslint.config.js` — and they are recorded here as arriving late rather than quietly
+  ticked off, because a plan that marks undone work as done is worse than one that leaves
+  it open
 - Architecture document and ADRs 0001–0006
 - PostgreSQL schema (`db/migrations/0001_init.sql`)
 - OpenAPI v1 specification (`api/openapi.yaml`)
@@ -291,6 +297,38 @@ Spec milestones 8, 9, 10.
 **Exit criteria:** the full §50 user journey runs start to finish, including a killed
 pod recovering, with real numbers in `docs/benchmarks.md`. **Met** — `make journey`,
 below.
+
+### §49's dashboard, and what it is
+
+The spec asks for a web dashboard (§49) and immediately says not to spend months on a
+frontend, because "the backend and infrastructure are the project". No phase of this plan
+ever scheduled one, which left the question open rather than answered — so, answered now:
+**Grafana is the dashboard**, and the five things §49 lists are five dashboards' worth of
+panels rather than a bespoke UI.
+
+Checked against §49's own list rather than asserted:
+
+| §49 asks for | where it is |
+|---|---|
+| Cluster — nodes, GPUs, CPU, RAM | *Cluster & GPU*, including `ashml_gpu_visible` next to `ashml_gpu_schedulable` |
+| Jobs — queued, running, completed, failed | *Job pipeline*, by state, plus scheduling latency and the queue's oldest entry |
+| Experiments — loss, accuracy, duration | *Training curves*, read from PostgreSQL against the step the run reported (ADR 0010) |
+| Models — versions, status | *Models & deployments* — added for this, because the rest were counts |
+| Deployments | *Models & deployments*, and status counts on *Inference* |
+| Inference — requests, latency, errors | *Inference*, with the forward pass separated from the round trip |
+
+The Models row is the one that was genuinely missing, and it is worth saying why a count
+was not enough. Prometheus can export `ashml_model_versions{status="PRODUCTION"}` and does;
+what nobody actually asks is *how many* versions are in production, it is **which one, and
+were the bytes behind it ever confirmed**. That is a row, not a number, so it comes from
+PostgreSQL through the second datasource the training curves already use. The same table
+shows `address_resolves_to` beside the traffic split, because during a rollout those two
+disagree and the disagreement *is* the switch in progress.
+
+What is not built, and is not pretended: there is no AshML-branded web application, no
+click-through from a job to its logs, and no way to *operate* anything from a browser —
+Grafana reads, and every write stays in `ash` and the API. A read-only dashboard was the
+weaker half of §49's request and is the half worth having at this size.
 
 ### The journey, as run
 

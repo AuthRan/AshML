@@ -1,0 +1,393 @@
+{
+  "uid": "ashml-registry",
+  "title": "AshML \u2014 Models & deployments",
+  "tags": [
+    "ashml"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "description": "The spec's \u00a749 asks a dashboard to show models \u2014 their versions and status \u2014 and deployments. Prometheus can count those (`ashml_model_versions`, `ashml_deployments`) and a count is not the question anyone actually has, which is *which* version is in production and whether the bytes behind it were ever confirmed. So the two tables here come from PostgreSQL, the same second datasource the training curves use (ADR 0010), and the counts above them come from Prometheus.",
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Registry",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Versions in PRODUCTION",
+      "description": "At most one per model, enforced in the same transaction that promotes (Phase 4).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "sum(ashml_model_versions{status=\"PRODUCTION\"})",
+          "legendFormat": "{{status}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Versions in STAGING",
+      "description": "Where a displaced production version goes \u2014 the most likely rollback target, so it is not archived by the promotion that replaced it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "sum(ashml_model_versions{status=\"STAGING\"})",
+          "legendFormat": "{{status}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Deployments READY",
+      "description": "Observed from the cluster's readyReplicas, never assumed from having created the objects.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "sum(ashml_deployments{status=\"READY\"})",
+          "legendFormat": "{{status}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Deployments DEGRADED",
+      "description": "Was serving and is now short of replicas. Kept distinct from PROGRESSING, because one word for both hides an outage inside something that sounds like startup.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ashml-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ashml-prometheus"
+          },
+          "expr": "sum(ashml_deployments{status=\"DEGRADED\"})",
+          "legendFormat": "{{status}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Registered versions",
+      "description": "`bytes_confirmed` is the column worth reading. A version can only be registered from a READY artifact, and READY means AshML asked the store whether the bytes arrived \u2014 `NO` means they are stored somewhere it cannot check, not that they are missing. A registry entry pointing at unconfirmed bytes moves the discovery from \"the upload failed\" to \"production cannot load the model\".",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ashml-postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ashml-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT p.name                                   AS project,\n       m.name                                   AS model,\n       v.version                                AS version,\n       v.status                                 AS status,\n       coalesce(a.status, 'none')               AS artifact,\n       CASE\n         WHEN a.id IS NULL                          THEN 'no artifact'\n         WHEN (a.metadata->>'verified')::boolean    THEN 'yes'\n         WHEN a.metadata ? 'verified'               THEN 'NO'\n         ELSE 'unchecked'\n       END                                      AS bytes_confirmed,\n       left(coalesce(a.id::text, ''), 8)        AS artifact_id,\n       v.created_at                             AS registered,\n       v.promoted_at                            AS promoted\n  FROM model_versions v\n  JOIN models   m ON m.id = v.model_id\n  JOIN projects p ON p.id = m.project_id\n  LEFT JOIN artifacts a ON a.id = v.artifact_id\n ORDER BY p.name, m.name, v.version DESC"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Deployments",
+      "description": "`address_resolves_to` is what the front Service currently selects, which is not always what `split` asks for: the address only moves onto a version once that version has a ready pod, so during a rollout these two disagree and that disagreement is the switch in progress. Empty means the address is on the router, which is where it goes when more than one version takes traffic.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ashml-postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ashml-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT p.name                                    AS project,\n       d.name                                    AS deployment,\n       m.name                                    AS model,\n       d.status                                  AS status,\n       d.serving_version                         AS address_resolves_to,\n       d.ready_replicas || '/' || d.replicas     AS replicas,\n       coalesce(string_agg('v' || v.version || ' ' || t.traffic_weight || '%',\n                           '  ' ORDER BY v.version), '-')  AS split,\n       coalesce(d.router_status, '-')            AS router,\n       coalesce(d.last_error, '')                AS last_error,\n       d.endpoint_url                            AS endpoint\n  FROM deployments d\n  JOIN projects p ON p.id = d.project_id\n  JOIN models   m ON m.id = d.model_id\n  LEFT JOIN deployment_targets t ON t.deployment_id = d.id\n  LEFT JOIN model_versions     v ON v.id = t.model_version_id\n GROUP BY p.name, d.name, m.name, d.status, d.serving_version,\n          d.ready_replicas, d.replicas, d.router_status, d.last_error, d.endpoint_url\n ORDER BY p.name, d.name"
+        }
+      ]
+    }
+  ]
+}

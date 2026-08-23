@@ -596,11 +596,28 @@ make cluster-dns         # restores it (deploy/local/coredns-host-alias.yaml)
 ```bash
 make db-test          # once: create and migrate the dedicated test database
 npm test              # unit tests always; integration tests when that database is up
+npm run lint          # eslint
 npm run dev           # server with --watch
 npm run migrate up    # apply migrations
 npm run migrate down  # roll back one migration
 npm run openapi       # regenerate api/openapi.yaml after changing routes
 ```
+
+**CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the lint and the full
+suite on every push, with Postgres and MinIO as service containers — so the integration
+tests actually *run* there rather than skipping, and the job fails if they skip, because a
+skip and a pass look identical in a summary line. It does not run anything that needs
+Kubernetes: `make e2e`, `make e2e-rollout`, the chaos scripts and `make journey` drive a
+real cluster and stay a thing a person runs, rather than a green tick implying coverage
+that is not there.
+
+**Lint rules are chosen to catch defects, not to have opinions.** Every rule in
+[`eslint.config.js`](eslint.config.js) can fail on code that looks fine and is wrong, and
+none of them can fail on code that is right; formatting stays with the reviewer. The one
+that earns its place most is `require-atomic-updates`, which catches a read-modify-write
+straddling an `await` — the exact shape of the bug the executor and the deployment sync
+loop are written to avoid. It is switched off for `scripts/`, where the drivers are
+strictly sequential and it can only report false ones.
 
 Integration tests skip with a visible message when PostgreSQL is unreachable, rather
 than passing silently. They run against real Postgres, not a fake — the behaviour that
