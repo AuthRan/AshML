@@ -270,7 +270,7 @@ whether that version serves traffic.
 
 ---
 
-## Phase 5 — Serve, Observe, Recover *(current — weeks 11–12)*
+## Phase 5 — Serve, Observe, Recover *(complete)*
 
 Spec milestones 8, 9, 10.
 
@@ -289,7 +289,71 @@ Spec milestones 8, 9, 10.
   [`docs/benchmarks.md`](benchmarks.md), produced by `scripts/bench.mjs`
 
 **Exit criteria:** the full §50 user journey runs start to finish, including a killed
-pod recovering, with real numbers in `docs/benchmarks.md`.
+pod recovering, with real numbers in `docs/benchmarks.md`. **Met** — `make journey`,
+below.
+
+### The journey, as run
+
+`make journey` runs §50's nine steps in order, against one project, on the real cluster:
+create the project, submit a manifest, watch the scheduler place it, see metrics arrive
+from the running pod, register and promote what it produced, deploy it, ask it for
+predictions, check that everything the dashboards read is being exported, then kill the
+serving pod and a training worker and require both back.
+
+**It drives the CLI rather than the API**, which is the one place in this repo where that
+is the right choice. Every other script talks HTTP so that what is under test is the
+platform rather than the client; §50 is written entirely in `ash` commands, so here the
+question genuinely is whether a person can type them. The commit that fixed
+`ash deployment rollout --version 2` printing the client version and exiting 0 is the
+argument: every HTTP-level test in this repo was structurally unable to see it.
+
+What one run looks like, and every line of it is measured rather than asserted-into-being:
+
+| step | what it showed |
+|---|---|
+| 3 | `QUEUED -> STARTING -> RUNNING`, placed on `k3d-ashml-server-0`, and the Pod was on the node AshML chose — asked of the cluster, not of AshML |
+| 4 | four series arriving *while the job was still RUNNING*, loss 5.44 at step 10 |
+| 5 | 4 checkpoints, a verified model artifact, v1 promoted to PRODUCTION carrying the run's own metrics |
+| 7 | 3 of 8 real CIFAR-10 test images correct |
+| 8 | 41 series across 4 dashboards, all exported; GPUs visible 2, schedulable 0 |
+| 9 | `DEGRADED 0/1` with a reason, then the same artifact back on a new pod; a killed training pod resumed at step 15 from the checkpoint it was offered |
+
+Four decisions in it are worth naming, because each one is a place the script could have
+claimed more than it knows.
+
+**Step 3 says "GPU NODE SELECTED" in the spec and the journey says otherwise.** No GPU
+reaches a node here (ADR 0008), so the placement was made on CPU and the journey prints
+the scheduler's actual reason next to the spec's wording rather than reading the step as
+satisfied. It also prints only the states it *observed* — `SCHEDULING` usually falls
+between two polls — and asserts that what it saw advanced in the state machine's order,
+not that it caught every transition.
+
+**Step 7 prints the score and does not assert it.** The manifest bounds training to
+`MAX_STEPS`, so the model is undertrained by construction; a threshold here would be a
+threshold tuned until it passed. What is asserted is that the answers are well-formed,
+attributed to the deployed version, and came from the artifact the registry names — and
+that the pod's own account of what it loaded agrees with AshML's. 3/8 is what this model
+is, and the line says so.
+
+**Step 8 reads its list out of the dashboards.** `deploy/observability/dashboards/*.json`
+is scanned for every `ashml_*` series it queries, and each one must be exported. A
+hand-kept list drifts in the direction that hides the problem: rename a metric, update the
+exporter and the list, and the panel still asking for the old name renders "No data"
+forever with nobody's test failing. Four instruments that must have *moved* during the
+journey are checked separately, because a permanent zero reads as answered rather than as
+missing.
+
+**Step 10 is not run and the journey ends by saying so.** Ashcode is post-v1 (Phase 9).
+Both operations it would perform exist and are reachable by hand; nothing translates a
+sentence into them, and a scripted transcript pretending otherwise is what Rule 5 forbids.
+
+One defect in the journey itself is worth recording, because it is a trap anyone writing
+this kind of script walks into. The first version deleted the serving pod without
+`--force`, so the pod drained gracefully — staying Ready, and in the Service's endpoints,
+for its full termination grace period — while its replacement started. `readyReplicas`
+never reached zero, the outage being demonstrated never happened, and the script waited
+two minutes for a `DEGRADED` that had been true for no observable instant. A graceful
+delete is a rolling replacement; only `--grace-period=0 --force` is a kill.
 
 ### Serving, as built
 

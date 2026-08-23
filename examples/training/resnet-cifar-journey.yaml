@@ -1,0 +1,55 @@
+# The §50 journey's step 2, as `make journey` submits it.
+#
+# This is `resnet-cifar.yaml` with one change: MAX_STEPS bounds the run to a few dozen
+# steps instead of a full 390-step epoch. The journey is nine steps long and every one of
+# them is real, so the training has to be minutes rather than the eleven that a full epoch
+# takes on this host's CPUs — otherwise nobody runs it, and a proof nobody runs is not one.
+#
+# What that costs is stated wherever it matters rather than hidden: the run tags every
+# artifact it produces with `stopped at MAX_STEPS; the model is undertrained`, and the
+# journey prints the predictions it gets in step 7 next to the true labels, so the score
+# is visible instead of implied. **This manifest trains a model that is bad at CIFAR-10.**
+# It is the platform path that is under test here, not the model.
+#
+# For the recorded demo, point the journey at the real thing and wait:
+#
+#   JOURNEY_MANIFEST=examples/training/resnet-cifar.yaml make journey
+#
+# which is the 65.59%-top-1 run in the README, and changes nothing else about the journey.
+
+project: vision
+name: resnet-cifar
+
+priority: MEDIUM
+
+# The journey kills a training pod in step 9, and a retry budget of zero would make that
+# the end of the story rather than the recovery it is there to demonstrate. It is the
+# *second*, smaller job that gets killed — see scripts/journey.mjs — but a manifest that
+# refuses to be retried would be a strange thing to hand a demo either way.
+max_retries: 1
+
+resources:
+  cpu: 4
+  memory_bytes: 4294967296       # 4 GiB
+
+spec:
+  image: ashml/resnet-trainer:v1
+  command:
+    - python
+    - resnet_cifar.py
+  env:
+    EPOCHS: "1"
+    # Bounded, and the artifacts say so.
+    MAX_STEPS: "40"
+    # Two confirmed checkpoints inside the run, so "resume from the last one" is a real
+    # choice rather than a restart wearing a different name.
+    CHECKPOINT_EVERY: "10"
+    # The full 10 000-image test set costs more than the truncated training does; the
+    # number it produces would be a worse lie at 40 steps than a smaller sample is.
+    MAX_EVAL_BATCHES: "4"
+    BATCH_SIZE: "128"
+    LR: "0.1"
+    SEED: "1337"
+    LOG_EVERY: "10"
+    DATALOADER_WORKERS: "2"
+    OMP_NUM_THREADS: "4"

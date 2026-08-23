@@ -4,12 +4,15 @@ A Kubernetes-native GPU machine learning infrastructure platform — a miniature
 ML cloud. Register datasets, submit training jobs, schedule them onto GPU resources,
 track experiments, version models, deploy inference, and observe all of it.
 
-**Status: Phases 0–4 complete; Phase 5 (serve, observe, recover) in progress — model
-serving is done.** Projects, datasets, experiments and training jobs are persisted in
-PostgreSQL with an append-only event log and a `SKIP LOCKED` queue. Submitted jobs
-**actually run**: AshML's own scheduler decides whether a job may run and on which node,
-the executor creates the Kubernetes Job there, and job state is driven from observed Pod
-status through to `SUCCEEDED`, `FAILED` or `CANCELLED`.
+**Status: Phases 0–5 complete — this is v1.** The spec's §50 user journey runs start to
+finish on the real cluster (`make journey`, nine steps, including a killed pod
+recovering); what is deliberately *not* in v1 — Loki, tracing, Alertmanager, autoscaling,
+an ingress, and Ashcode — is listed with reasons in
+[`docs/roadmap.md`](docs/roadmap.md). Projects, datasets, experiments and training jobs
+are persisted in PostgreSQL with an append-only event log and a `SKIP LOCKED` queue.
+Submitted jobs **actually run**: AshML's own scheduler decides whether a job may run and
+on which node, the executor creates the Kubernetes Job there, and job state is driven from
+observed Pod status through to `SUCCEEDED`, `FAILED` or `CANCELLED`.
 
 Overfill the cluster and jobs queue rather than over-committing it; `ash job why <id>`
 prints every node the scheduler considered and what was wrong with it.
@@ -328,6 +331,47 @@ Measured numbers — API latency, scheduling latency, an inference batch-size sw
 ResNet run's own throughput — are in [`docs/benchmarks.md`](docs/benchmarks.md), produced
 by `make bench` rather than typed. There is no GPU figure in it, for the reason above.
 
+### The whole thing, in order
+
+The spec's §50 describes one user journey — create a project, submit training, watch it
+scheduled, see the metrics arrive, register and deploy what came out, ask it for a
+prediction, observe it, then break it. `make journey` runs all nine steps against the real
+cluster, in order, as one story:
+
+```bash
+make journey                 # ~8 minutes; leaves the deployment up so you can look at it
+```
+
+It drives the **`ash` CLI**, not the API, because §50 is written in `ash` commands and the
+question it answers is whether a person can type them. That is not a stylistic choice: the
+bug where `ash deployment rollout --version 2` printed the client version and exited 0 was
+invisible to every HTTP-level test here, and visible immediately to a script that runs the
+command.
+
+What one run reports, all of it measured:
+
+```
+Step 3   QUEUED -> STARTING -> RUNNING, placed on k3d-ashml-server-0
+Step 4   loss at step 10: 5.4429 (while the job is still RUNNING)
+Step 5   4 checkpoint(s), model artifact verified, v1 is PRODUCTION
+Step 7   3/8 correct on real CIFAR-10 test images
+Step 8   41 series across 4 dashboards, all exported
+Step 9   DEGRADED 0/1, then the same artifact back; a killed run resumed at step 15
+```
+
+Three things it refuses to round up. Step 3's "GPU NODE SELECTED" is printed next to the
+scheduler's real reason, because no GPU reaches a node here. Step 7's score is **printed
+and not asserted** — the journey's manifest bounds training to `MAX_STEPS`, so the model is
+undertrained on purpose and a passing threshold would be one tuned until it passed. And
+step 10, Ashcode, is not run: it is post-v1, and the journey ends by saying so rather than
+by showing a transcript.
+
+Point it at the full-epoch manifest for the recorded demo:
+
+```bash
+JOURNEY_MANIFEST=examples/training/resnet-cifar.yaml make journey
+```
+
 See [`docs/roadmap.md`](docs/roadmap.md) for the phase plan and
 [`docs/architecture/architecture.md`](docs/architecture/architecture.md) for the design.
 
@@ -351,9 +395,11 @@ npm start            # start the control plane (API + executor)
 cancel — and cross-checks every assertion with `kubectl`. `make e2e-scheduler` overfills
 the cluster and asserts that jobs queue, run only as capacity allows, and land on the
 node AshML actually chose. `make e2e-rollout` trains two versions of one model and puts
-live traffic through a canary, measuring the split from the responses.
+live traffic through a canary, measuring the split from the responses. `make journey` runs
+the spec's whole §50 user journey, all nine steps in order — the closest thing here to the
+demo itself.
 
-All three pin the cluster they talk to (`ASHML_KUBECONFIG_CONTEXT`, the same variable the
+All of them pin the cluster they talk to (`ASHML_KUBECONFIG_CONTEXT`, the same variable the
 control plane takes) rather than following `kubectl`'s `current-context`, which belongs to
 whoever last ran `kubectl config use-context`. On a workstation with two clusters that is
 the difference between asserting against the cluster under test and asserting against
@@ -445,7 +491,8 @@ db/migrations/     PostgreSQL schema
 api/openapi.yaml   generated from route schemas — do not hand-edit
 deploy/local/      docker-compose for Postgres + MinIO, and the CoreDNS host alias
 deploy/observability/  Prometheus, Grafana, and the dashboards as JSON
-examples/training/ job manifests
+examples/training/ job manifests, including the two `make journey` submits
+scripts/           e2e, chaos, benchmarks, and the §50 journey — all of them run for real
 docs/              architecture, roadmap, ADRs
 ```
 

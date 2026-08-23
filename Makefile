@@ -170,6 +170,16 @@ e2e-rollout: ## End-to-end: a 10% canary against real pods, and measure the spli
 	# are a test of a hand-made setup. Pins the cluster the same way every target here does.
 	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/e2e-rollout.mjs
 
+.PHONY: journey
+journey: ## The spec's §50 user journey, all nine steps, start to finish
+	# The Phase 5 exit criterion, and the closest thing here to the demo itself. Drives
+	# the `ash` CLI rather than the API, because §50 is written in `ash` commands and the
+	# question is whether a person can run them. Needs the cluster, all three images,
+	# `make cifar-png`, and a control plane reachable *from a pod* -- see the README's
+	# two addresses. Ten minutes or so; JOURNEY_MANIFEST=... points step 2 at the full
+	# epoch instead of the bounded one.
+	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/journey.mjs
+
 .PHONY: chaos-resume
 chaos-resume: ## Chaos: kill a training pod, assert the retry resumes from its checkpoint
 	# Needs a control plane that is already *running* and reachable from a pod, because

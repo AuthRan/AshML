@@ -1,0 +1,44 @@
+# The §50 journey's step 9, second half: a run submitted in order to be killed.
+#
+#   make journey        # submits this, kills its pod mid-run, and requires it back
+#
+# It differs from `sdk-smoke.yaml` in exactly two ways, and both are the point:
+#
+#   max_retries: 1            a retry budget of zero makes a killed pod the end of the
+#                             story rather than the recovery being demonstrated
+#   SMOKE_CHECKPOINT_EVERY    a retry can only resume from a checkpoint that exists, and
+#                             AshML only ever offers one it has confirmed in the store
+#
+# This trains nothing and says so, all the way to the artifact metadata (spec Rule 5). It
+# is here because the journey needs to kill a training worker in under a minute; the deep
+# version of this proof is `make chaos-resume-resnet`, which does it to ResNet-18 and
+# checks that the weights, the optimizer's moments *and* the learning-rate schedule all
+# came back — the third being the one that hides, since a run with a restarted schedule
+# trains, converges and looks healthy while following a different curve from the one its
+# experiment record claims.
+
+project: vision
+name: sdk-smoke-retry
+
+priority: MEDIUM
+
+# The whole reason this file exists.
+max_retries: 1
+
+resources:
+  cpu: 1
+  memory_bytes: 536870912   # 512 MiB
+
+spec:
+  image: ashml/trainer:v1
+  command:
+    - python
+    - sdk_smoke.py
+  env:
+    # Long enough to be killed in the middle of, short enough that the journey does not
+    # wait on it: the kill lands around step 15 and the resume finishes the rest.
+    SMOKE_STEPS: "40"
+    SMOKE_STEP_SECONDS: "0.5"
+    # Two confirmed checkpoints before the kill, so "resumed from the last one" is a
+    # statement about a specific step rather than about starting again.
+    SMOKE_CHECKPOINT_EVERY: "5"
