@@ -46,12 +46,20 @@ an ingress, and Ashcode — is listed with reasons in
 [`docs/roadmap.md`](docs/roadmap.md).
 
 > **On the live demo.** The Space above runs AshML's *own* inference server
-> (`deploy/images/model-server/serve.py`) against the artifact this repository's training
-> run produced, and every answer carries the model version and artifact id that served
-> it. It is the serving slice of the platform, not the platform: the scheduler, the
-> executor and the control-plane API need a Kubernetes cluster, and the API is
-> unauthenticated until Phase 10, so it is not something to put on a public URL. What
-> runs where is spelled out on the [project site](https://authran.github.io/AshML/).
+> (`deploy/images/model-server/serve.py`, imported rather than reimplemented) against an
+> artifact an AshML run produced, and every answer carries the model version and artifact
+> id that served it. It is the serving slice of the platform, not the platform: the
+> scheduler, the executor and the control-plane API need a Kubernetes cluster, and the
+> API is unauthenticated until Phase 10, so it is not something to put on a public URL.
+> What runs where is spelled out on the [project site](https://authran.github.io/AshML/).
+>
+> It serves **its own artifact and its own number** — `resnet18-cifar10` v1 from artifact
+> `519cecd1`, one epoch, **64.28%** top-1 — not the 65.59% run described below. Those are
+> two separate one-epoch runs and neither is rounded toward the other. `make
+> space-verify` re-evaluates the shipped weights over all 10 000 test images inside the
+> serving image and has to reproduce `0.6428` / `0.9933`, which is what AshML recorded
+> for that artifact; a demo whose weights cannot be tied back to a measured run is
+> exactly the thing the rest of this README is built to prevent.
 
 ## Contents
 
@@ -71,24 +79,24 @@ an ingress, and Ashcode — is listed with reasons in
 
 ```mermaid
 flowchart LR
-    CLI["<b>ash</b> CLI"] --> API
-    subgraph CP["AshML control plane (Node.js)"]
-        API["REST API<br/><i>routes → services → repos</i>"]
-        SCHED["<b>Scheduler</b><br/>quota · placement · why"]
-        EXEC["Executor<br/><i>polls Pod status</i>"]
+    CLI["ash CLI"] --> API
+    subgraph CP["AshML control plane · Node.js"]
+        API["REST API<br/>routes → services → repos"]
+        SCHED["Scheduler<br/>quota · placement · why"]
+        EXEC["Executor<br/>polls Pod status"]
         API --> SCHED --> EXEC
     end
-    CP --> PG[("PostgreSQL<br/>state · event log<br/>SKIP LOCKED queue")]
-    EXEC --> K8S["Kubernetes<br/><i>k3d</i>"]
-    K8S --> POD["Training Pod"]
+    EXEC --> K8S["Kubernetes<br/>k3d"]
+    K8S --> POD["Training Pod<br/>Python SDK"]
+    API --- PG[("PostgreSQL<br/>state · event log<br/>SKIP LOCKED queue")]
     POD -- "metrics, step by step" --> API
     POD -- "presigned upload" --> S3[("Object store<br/>MinIO / S3")]
-    API -- "HEAD: did the bytes land?" --> S3
-    S3 --> SRV["Model server<br/><i>artifact id → weights</i>"]
-    ROUTER["Router<br/><i>weighted split</i>"] --> SRV
-    PROM["Prometheus"] -.->|scrape /metrics| API
-    GRAF["Grafana"] -.-> PROM
-    GRAF -.->|training curves| PG
+    API -. "HEAD: did the bytes land?" .-> S3
+    S3 --> SRV["Model server<br/>artifact id → weights"]
+    ROUTER["Router<br/>weighted split"] --> SRV
+    PROM["Prometheus"] -. "scrape /metrics" .-> API
+    GRAF["Grafana"] --> PROM
+    GRAF -. "training curves, by step" .-> PG
 ```
 
 Dependencies flow one way: `routes → services → repos → db`, with `domain` — the job
