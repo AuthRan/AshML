@@ -28,3 +28,9 @@ space/static/model.onnx
 space/static/provenance.json
 space/static/onnx-verification.json
 space/static/examples/
+
+# Resume — personal, kept in the working tree for convenience, never published.
+# Glob rather than one filename: this is a public repository and these files carry a
+# phone number and a home address, so a variant saved under a new name must not be one
+# `git add -A` away from being published.
+resume*.txt
