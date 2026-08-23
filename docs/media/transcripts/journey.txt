@@ -1,0 +1,88 @@
+@@cmd@@$ make journey
+
+@@dim@@AshML — the §50 Core User Journey, run start to finish
+@@dim@@  cluster: k3d-ashml   project: vision-3h11r5
+
+@@head@@Step 1 — Create project
+@@dim@@      vision-3h11r5 created
+@@ok@@  ok    (0.3s)@@pause@@
+
+@@head@@Step 2 — Submit training
+@@dim@@      examples/training/resnet-cifar-journey.yaml submitted as
+@@dim@@        2a3a899a-3243-4b11-836c-42db93cae4d0
+@@dim@@      pinned to cifar10:v1 (3cd73f51), seed 1337, commit 217cd09
+@@ok@@  ok    (0.7s)@@pause@@
+
+@@head@@Step 3 — Scheduler processes the job
+@@dim@@      observed: QUEUED -> STARTING -> RUNNING
+@@dim@@      placed on k3d-ashml-server-0; Kubernetes Job ashml-resnet-cifar-2a3a899a-0
+@@dim@@      why: node k3d-ashml-server-0 selected; CPU-only job kept off GPU nodes; 4 of 7 free CPU;
+@@dim@@        best fit of 2 candidates
+@@dim@@      (the spec says GPU NODE SELECTED. This host has 2 GPU(s) and no device plugin, so no GPU
+@@dim@@        reaches a node — ADR 0008 — and the choice above was made on CPU. The scheduler path is
+@@dim@@        identical either way.)
+@@ok@@  ok    (6.9s)@@pause@@
+
+@@head@@Step 4 — Training runs, and reports its own metrics
+@@dim@@      loss, lr, steps_per_second, train_accuracy arriving from the pod
+@@dim@@      loss at step 10: 5.4429 (while the job is still RUNNING — the run pushes, nothing polls
+@@dim@@        it)
+@@ok@@  ok    (50.4s)@@pause@@
+
+@@head@@Step 5 — Training completes: checkpoint, artifact storage, model registry
+@@dim@@      state path: QUEUED -> STARTING -> RUNNING -> SUCCEEDED
+@@dim@@      4 checkpoint(s), model artifact be2c954a (verified)
+@@dim@@      resnet18-cifar10 v1 is PRODUCTION, val_accuracy 0.2109
+@@dim@@      caveat: trained on CPU; timings are not comparable to a GPU run
+@@dim@@      caveat: stopped at MAX_STEPS=40; the model is undertrained
+@@dim@@      caveat: evaluated on 4 batches, not the full test set
+@@ok@@  ok    (59.8s)@@pause@@
+
+@@head@@Step 6 — Deploy the model
+@@dim@@      resnet18-cifar10 serving v1 at http://ashml-svc-resnet18-cifar10-386f952d.ashml-
+@@dim@@        jobs.svc.cluster.local
+@@ok@@  ok    (19.4s)@@pause@@
+
+@@head@@Step 7 — Inference
+@@dim@@      8 real CIFAR-10 test images, served by v1
+@@dim@@        cat         -> dog         17.0%  wrong
+@@dim@@        ship        -> airplane    30.5%  wrong
+@@dim@@        ship        -> airplane    46.6%  wrong
+@@dim@@        airplane    -> airplane    39.0%  ok
+@@dim@@        frog        -> frog        28.5%  ok
+@@dim@@        frog        -> frog        20.0%  ok
+@@dim@@        automobile  -> airplane    20.9%  wrong
+@@dim@@        frog        -> deer        28.0%  wrong
+@@dim@@      3/8 correct — see the manifest: this run is truncated on purpose, and a demo scoring 8/8
+@@dim@@        would be hiding that
+@@ok@@  ok    (0.8s)@@pause@@
+
+@@head@@Step 8 — Observe
+@@dim@@      41 series across 4 dashboards, all exported
+@@dim@@      jobs 32, replicas ready 1, predictions 5 over 33 instances
+@@dim@@      GPUs visible 2, schedulable 0 — both true on this host, and either one alone is a lie
+@@dim@@        about it (ADR 0008)
+@@dim@@      training curve: 4 loss points, read from PostgreSQL by step, not scraped
+@@dim@@      Prometheus and Grafana are deployed (2 pods); `make grafana` renders these series. Not
+@@dim@@        asserted: the panels themselves.
+@@ok@@  ok    (0.3s)@@pause@@
+
+@@head@@Step 9 — Failure: kill the inference pod, then a training worker
+@@dim@@      killed serving pod ashml-svc-resnet18-cifar10-386f952d-v1-5564d97849-ntxrp
+@@dim@@      AshML reports DEGRADED 0/1: the deployment's address is not answering; v1 is DEGRADED: pod
+@@dim@@        ashml-svc-resnet18-cifar10-386f952d-v1-5564d97849-d6mzn is running but has not become
+@@dim@@        ready; ask the pod itself (/readyz) or read its logs
+@@dim@@      replaced by ashml-svc-resnet18-cifar10-386f952d-v1-5564d97849-d6mzn, READY again, same
+@@dim@@        artifact be2c954a
+@@dim@@      submitted sdk-smoke-retry (64032dbc) to be killed mid-run
+@@dim@@      killed training pod ashml-sdk-smoke-retry-64032dbc-0-8kz6g with a checkpoint confirmed at
+@@dim@@        step 10
+@@dim@@      attempt 1 running as ashml-sdk-smoke-retry-64032dbc-1, offered checkpoint at step 15
+@@dim@@      resumed and finished: SUCCEEDED on attempt 1
+@@dim@@      the run's own words: resuming from artifact 97950eb0-2c65-4492-a954-1bc98d9d0cac at step
+@@dim@@        15 of 40
+@@dim@@      (the deep version of this is `make chaos-resume-resnet`: weights, optimizer and learning-
+@@dim@@        rate schedule across a kill, on the real workload)
+@@ok@@  ok    (56.7s)@@pause@@
+
+@@ok@@9/9 steps completed

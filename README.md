@@ -71,6 +71,78 @@ an ingress, and Ashcode — is listed with reasons in
 > for that artifact; a demo whose weights cannot be tied back to a measured run is
 > exactly the thing the rest of this README is built to prevent.
 
+## See it run
+
+Four recordings, all of real runs against the real cluster. The terminal ones are rendered
+from the captured output of the command shown, so nothing in them is retyped; the dashboard
+one is this machine's Chrome pointed at a live control plane.
+
+### The whole platform, in one command
+
+![make journey](docs/media/journey.gif)
+
+> **What this is.** `make journey` — the spec's §50 user journey, nine steps in order
+> against a real k3d cluster: create a project, submit training, watch AshML's own
+> scheduler place it, see metrics arrive *while the pod is still running*, register and
+> promote what came out, deploy it, ask it for predictions, check the dashboards' series,
+> then kill the serving pod and a training worker and require both back. It drives the
+> `ash` CLI, not the API, because §50 is written in `ash` commands and the question is
+> whether a person can type them.
+>
+> Step 7 scores **3/8** on real CIFAR-10 test images and the run says so. The journey's
+> manifest bounds training with `MAX_STEPS`, so that model is undertrained by
+> construction — a demo scoring 8/8 would be hiding it. Step 3 prints the scheduler's
+> actual reason next to the spec's "GPU NODE SELECTED", because no GPU reaches a node on
+> this host. Step 10 is Ashcode, and the run ends by saying it was **not** run: it is
+> post-v1, and a scripted transcript pretending otherwise is what Rule 5 forbids.
+
+### The dashboard, live
+
+![the AshML dashboard](docs/media/dashboard.gif)
+
+> **What this is.** The control plane's own page at `/` — not Grafana — refreshing every
+> five seconds while two training jobs actually run. Watch the curve extend, the ages
+> tick, and `CPU committed` move as the scheduler admits work.
+>
+> It shows what the platform *is*: nodes, `GPUs visible: 2` sitting next to
+> `GPUs schedulable: 0` because either alone misdescribes this host, jobs with the node
+> AshML chose for each, the registered version with **whether its bytes were ever
+> confirmed**, and what the deployment's address currently resolves to. It is read-only
+> and holds no logic — a browser client of the same API `ash` calls, with a test asserting
+> every path it fetches is a route the API really serves.
+
+### Killing a training pod mid-run
+
+![make chaos-resume-resnet](docs/media/chaos-resume.gif)
+
+> **What this is.** `make chaos-resume-resnet` SIGKILLs a ResNet-18 pod in the middle of
+> an epoch and then only *watches* — nothing here calls the recovery path, because a
+> script that invokes recovery proves only that recovery can be invoked.
+>
+> What has to survive: the retry is offered the last checkpoint AshML **confirmed in the
+> store**, and the resumed attempt restores the weights, the optimizer's moments, the
+> learning-rate schedule *and* the data order. The last two are the ones that hide — a
+> restarted schedule or a redrawn epoch still trains, still converges, and still looks
+> healthy while following a different curve from the one the experiment record claims. The
+> schedule is proved by the learning rate across the kill; the data order by comparing
+> every logged step against an uninterrupted twin run from the same seed.
+
+### A canary, and the split measured from real traffic
+
+![make e2e-rollout](docs/media/rollout.gif)
+
+> **What this is.** `make e2e-rollout` trains two versions of one model, puts the second
+> behind a 10% canary, then 50%, then promotes, rolls back and retires — sending real
+> requests through the deployment's own address and counting which version answered.
+>
+> Each version gets its own pods behind its own Service, and the deployment's address is a
+> Service whose *selector* moves, so it keeps one ClusterIP throughout. The tolerance is
+> four binomial sigmas derived from the sample size, not a number chosen to fit: asserting
+> an exact percentage would be asserting that a random router is not random. Running this
+> is what found two defects that no test at the API level could see — a front Service
+> pointing one port away from the router, and `ash deployment rollout --version 2` printing
+> the client version and exiting 0.
+
 ## Contents
 
 - [How it fits together](#how-it-fits-together)
@@ -80,7 +152,7 @@ an ingress, and Ashcode — is listed with reasons in
 - [Asking it a question](#asking-it-a-question)
 - [Splitting traffic between versions](#splitting-traffic-between-versions)
 - [Surviving a killed pod](#surviving-a-killed-pod)
-- [Watching it work](#watching-it-work) · [Looking at it](#looking-at-it)
+- [See it run](#see-it-run) · [Watching it work](#watching-it-work) · [Looking at it](#looking-at-it)
 - [The whole thing, in order](#the-whole-thing-in-order)
 - [Quick start](#quick-start) · [Layout](#layout) · [Configuration](#configuration) · [Development](#development)
 - [Reproducibility](#reproducibility) · [Honesty](#honesty) · [Known limitations](#known-limitations)

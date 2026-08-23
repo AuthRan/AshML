@@ -260,6 +260,23 @@ bench: ## Measured benchmarks against a running control plane (see docs/benchmar
 	# READY deployment to include the inference sweep.
 	node scripts/bench.mjs
 
+.PHONY: media
+media: ## Rebuild the README's GIFs from the captured transcripts
+	# The terminal GIFs are rendered from `docs/media/transcripts/*.txt`, which are the
+	# real captured output of the command in each file's first line -- so re-rendering is
+	# reproducible and a reader can diff the GIF against the text that produced it.
+	#
+	# The dashboard GIF is NOT rebuilt here: it is screenshots of a live control plane
+	# with real jobs running, which no target can conjure. Recapture it with a control
+	# plane up and something training, then:
+	#   python3 scripts/media/framesgif.py 'frames/f*.png' docs/media/dashboard.gif
+	python3 scripts/media/termgif.py docs/media/transcripts/journey.txt \
+		docs/media/journey.gif --cols 100 --speed 1.6 --rows 18
+	python3 scripts/media/termgif.py docs/media/transcripts/chaos-resume.txt \
+		docs/media/chaos-resume.gif --cols 100 --speed 1.5 --rows 14
+	python3 scripts/media/termgif.py docs/media/transcripts/rollout.txt \
+		docs/media/rollout.gif --cols 100 --speed 1.5 --rows 13
+
 .PHONY: openapi
 openapi: ## Regenerate api/openapi.yaml from the route schemas
 	npm run openapi

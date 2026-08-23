@@ -1,0 +1,27 @@
+@@cmd@@$ make e2e-rollout
+
+@@head@@e2e: a weighted rollout, against real pods  (project rollout-oh5foq)
+@@head@@  cluster: k3d-ashml
+
+@@dim@@        v1 9432fa1b  v2 b94f7661  (20 steps each — undertrained on purpose; the routing is what
+@@dim@@          is under test)
+@@ok@@  ok    two versions of one model, each from its own real training run  (84.5s)@@pause@@
+@@dim@@        ashml-svc-resnet18-cifar10-9974fd49 at 10.43.127.155, serving v1
+@@ok@@  ok    deploying one version gives it its own pods, and puts no router in the path  (20.5s)@@pause@@
+@@dim@@        artifact 9432fa1b answering on the front door
+@@ok@@  ok    the address answers, and the pod behind it loaded v1  (0.1s)@@pause@@
+@@dim@@        router ashml-router-resnet18-cifar10-9974fd49 in the path; address still 10.43.127.155;
+@@dim@@          router applying v1 90% v2 10%
+@@ok@@  ok    a 10% canary puts a router in the path without moving the address  (22.4s)@@pause@@
+@@dim@@        v1 348  v2 52  (13.0% to the canary, band 4.0–16.0%)
+@@ok@@  ok    real traffic divides 90/10, and both accounts of who answered agree  (1.7s)@@pause@@
+@@dim@@        v2 52.0% of 400; same router, same address
+@@ok@@  ok    moving the canary to 50% changes the split and nothing else  (5.0s)@@pause@@
+@@dim@@        v2 alone on 10.43.127.155; v1 kept at 0% as the rollback
+@@ok@@  ok    promote ends the rollout: the address goes to v2 and the router leaves  (14.6s)@@pause@@
+@@dim@@        back on v1 without an image pull: the pods were still there at 0%
+@@ok@@  ok    the rollback is a weight change, and it brings v1 back  (18.7s)@@pause@@
+@@dim@@        one address, 10.43.127.155, unmoved through all of it
+@@ok@@  ok    retiring the version that is serving is refused; retiring the other one works  (0.4s)@@pause@@
+
+@@ok@@9/9 rollout checks passed

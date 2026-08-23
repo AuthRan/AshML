@@ -1,0 +1,40 @@
+@@cmd@@$ make chaos-resume-resnet
+
+@@head@@chaos: killing a training pod mid-run  (job project chaos-cqed7f)
+@@head@@  cluster: k3d-ashml
+
+@@ok@@  ok    the control plane is up and can reach the cluster  (0.1s)@@pause@@
+@@dim@@        attempt 0 running as ashml-chaos-resume-cqed7f-969d45fa-0 on k3d-ashml-server-0
+@@ok@@  ok    a job is submitted with one retry, and starts running  (8.1s)@@pause@@
+@@dim@@        checkpoint step-10.pt READY at step 10 (verified=true)
+@@ok@@  ok    it uploads a confirmed checkpoint before anything is broken  (20.2s)@@pause@@
+@@dim@@        killing pod ashml-chaos-resume-cqed7f-969d45fa-0-z4dgq (last step reported to the API:
+@@dim@@          5)
+@@dim@@        observed failure: Job has reached the specified backoff limit
+@@ok@@  ok    killing the pod mid-run fails the job, and the failure is explained  (7.6s)@@pause@@
+@@dim@@        decision: retrying (attempt 1 of 1): the failure was not recognised as one a retry
+@@dim@@          cannot fix; resuming from the last confirmed checkpoint
+@@dim@@        category: unknown
+@@dim@@        resuming from step-10.pt (step 10), the newest confirmed at failure time
+@@ok@@  ok    the platform decides to retry it, and says why, and offers the checkpoint  (0.0s)@@pause@@
+@@dim@@        attempt 1 ashml-chaos-resume-cqed7f-969d45fa-1:
+@@dim@@          ASHML_RESUME_FROM=829bbdfd-4e7f-44d5-a89b-6273b0c6b28d
+@@ok@@  ok    the second attempt is handed the checkpoint as ASHML_RESUME_FROM  (1.1s)@@pause@@
+@@dim@@        attempt 1 log: "resuming from artifact 829bbdfd-4e7f-44d5-a89b-6273b0c6b28d: step 10"
+@@ok@@  ok    the retried run resumes from the checkpoint instead of starting over  (80.8s)@@pause@@
+@@dim@@        8 expected steps all reported; resumed at step 10
+@@dim@@        no step was reported twice
+@@dim@@        killed with step 5 the newest the API had been told about
+@@ok@@  ok    no work before the checkpoint was done twice, and none after it was skipped  (0.0s)@@pause@@
+@@dim@@        lr across the kill: 0:0.0059  5:0.0588  10:0.1000  15:0.0923  20:0.0717  25:0.0444
+@@dim@@          30:0.0188  35:0.0028
+@@dim@@        one cycle, not two: it opened at 0.00594 and was 0.10000 at the resume
+@@ok@@  ok    the learning-rate schedule continued rather than restarting  (0.0s)@@pause@@
+@@dim@@        reference run bd29cac1 submitted: same seed, nothing killed
+@@dim@@        8 steps compared against the reference, 6 of them after the resume at step 10: every
+@@dim@@          digest identical
+@@ok@@  ok    the resumed run trained on the images it would have, in the order it would have  (112.9s)@@pause@@
+@@dim@@        model resnet18-cifar10.pt READY at step 40, verified=true
+@@ok@@  ok    the finished run has the model the second attempt produced  (0.0s)@@pause@@
+
+@@ok@@11/11 chaos checks passed
