@@ -79,7 +79,7 @@ function stats(samples) {
 }
 
 const ms = (value) => `${value.toFixed(1)}`;
-const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const sleep = (milliseconds) => new Promise((resolve) => { setTimeout(resolve, milliseconds); });
 
 /** Times `fn` `count` times, discarding `warmup` runs first. */
 async function timeIt(count, fn, { warmup = 5 } = {}) {
@@ -177,7 +177,10 @@ async function benchApi(context) {
  * AshML's to answer for. The second is image pulls and kubelet, and reporting them as one
  * number would let a slow scheduler hide behind containerd.
  */
-async function benchScheduling(context) {
+// No `context` parameter, unlike its two siblings: this benchmark measures the executor's
+// own poll cycle and needs nothing from the host description. The runners are called
+// uniformly with one, and JavaScript is content to ignore it.
+async function benchScheduling() {
   section('Scheduling latency');
 
   const suffix = Math.random().toString(36).slice(2, 8);

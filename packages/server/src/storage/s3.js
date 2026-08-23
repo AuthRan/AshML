@@ -147,7 +147,10 @@ export function createS3Store({
         await bucketEnsured;
       } catch (err) {
         // Do not cache a failure: the next request should retry rather than inherit a
-        // rejection from a transient outage minutes ago.
+        // rejection from a transient outage minutes ago. Concurrent callers all await the
+        // *same* promise assigned above, which is what makes this safe — this line only
+        // clears it so the next caller starts a new one.
+        // eslint-disable-next-line require-atomic-updates -- clearing a memoised rejection, deliberately
         bucketEnsured = null;
         throw err;
       }

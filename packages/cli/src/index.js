@@ -595,7 +595,7 @@ job
         if (!body.available) console.error(`no logs: ${body.reason}`);
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, opts.interval));
+      await new Promise((resolve) => { setTimeout(resolve, opts.interval); });
     }
   });
 

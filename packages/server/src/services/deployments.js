@@ -37,7 +37,7 @@ import { ArtifactStatus } from '../domain/artifact-status.js';
 import { ModelStatus } from '../domain/model-status.js';
 import {
   buildTargetManifest, buildTargetServiceManifest, buildServiceManifest, buildRouterManifest,
-  kubeDeploymentName, kubeTargetName, kubeRouterName, serviceUrl, targetServiceUrl,
+  kubeDeploymentName, kubeTargetName, serviceUrl, targetServiceUrl,
   frontSelector,
 } from '../k8s/manifest.js';
 import {
@@ -409,6 +409,9 @@ async function applyRouter(pool, backend, deployment, { namespace, apiUrl }) {
   await backend.applyDeployment(manifest);
   if (deployment.router_k8s_name !== manifest.metadata.name) {
     await deploymentsRepo.recordRouter(pool, deployment.id, manifest.metadata.name);
+    // Keeps the caller's in-memory row in step with the write above, so the rest of this
+    // pass reads what is now true rather than what was true when it loaded the row.
+    // eslint-disable-next-line require-atomic-updates -- one caller, one pass, no concurrency here
     deployment.router_k8s_name = manifest.metadata.name;
   }
 }
@@ -432,6 +435,9 @@ async function removeRouterIfUnused(pool, backend, deployment, { namespace, logg
   logger?.info?.({
     deployment_id: deployment.id,
   }, 'router removed: one version is taking traffic, so there is nothing to decide');
+  // As above: the row this pass is holding must not go on naming a router that has just
+  // been deleted.
+  // eslint-disable-next-line require-atomic-updates -- one caller, one pass, no concurrency here
   deployment.router_k8s_name = null;
 }
 

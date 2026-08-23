@@ -1,0 +1,125 @@
+# What CI can honestly check, and what it cannot.
+#
+# Phase 0 listed "CI skeleton" as delivered and there was no CI. This is it, and its
+# scope is chosen by the same rule as everything else here: run the checks that are
+# genuinely real in this environment, and say plainly which ones are not.
+#
+# **It runs the integration tests, not only the unit tests.** They are the ones that
+# would otherwise rot, because they skip silently on a machine with no database — which
+# is exactly what a CI runner is unless somebody gives it one. Postgres and MinIO come up
+# as service containers, so `pass` here means the SQL ran, the queue's `SKIP LOCKED`
+# behaved, and an artifact upload was confirmed against a real bucket.
+#
+# **It does not run anything that needs Kubernetes.** `make e2e`, `make e2e-scheduler`,
+# `make e2e-rollout`, the chaos scripts and `make journey` all drive a real k3d cluster,
+# create real Pods and kill them. Standing one up in a hosted runner is possible; what it
+# would prove is weaker than it looks, because the thing those scripts test is the
+# behaviour of a cluster under load and a shared runner is not one. They stay a thing a
+# person runs against the development cluster, and the roadmap says so rather than a
+# green tick implying coverage that is not there.
+#
+# **There is no GPU here either**, so nothing in CI touches the NVIDIA provider. That is
+# the same limitation the whole project has (ADR 0008) and is stated rather than papered
+# over: `ASHML_GPU_PROVIDER` is left at its `sim` default in the unit suite, which is
+# opt-in and labels its output as fabricated (spec Rule 5).
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # The integration suites are slow on purpose — they talk to a real database and a real
+    # bucket, and a few of them drive the executor through several of its poll intervals.
+    # Generous, but far below the six-hour default, so a hang is a failed job within the
+    # hour rather than a runner held all afternoon.
+    timeout-minutes: 30
+
+    services:
+      # Matches deploy/local/docker-compose.yml. The health check is not optional: the
+      # test suite's first act is to TRUNCATE, and a database that is listening but not
+      # ready produces a failure that reads like a schema problem.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ashml
+          POSTGRES_PASSWORD: ashml
+          POSTGRES_DB: ashml
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ashml -d ashml"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      # The artifact tests skip without a bucket rather than substituting a fake, because
+      # "did these bytes actually land" is the one question a fake store cannot answer
+      # (spec Rule 5). Giving CI a real one is what stops that skip becoming permanent.
+      minio:
+        image: bitnami/minio:latest
+        env:
+          MINIO_ROOT_USER: ashml
+          MINIO_ROOT_PASSWORD: ashml-dev-secret
+        ports: ['9000:9000']
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # The dedicated test database, which the suite wipes. `test-support/db.js` refuses
+      # to run against a database whose name does not say it is for testing, so this name
+      # is load-bearing rather than decorative.
+      ASHML_TEST_DATABASE_URL: postgresql://ashml:ashml@127.0.0.1:5432/ashml_test
+      ASHML_S3_ENDPOINT: http://127.0.0.1:9000
+      ASHML_S3_ACCESS_KEY: ashml
+      ASHML_S3_SECRET_KEY: ashml-dev-secret
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # `ci` rather than `install`: the lockfile is the input, and a run that silently
+      # resolved a different tree from the one committed is testing something else.
+      - run: npm ci
+
+      - name: Create and migrate the test database
+        run: |
+          node scripts/create-test-db.mjs
+          ASHML_DATABASE_URL="$ASHML_TEST_DATABASE_URL" npm run migrate up
+
+      - run: npm run lint
+
+      # Unit and integration together, which is what `npm test` means here. With the
+      # services above, none of the integration suites skip — and a skip is what this job
+      # exists to prevent, since it is indistinguishable from a pass in a summary line.
+      #
+      # `pipefail` so the suite's exit code survives the pipe, and the output is kept so
+      # the check below can read it rather than running the whole suite a second time.
+      - name: Unit and integration tests
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.txt
+
+      - name: Fail if an integration suite skipped for want of a service
+        # A skipped suite is neither a pass nor a failure, so a run where Postgres never
+        # came up is green and says nothing. This is the assertion that the services were
+        # actually there — without it, the most valuable half of this job can quietly
+        # stop running and nobody finds out.
+        run: |
+          if grep -q "PostgreSQL not reachable" test-output.txt; then
+            echo "::error::Integration tests skipped — the Postgres service was not reachable."
+            echo "They are the point of this job, so a skip is a failure here."
+            exit 1
+          fi
+          echo "Integration suites ran against the service containers."

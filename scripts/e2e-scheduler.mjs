@@ -83,7 +83,7 @@ async function until(predicate, what) {
     await runOnce(app.db, app.k8s, { maxLaunches: 20 });
     jobs = await listJobs(app.db, { projectName: project, limit: 100 });
     if (predicate(jobs)) return jobs;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await new Promise((resolve) => { setTimeout(resolve, 1000); });
   }
   const summary = jobs?.map((j) => `${j.name}=${j.state}`).join(' ');
   throw new Error(`timed out waiting for ${what}; jobs were: ${summary}`);
@@ -183,7 +183,7 @@ check('every running job landed on the node AshML chose', async () => {
         '-l', `job-name=${job.k8s_job_name}`,
         '-o', 'jsonpath={.items[0].spec.nodeName}',
       ).catch(() => '');
-      if (actual === '') await new Promise((r) => setTimeout(r, 1000));
+      if (actual === '') await new Promise((r) => { setTimeout(r, 1000); });
     }
 
     assert.notEqual(actual, '', `${job.name}: Pod was never bound to any node`);

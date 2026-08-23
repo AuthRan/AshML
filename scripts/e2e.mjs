@@ -60,7 +60,7 @@ async function until(jobId, predicate, what) {
     await runOnce(app.db, app.k8s);
     job = await getJob(app.db, jobId);
     if (predicate(job)) return job;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await new Promise((resolve) => { setTimeout(resolve, 1000); });
   }
   throw new Error(
     `timed out after ${TIMEOUT_MS}ms waiting for ${what}; `
@@ -193,7 +193,7 @@ check('an unpullable image fails the job instead of hanging forever', async () =
     if (observation && /ImagePull|ErrImage/.test(observation.reason)) {
       break;
     }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await new Promise((resolve) => { setTimeout(resolve, 1000); });
   }
 
   const observation = await app.k8s.observeJob(NAMESPACE, job.k8s_job_name);

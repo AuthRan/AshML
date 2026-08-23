@@ -121,7 +121,7 @@ async function api(method, path, body) {
   return payload;
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 /**
  * Waits for something to become true, polling. Nothing is driven — the control plane's

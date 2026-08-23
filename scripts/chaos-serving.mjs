@@ -55,7 +55,7 @@ async function api(method, path, body) {
   return text ? JSON.parse(text) : {};
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 async function until(what, predicate, { timeout = TIMEOUT_MS, interval = 1000 } = {}) {
   const deadline = Date.now() + timeout;

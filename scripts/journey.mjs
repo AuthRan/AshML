@@ -90,7 +90,7 @@ async function ashJson(...args) {
   }
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 async function until(what, predicate, { timeout = TIMEOUT_MS, interval = 2000 } = {}) {
   const deadline = Date.now() + timeout;
