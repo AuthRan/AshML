@@ -175,6 +175,12 @@ const EXAMPLES = ["test-00000-cat","test-00001-ship","test-00002-ship","test-000
 // GitHub Pages is a supported thing rather than a trick.
 const MODEL_URL = "https://huggingface.co/spaces/AuthRan/AshML/resolve/main/model.onnx";
 
+// Point the WASM backend at the CDN explicitly. Left alone it resolves its `.wasm`
+// binaries against the *document* rather than against the module it was loaded from, so
+// on a project page it would ask for /AshML/demo/ort-wasm-simd-threaded.wasm, get this
+// site's 404 page, and fail while looking like a model problem.
+ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+
 const $ = (id) => document.getElementById(id);
 const status = (text) => { $("status").textContent = text; };
 
