@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AshML — a Kubernetes-native ML platform</title>
+<meta name="description" content="AshML schedules GPU training onto Kubernetes, tracks experiments, verifies artifacts, versions models and serves them with real traffic splitting.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⎈</text></svg>">
+<style>
+  :root{
+    --bg:#fbfcfd; --panel:#ffffff; --line:#e3e8ef; --ink:#111721; --muted:#5b6675;
+    --accent:#2f6fd0; --accent-soft:#eaf1fc; --ok:#1a7f4b; --warn:#9a6206;
+    --code-bg:#f4f6f9; --shadow:0 1px 2px rgba(16,24,40,.05),0 8px 24px rgba(16,24,40,.05);
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0d1117; --panel:#151b23; --line:#262d38; --ink:#e6edf3; --muted:#9aa7b6;
+      --accent:#6ea8fe; --accent-soft:#17233a; --ok:#4ec98a; --warn:#e3b341;
+      --code-bg:#11161d; --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+       font-size:16.5px;line-height:1.65;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto;padding:0 22px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.88em;background:var(--code-bg);
+       padding:.13em .38em;border-radius:5px;border:1px solid var(--line)}
+  pre{font-family:var(--mono);font-size:13.2px;line-height:1.6;background:var(--code-bg);
+      border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow-x:auto;margin:0}
+  pre code{background:none;border:none;padding:0;font-size:inherit}
+  h2{font-size:1.5rem;letter-spacing:-.015em;margin:0 0 .5rem}
+  h3{font-size:1.06rem;margin:0 0 .35rem;letter-spacing:-.01em}
+  p{margin:0 0 1rem}
+
+  /* ---------- hero ---------- */
+  header{padding:76px 0 44px;border-bottom:1px solid var(--line);
+         background:linear-gradient(180deg,var(--accent-soft),transparent 78%)}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+           color:var(--accent);margin-bottom:14px}
+  h1{font-size:clamp(2.6rem,7vw,4rem);line-height:1;margin:0 0 16px;letter-spacing:-.035em;font-weight:760}
+  .tagline{font-size:clamp(1.05rem,2.4vw,1.3rem);color:var(--muted);max-width:44ch;margin:0 0 30px}
+  .tagline b{color:var(--ink);font-weight:620}
+  .cta{display:flex;gap:11px;flex-wrap:wrap}
+  .btn{display:inline-block;padding:10px 19px;border-radius:9px;font-size:14.5px;font-weight:580;
+       border:1px solid var(--line);background:var(--panel);color:var(--ink);box-shadow:var(--shadow)}
+  .btn:hover{text-decoration:none;border-color:var(--accent)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.primary:hover{filter:brightness(1.08)}
+
+  /* ---------- stats ---------- */
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:1px;
+         background:var(--line);border:1px solid var(--line);border-radius:12px;
+         overflow:hidden;margin:44px 0}
+  .stat{background:var(--panel);padding:19px 20px}
+  .stat .n{font-family:var(--mono);font-size:1.55rem;font-weight:620;letter-spacing:-.02em;
+           display:block;margin-bottom:3px}
+  .stat .k{font-size:12.5px;color:var(--muted);line-height:1.45}
+
+  section{padding:52px 0;border-top:1px solid var(--line)}
+  .lede{font-size:1.06rem;color:var(--muted);max-width:66ch}
+
+  /* ---------- feature grid ---------- */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(285px,1fr));gap:16px;margin-top:26px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        padding:20px 21px;box-shadow:var(--shadow)}
+  .card p{font-size:14.6px;color:var(--muted);margin:0}
+  .card p + p{margin-top:.7rem}
+  .card .tag{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+             color:var(--accent);display:block;margin-bottom:9px}
+
+  /* ---------- diagram ---------- */
+  .figure{margin:26px 0 8px;border:1px solid var(--line);border-radius:12px;
+          background:var(--panel);padding:20px;overflow-x:auto;box-shadow:var(--shadow)}
+  .figure svg{display:block;min-width:660px;width:100%;height:auto}
+  .cap{font-size:13.4px;color:var(--muted);margin-top:10px}
+
+  /* ---------- callout ---------- */
+  .note{border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:10px;
+        background:var(--panel);padding:18px 21px;margin:22px 0}
+  .note h3{margin-bottom:.45rem}
+  .note p{font-size:14.8px;color:var(--muted);margin:0}
+  .note p + p{margin-top:.7rem}
+
+  /* ---------- terminal ---------- */
+  .term{border:1px solid var(--line);border-radius:11px;overflow:hidden;
+        box-shadow:var(--shadow);margin-top:22px}
+  .term .bar{background:var(--panel);border-bottom:1px solid var(--line);padding:8px 14px;
+             font-family:var(--mono);font-size:11.5px;color:var(--muted);letter-spacing:.04em}
+  .term pre{border:none;border-radius:0}
+  .term .c{color:var(--muted)}
+  .term .g{color:var(--ok)}
+  .term .a{color:var(--accent)}
+  .term .w{color:var(--warn)}
+
+  ul.tight{margin:.4rem 0 0;padding-left:1.15rem}
+  ul.tight li{margin-bottom:.45rem;font-size:14.8px;color:var(--muted)}
+  ul.tight li b{color:var(--ink);font-weight:600}
+
+  table{width:100%;border-collapse:collapse;margin-top:20px;font-size:14.4px}
+  th,td{text-align:left;padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600}
+  td:first-child{font-family:var(--mono);font-size:13px;white-space:nowrap}
+
+  footer{padding:40px 0 64px;border-top:1px solid var(--line);color:var(--muted);font-size:14px}
+  footer .links{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:14px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="eyebrow">Kubernetes · PostgreSQL · PyTorch</div>
+    <h1>AshML</h1>
+    <p class="tagline">A miniature internal ML cloud. Schedule GPU training, track
+       experiments, <b>verify</b> artifacts, version models, and serve them with real
+       traffic splitting.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/AuthRan/AshML">View on GitHub</a>
+      <a class="btn" href="https://huggingface.co/spaces/AuthRan/AshML">▶ Live demo</a>
+      <a class="btn" href="https://github.com/AuthRan/AshML/blob/main/docs/architecture/architecture.md">Architecture</a>
+      <a class="btn" href="https://github.com/AuthRan/AshML/tree/main/docs/adr">11 ADRs</a>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="stats">
+    <div class="stat"><span class="n">65.59%</span><span class="k">top-1 on the full 10 000-image CIFAR-10 test set — one epoch, independently re-evaluated from the stored artifact</span></div>
+    <div class="stat"><span class="n">390</span><span class="k">steps over all 50 000 training images in 691 s — a real epoch, not truncated by <code>MAX_STEPS</code></span></div>
+    <div class="stat"><span class="n">0.6559 ×2</span><span class="k">same seed, same image digest, twice — matching step for step from first logged loss to last</span></div>
+    <div class="stat"><span class="n">8.7 ms</span><span class="k">per image served on CPU, 66.0% top-1 over 1 000 live requests through the deployment</span></div>
+    <div class="stat"><span class="n">12 s</span><span class="k">control plane SIGKILLed mid-run: same attempt, same placement, event log gained nothing</span></div>
+    <div class="stat"><span class="n">0 / 2</span><span class="k">GPUs schedulable of 2 visible — both numbers reported, because either alone is a lie about this host</span></div>
+  </div>
+
+  <section style="border-top:none;padding-top:8px">
+    <h2>What it is</h2>
+    <p class="lede">AshML is a control plane that turns <code>ash job submit</code> into a
+    Pod running on a real Kubernetes cluster, and then keeps an honest record of what
+    happened. Projects, datasets, experiments and jobs live in PostgreSQL behind an
+    append-only event log and a <code>SKIP LOCKED</code> queue. AshML's own scheduler —
+    not Kubernetes' — decides whether a job may run and where.</p>
+    <p class="lede">It is built to a hard rule from its own specification: <b>never fake
+    GPU functionality, scheduling, distributed training, or performance numbers.</b>
+    Simulated components are named <code>sim</code>, off by default, and carry
+    <code>simulated: true</code> through the API. Every number on this page was measured.</p>
+  </section>
+
+  <section>
+    <h2>How it fits together</h2>
+    <div class="figure">
+      <svg viewBox="0 0 900 330" xmlns="http://www.w3.org/2000/svg" role="img"
+           aria-label="AshML architecture: the ash CLI calls the control plane, which schedules onto Kubernetes; training pods report metrics back to the API and upload checkpoints to object storage, which the API verifies; the model server loads artifacts and a router splits traffic.">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+        <g font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12.5" color="currentColor">
+          <!-- control plane group -->
+          <rect x="132" y="18" width="248" height="152" rx="11" fill="none"
+                stroke="currentColor" stroke-opacity=".28" stroke-dasharray="5 4"/>
+          <text x="146" y="38" fill="currentColor" fill-opacity=".55" font-size="11">AshML control plane · Node.js</text>
+
+          <!-- CLI -->
+          <rect x="12" y="70" width="96" height="42" rx="8" fill="currentColor" fill-opacity=".06" stroke="currentColor" stroke-opacity=".35"/>
+          <text x="60" y="96" text-anchor="middle" fill="currentColor" font-weight="600">ash CLI</text>
+
+          <!-- API -->
+          <rect x="152" y="50" width="102" height="44" rx="8" fill="currentColor" fill-opacity=".08" stroke="currentColor" stroke-opacity=".4"/>
+          <text x="203" y="70" text-anchor="middle" fill="currentColor" font-weight="600">REST API</text>
+          <text x="203" y="85" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">routes→services→repos</text>
+
+          <!-- Scheduler -->
+          <rect x="152" y="112" width="102" height="42" rx="8" fill="currentColor" fill-opacity=".08" stroke="currentColor" stroke-opacity=".4"/>
+          <text x="203" y="132" text-anchor="middle" fill="currentColor" font-weight="600">Scheduler</text>
+          <text x="203" y="146" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">quota · placement</text>
+
+          <!-- Executor -->
+          <rect x="272" y="82" width="92" height="42" rx="8" fill="currentColor" fill-opacity=".08" stroke="currentColor" stroke-opacity=".4"/>
+          <text x="318" y="102" text-anchor="middle" fill="currentColor" font-weight="600">Executor</text>
+          <text x="318" y="116" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">polls Pods</text>
+
+          <!-- Postgres -->
+          <rect x="152" y="212" width="152" height="56" rx="8" fill="currentColor" fill-opacity=".05" stroke="currentColor" stroke-opacity=".35"/>
+          <text x="228" y="234" text-anchor="middle" fill="currentColor" font-weight="600">PostgreSQL</text>
+          <text x="228" y="249" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">state · event log</text>
+          <text x="228" y="262" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">SKIP LOCKED queue</text>
+
+          <!-- Kubernetes -->
+          <rect x="424" y="46" width="118" height="52" rx="8" fill="currentColor" fill-opacity=".06" stroke="currentColor" stroke-opacity=".35"/>
+          <text x="483" y="68" text-anchor="middle" fill="currentColor" font-weight="600">Kubernetes</text>
+          <text x="483" y="84" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">k3d</text>
+
+          <!-- Training pod -->
+          <rect x="424" y="122" width="118" height="52" rx="8" fill="currentColor" fill-opacity=".06" stroke="currentColor" stroke-opacity=".35"/>
+          <text x="483" y="144" text-anchor="middle" fill="currentColor" font-weight="600">Training Pod</text>
+          <text x="483" y="160" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">Python SDK</text>
+
+          <!-- Object store -->
+          <rect x="424" y="212" width="118" height="56" rx="8" fill="currentColor" fill-opacity=".05" stroke="currentColor" stroke-opacity=".35"/>
+          <text x="483" y="234" text-anchor="middle" fill="currentColor" font-weight="600">Object store</text>
+          <text x="483" y="249" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">MinIO / S3</text>
+          <text x="483" y="262" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">presigned</text>
+
+          <!-- Model server -->
+          <rect x="622" y="196" width="126" height="52" rx="8" fill="currentColor" fill-opacity=".06" stroke="currentColor" stroke-opacity=".35"/>
+          <text x="685" y="218" text-anchor="middle" fill="currentColor" font-weight="600">Model server</text>
+          <text x="685" y="234" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">artifact id → weights</text>
+
+          <!-- Router -->
+          <rect x="622" y="118" width="126" height="52" rx="8" fill="currentColor" fill-opacity=".06" stroke="currentColor" stroke-opacity=".35"/>
+          <text x="685" y="140" text-anchor="middle" fill="currentColor" font-weight="600">Router</text>
+          <text x="685" y="156" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">weighted split</text>
+
+          <!-- Grafana / Prometheus -->
+          <rect x="622" y="30" width="126" height="52" rx="8" fill="currentColor" fill-opacity=".04" stroke="currentColor" stroke-opacity=".3" stroke-dasharray="4 3"/>
+          <text x="685" y="52" text-anchor="middle" fill="currentColor" font-weight="600">Prometheus</text>
+          <text x="685" y="68" text-anchor="middle" fill="currentColor" fill-opacity=".6" font-size="10.5">+ Grafana</text>
+
+          <g stroke="currentColor" stroke-opacity=".45" fill="none" marker-end="url(#ar)">
+            <path d="M108 91 H146"/>
+            <path d="M203 94 V106"/>
+            <path d="M254 133 H268 V124"/>
+            <path d="M364 103 H418"/>
+            <path d="M483 98 V116"/>
+            <path d="M228 170 V206"/>
+            <path d="M483 174 V206"/>
+            <path d="M542 240 H616"/>
+            <path d="M685 170 V190"/>
+          </g>
+          <!-- pod reports back to API -->
+          <path d="M424 138 H392 V60 H260" stroke="currentColor" stroke-opacity=".45" fill="none" marker-end="url(#ar)"/>
+          <text x="330" y="52" fill="currentColor" fill-opacity=".62" font-size="10.5">metrics, step by step</text>
+          <!-- API verifies bytes -->
+          <path d="M304 250 H418" stroke="currentColor" stroke-opacity=".45" fill="none" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+          <text x="361" y="243" text-anchor="middle" fill="currentColor" fill-opacity=".62" font-size="10">HEAD: did it land?</text>
+          <!-- prometheus scrape -->
+          <path d="M616 56 H548 V72" stroke="currentColor" stroke-opacity=".35" fill="none" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+          <text x="586" y="48" text-anchor="middle" fill="currentColor" fill-opacity=".55" font-size="10">/metrics</text>
+          <!-- grafana to postgres -->
+          <path d="M622 44 H580 V286 H228 V274" stroke="currentColor" stroke-opacity=".3" fill="none" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+          <text x="400" y="300" text-anchor="middle" fill="currentColor" fill-opacity=".55" font-size="10">training curves come from Postgres, plotted against step — not sampled on a clock</text>
+        </g>
+      </svg>
+    </div>
+    <p class="cap">Dependencies flow one way: <code>routes → services → repos → db</code>,
+    with <code>domain</code> — the job state machine, placement and quota — importable from
+    anywhere and importing nothing.</p>
+  </section>
+
+  <section>
+    <h2>What it does</h2>
+    <div class="grid">
+      <div class="card">
+        <span class="tag">Scheduling</span>
+        <h3>It says why</h3>
+        <p>Overfill the cluster and jobs queue rather than over-committing it.
+        <code>ash job why &lt;id&gt;</code> prints every node the scheduler considered and
+        what was wrong with it.</p>
+        <p>A GPU job on this host is <b>queued with an explanation</b>, never placed onto a
+        GPU the cluster will not grant.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Artifacts</span>
+        <h3>Verified, not assumed</h3>
+        <p>Checkpoints go from the training pod to object storage over a presigned upload,
+        and AshML <b>asks the bucket</b> whether they arrived before marking one usable.</p>
+        <p>An upload that never landed is refused; one stored where AshML cannot check is
+        labelled <code>NO</code> rather than passing for verified.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Registry</span>
+        <h3>One production version</h3>
+        <p>At most one version of a model is <code>PRODUCTION</code>, with promotion
+        displacing the incumbent in the same transaction.</p>
+        <p>A version can only be registered from a <code>READY</code> artifact — otherwise
+        the failure just moves from "the upload failed" to "production cannot load the
+        model".</p>
+      </div>
+      <div class="card">
+        <span class="tag">Serving</span>
+        <h3>The address never moves</h3>
+        <p>A deployment is a Service whose <i>selector</i> moves — onto one version's pods,
+        or onto the router's the moment two versions take traffic. It keeps its ClusterIP
+        and DNS name throughout.</p>
+        <p>The address only ever moves onto something with a ready pod, which is what makes
+        a version change a blue/green rather than a gap.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Rollouts</span>
+        <h3>A share of traffic, not a count of pods</h3>
+        <p>Replica-count splitting needs a hundred pods for a 99/1 canary and makes
+        resizing silently change the split. Weight and replicas are separate columns, and
+        a router chooses per request.</p>
+        <p>Weights must sum to exactly 100 and are never normalised — accepting 100/10 and
+        calling it 91/9 is how you get a split you did not choose.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Recovery</span>
+        <h3>Nothing lives only in the process</h3>
+        <p>SIGKILL a training pod and the retry resumes weights, optimizer moments, the
+        learning-rate schedule <i>and</i> the data order — each epoch's permutation is
+        derived from <code>(seed, epoch)</code>, so resuming is slicing that order.</p>
+        <p>SIGKILL the control plane and the job comes back with the same attempt, Job and
+        placement, and the event log gains nothing.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Asking it a question</h2>
+    <p class="lede">A registered version becomes something that answers requests — and
+    every answer carries the version and artifact that produced it. A prediction nobody can
+    attribute to a model version is how the wrong model serves for a week.</p>
+    <div class="term">
+      <div class="bar">ash predict resnet18-cifar10 --image data/cifar-png/test-00001-ship.png</div>
+<pre><code>  <span class="c">test-00001-ship.png: 32x32 truecolour</span>
+
+prediction:  <span class="g">ship</span>
+confidence:  81.5%
+
+<span class="c">served by:</span>   resnet18-cifar10 v1 → artifact 7228968a-… (resnet18-cifar)
+<span class="c">latency:</span>     269.6 ms in the pod, 284 ms round trip</code></pre>
+    </div>
+    <p class="cap">Those are CIFAR-10 <b>test</b> images with their true labels in the
+    filename, so the answer can be checked rather than admired — and over the first eight
+    this model gets six right, which is roughly what a 65.59% model should look like. A
+    demo that scores 8/8 is predicting on its own training set.</p>
+  </section>
+
+  <section>
+    <h2>The whole thing, in order</h2>
+    <p class="lede">The specification's §50 describes one user journey. <code>make
+    journey</code> runs all nine steps against the real cluster, in order, as one story —
+    driving the <code>ash</code> CLI rather than the API, because the question it answers is
+    whether a person can type them.</p>
+    <div class="term">
+      <div class="bar">make journey</div>
+<pre><code><span class="a">Step 3</span>   QUEUED → STARTING → RUNNING, placed on k3d-ashml-server-0
+<span class="a">Step 4</span>   loss at step 10: 5.4429 <span class="c">(while the job is still RUNNING)</span>
+<span class="a">Step 5</span>   4 checkpoint(s), model artifact verified, v1 is PRODUCTION
+<span class="a">Step 7</span>   3/8 correct on real CIFAR-10 test images
+<span class="a">Step 8</span>   41 series across 4 dashboards, all exported
+<span class="a">Step 9</span>   DEGRADED 0/1, then the same artifact back; a killed run resumed at step 15</code></pre>
+    </div>
+    <p class="cap">Three things it refuses to round up: step 3's "GPU node selected" prints
+    the scheduler's real reason, because no GPU reaches a node here; step 7's score is
+    <b>printed and not asserted</b>, because a passing threshold would be one tuned until it
+    passed; and step 10 is not run, because it is post-v1.</p>
+  </section>
+
+  <section>
+    <h2>What actually runs where</h2>
+    <div class="note">
+      <h3>The live demo is the serving slice, not the platform</h3>
+      <p>The <a href="https://huggingface.co/spaces/AuthRan/AshML">Hugging Face Space</a>
+      runs AshML's <i>own</i> inference server —
+      <code>deploy/images/model-server/serve.py</code>, the same file the cluster deploys —
+      against the artifact this repository's training run produced. What you get there is a
+      real forward pass through the trained weights, attributed to a model version.</p>
+      <p>It is <b>not</b> the control plane. The scheduler, the executor and the REST API
+      need a Kubernetes cluster, PostgreSQL and an object store; and the API is
+      unauthenticated until Phase 10, so it is deliberately not something to put on a public
+      URL. To run the whole thing, clone the repository — <code>make cluster &amp;&amp; make
+      journey</code> stands it up locally.</p>
+    </div>
+    <table>
+      <tr><th>Component</th><th>Where it runs</th></tr>
+      <tr><td>Model server</td><td>Live in the Space, and in-cluster as a Deployment</td></tr>
+      <tr><td>Control plane API + scheduler</td><td>Local only — needs Kubernetes; no auth until Phase 10</td></tr>
+      <tr><td>Router / traffic splitting</td><td>Local only — needs two versions and real pods</td></tr>
+      <tr><td>Prometheus + Grafana</td><td>Local only — <code>make observability</code>, dashboards in git as JSON</td></tr>
+      <tr><td>Unit + integration tests</td><td>CI, against real Postgres and MinIO service containers</td></tr>
+      <tr><td>e2e, chaos, journey</td><td>Local only — they create and kill real Pods</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Honesty</h2>
+    <p class="lede">Two numbers sit next to each other on the cluster dashboard:
+    <code>ashml_gpu_visible</code> (2) and <code>ashml_gpu_schedulable</code> (0). Both are
+    true on this host, and either one alone is a lie about it.</p>
+    <ul class="tight">
+      <li><b>65.59% is not a CIFAR-10 result.</b> ResNet-18 reaches ~95% at the 100–200
+      epochs the literature uses. This is one epoch on a CPU, and the run says so itself —
+      in its logs and in the metadata on every artifact it produced, because a checkpoint
+      outlives the log that explained it.</li>
+      <li><b>No GPU reaches a node.</b> The machine has two RTX 2080 Tis, but installing the
+      NVIDIA container toolkit needs root, so the cluster advertises
+      <code>nvidia.com/gpu: 0</code> and GPU jobs queue with an explanation.</li>
+      <li><b>Simulated backends are opt-in and labelled.</b> A job run by the
+      <code>sim</code> executor records <code>simulated: true</code> on its events, and its
+      "logs" say plainly that no container ran.</li>
+      <li><b>CI does not touch Kubernetes.</b> A green tick there covers the SQL, the queue
+      and a real artifact upload — not the cluster behaviour, which stays something a person
+      runs.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Run it</h2>
+    <div class="term">
+      <div class="bar">bash</div>
+<pre><code>git clone https://github.com/AuthRan/AshML &amp;&amp; cd AshML
+npm install
+make db-up          <span class="c"># PostgreSQL + MinIO</span>
+make migrate        <span class="c"># apply schema</span>
+make cluster        <span class="c"># create the local k3d cluster</span>
+make image          <span class="c"># build the workload image, load it into the cluster</span>
+npm start           <span class="c"># the control plane: API + executor</span>
+
+make journey        <span class="c"># the §50 user journey, all nine steps, ~8 minutes</span></code></pre>
+    </div>
+    <p class="cap">Requires Node.js 22+, Docker, and <a href="https://k3d.io">k3d</a> +
+    kubectl. Full instructions, configuration and the honest limitations are in the
+    <a href="https://github.com/AuthRan/AshML#quick-start">README</a>.</p>
+  </section>
+
+</div>
+
+<footer>
+  <div class="wrap">
+    <div class="links">
+      <a href="https://github.com/AuthRan/AshML">Repository</a>
+      <a href="https://huggingface.co/spaces/AuthRan/AshML">Live demo</a>
+      <a href="https://github.com/AuthRan/AshML/blob/main/docs/architecture/architecture.md">Architecture</a>
+      <a href="https://github.com/AuthRan/AshML/tree/main/docs/adr">Decision records</a>
+      <a href="https://github.com/AuthRan/AshML/blob/main/docs/roadmap.md">Roadmap</a>
+      <a href="https://github.com/AuthRan/AshML/blob/main/docs/benchmarks.md">Benchmarks</a>
+    </div>
+    <p style="margin:0">Built by <a href="https://github.com/AuthRan">Ashutosh Ranjan</a>.
+    Apache-2.0. Every number on this page was measured, not estimated.</p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,23 +1,112 @@
+<div align="center">
+
 # AshML
 
-A Kubernetes-native GPU machine learning infrastructure platform — a miniature internal
-ML cloud. Register datasets, submit training jobs, schedule them onto GPU resources,
-track experiments, version models, deploy inference, and observe all of it.
+**A Kubernetes-native ML platform — schedule GPU training, track experiments,
+verify artifacts, version models, and serve them with real traffic splitting.**
+
+[![CI](https://github.com/AuthRan/AshML/actions/workflows/ci.yml/badge.svg)](https://github.com/AuthRan/AshML/actions/workflows/ci.yml)
+[![node](https://img.shields.io/badge/node-22%2B-339933)](package.json)
+[![kubernetes](https://img.shields.io/badge/runs%20on-Kubernetes-326ce5)](https://k3d.io)
+[![postgres](https://img.shields.io/badge/state-PostgreSQL%2016-336791)](db/migrations)
+[![license](https://img.shields.io/badge/license-Apache--2.0-green)](#license)
+
+[**▶ Live demo**](https://huggingface.co/spaces/AuthRan/AshML) ·
+[**Project site**](https://authran.github.io/AshML/) ·
+[**Architecture**](docs/architecture/architecture.md) ·
+[**Decisions (11 ADRs)**](docs/adr/) ·
+[**Quick start**](#quick-start) ·
+[**What is not built**](#known-limitations)
+
+</div>
+
+<div align="center">
+
+| | |
+|---|---|
+| **Real workload** | ResNet-18 on CIFAR-10 — one full epoch, 390 steps over all 50 000 images, 691 s |
+| **Result** | **65.59%** top-1 on the complete 10 000-image test set, independently re-evaluated |
+| **Reproducible** | same seed, same image digest → `0.6559` / `0.9687` twice, step for step |
+| **Serving** | 1 000 test images at **66.0%** top-1, 8.7 ms per image on CPU |
+| **Recovery** | training pod SIGKILLed mid-epoch → resumes weights, optimizer, schedule *and* data order |
+| **Scope** | Phases 0–5 complete · 11 ADRs · integration tests on real Postgres + MinIO in CI |
+
+</div>
+
+---
+
+A miniature internal ML cloud. Register datasets, submit training jobs, schedule them
+onto GPU resources, track experiments, version models, deploy inference, and observe all
+of it.
 
 **Status: Phases 0–5 complete — this is v1.** The spec's §50 user journey runs start to
 finish on the real cluster (`make journey`, nine steps, including a killed pod
 recovering); what is deliberately *not* in v1 — Loki, tracing, Alertmanager, autoscaling,
 an ingress, and Ashcode — is listed with reasons in
-[`docs/roadmap.md`](docs/roadmap.md). Projects, datasets, experiments and training jobs
-are persisted in PostgreSQL with an append-only event log and a `SKIP LOCKED` queue.
-Submitted jobs **actually run**: AshML's own scheduler decides whether a job may run and
-on which node, the executor creates the Kubernetes Job there, and job state is driven from
-observed Pod status through to `SUCCEEDED`, `FAILED` or `CANCELLED`.
+[`docs/roadmap.md`](docs/roadmap.md).
+
+> **On the live demo.** The Space above runs AshML's *own* inference server
+> (`deploy/images/model-server/serve.py`) against the artifact this repository's training
+> run produced, and every answer carries the model version and artifact id that served
+> it. It is the serving slice of the platform, not the platform: the scheduler, the
+> executor and the control-plane API need a Kubernetes cluster, and the API is
+> unauthenticated until Phase 10, so it is not something to put on a public URL. What
+> runs where is spelled out on the [project site](https://authran.github.io/AshML/).
+
+## Contents
+
+- [How it fits together](#how-it-fits-together)
+- [The control plane](#the-control-plane)
+- [The workload this was built for](#the-workload-this-was-built-for)
+- [Serving what was trained](#serving-what-was-trained)
+- [Asking it a question](#asking-it-a-question)
+- [Splitting traffic between versions](#splitting-traffic-between-versions)
+- [Surviving a killed pod](#surviving-a-killed-pod)
+- [Watching it work](#watching-it-work)
+- [The whole thing, in order](#the-whole-thing-in-order)
+- [Quick start](#quick-start) · [Layout](#layout) · [Configuration](#configuration) · [Development](#development)
+- [Reproducibility](#reproducibility) · [Honesty](#honesty) · [Known limitations](#known-limitations)
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    CLI["<b>ash</b> CLI"] --> API
+    subgraph CP["AshML control plane (Node.js)"]
+        API["REST API<br/><i>routes → services → repos</i>"]
+        SCHED["<b>Scheduler</b><br/>quota · placement · why"]
+        EXEC["Executor<br/><i>polls Pod status</i>"]
+        API --> SCHED --> EXEC
+    end
+    CP --> PG[("PostgreSQL<br/>state · event log<br/>SKIP LOCKED queue")]
+    EXEC --> K8S["Kubernetes<br/><i>k3d</i>"]
+    K8S --> POD["Training Pod"]
+    POD -- "metrics, step by step" --> API
+    POD -- "presigned upload" --> S3[("Object store<br/>MinIO / S3")]
+    API -- "HEAD: did the bytes land?" --> S3
+    S3 --> SRV["Model server<br/><i>artifact id → weights</i>"]
+    ROUTER["Router<br/><i>weighted split</i>"] --> SRV
+    PROM["Prometheus"] -.->|scrape /metrics| API
+    GRAF["Grafana"] -.-> PROM
+    GRAF -.->|training curves| PG
+```
+
+Dependencies flow one way: `routes → services → repos → db`, with `domain` — the job
+state machine, placement and quota, the differentiating logic — importable from anywhere
+and importing nothing.
+
+## The control plane
+
+Projects, datasets, experiments and training jobs are persisted in PostgreSQL with an
+append-only event log and a `SKIP LOCKED` queue. Submitted jobs **actually run**: AshML's
+own scheduler decides whether a job may run and on which node, the executor creates the
+Kubernetes Job there, and job state is driven from observed Pod status through to
+`SUCCEEDED`, `FAILED` or `CANCELLED`.
 
 Overfill the cluster and jobs queue rather than over-committing it; `ash job why <id>`
 prints every node the scheduler considered and what was wrong with it.
 
-Running jobs now **report on themselves**: metrics as they train, checkpoints as they
+Running jobs **report on themselves**: metrics as they train, checkpoints as they
 write them, and what the run actually observed itself running on. `ash job metrics <id>`
 shows the curve, `ash job artifacts <id>` shows what it produced.
 
@@ -54,7 +143,7 @@ ash model promote fraud-detector 1
 ash model production fraud-detector                          # what is serving, and is it verified
 ```
 
-### The workload this was built for
+## The workload this was built for
 
 ResNet-18 on CIFAR-10 has now run through all of it — scheduled by AshML, executed in
 k3d, reporting its own metrics and checkpoints:
@@ -86,7 +175,7 @@ test set, reproducing 0.6559 accuracy and 0.9687 loss exactly. `kubectl` confirm
 ran on the node the scheduler chose. The dataset is verified against its published
 sha256 before it is extracted, and that digest is what `cifar10:v1` pins.
 
-### Serving what was trained
+## Serving what was trained
 
 A registered version becomes something that answers requests:
 
@@ -106,7 +195,7 @@ baked-in model, and exchanges it for a time-limited download at startup through 
 endpoint the training SDK uses — a presigned URL in the manifest would expire, and a pod
 restarting hours later would crash-loop on a dead signature.
 
-### Asking it a question
+## Asking it a question
 
 ```bash
 make cifar-png                                   # test images as PNGs, labels in the names
@@ -164,7 +253,7 @@ sync loop reading `readyReplicas` back from the cluster may say `READY`. `DEGRAD
 was serving, now short of replicas — is kept distinct from `PROGRESSING`, because one
 word for both hides an outage inside something that sounds like startup.
 
-### Splitting traffic between versions
+## Splitting traffic between versions
 
 A deployment can serve more than one version, and the split is a share of the traffic
 rather than a count of pods:
@@ -246,7 +335,7 @@ that did not send a real request to a real address:
   every version-shifting command there is. The program now uses positional options, and
   `packages/cli/src/cli.test.js` runs the real binary to keep it that way.
 
-### Surviving a killed pod
+## Surviving a killed pod
 
 A job with `max_retries` above zero, whose failure a retry could plausibly survive, comes
 back as a second attempt that starts where the first one stopped:
@@ -312,7 +401,7 @@ cluster advertises `nvidia.com/gpu: 0`. AshML handles this the honest way: such 
 **queued with an explanation**, never placed onto a GPU the cluster will not grant
 (ADR 0008). Preemption is stored but not driven (Phase 5).
 
-### Watching it work
+## Watching it work
 
 ```bash
 make observability-images   # pull Prometheus and Grafana, import them into k3d
@@ -340,7 +429,7 @@ Measured numbers — API latency, scheduling latency, an inference batch-size sw
 ResNet run's own throughput — are in [`docs/benchmarks.md`](docs/benchmarks.md), produced
 by `make bench` rather than typed. There is no GPU figure in it, for the reason above.
 
-### The whole thing, in order
+## The whole thing, in order
 
 The spec's §50 describes one user journey — create a project, submit training, watch it
 scheduled, see the metrics arrive, register and deploy what came out, ask it for a
@@ -504,9 +593,6 @@ examples/training/ job manifests, including the two `make journey` submits
 scripts/           e2e, chaos, benchmarks, and the §50 journey — all of them run for real
 docs/              architecture, roadmap, ADRs
 ```
-
-Dependencies flow one way: `routes -> services -> repos -> db`, with `domain` importable
-from anywhere and importing nothing.
 
 ## Configuration
 
@@ -682,3 +768,15 @@ functionality, scheduling, distributed training, or performance numbers.**
 ## License
 
 Apache-2.0
+
+---
+
+<div align="center">
+
+Built by [Ashutosh Ranjan](https://github.com/AuthRan) ·
+[Live demo](https://huggingface.co/spaces/AuthRan/AshML) ·
+[Project site](https://authran.github.io/AshML/) ·
+[Architecture](docs/architecture/architecture.md) ·
+[Roadmap](docs/roadmap.md)
+
+</div>
