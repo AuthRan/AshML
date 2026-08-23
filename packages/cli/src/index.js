@@ -157,7 +157,18 @@ program
   .name('ash')
   .description('AshML command-line client')
   .version('0.1.0')
-  .option('--endpoint <url>', 'AshML API endpoint', DEFAULT_ENDPOINT);
+  .option('--endpoint <url>', 'AshML API endpoint', DEFAULT_ENDPOINT)
+  // Without this, commander recognises the program's own options *after* a subcommand
+  // too — so `ash deployment rollout x --version 2` matched the program's `--version`,
+  // printed "0.1.0" and exited 0. Silently: the rollout never happened and the shell saw
+  // success. That is the spec's §21 command and three of these subcommands take a
+  // `--version`, so the collision took out every version-shifting operation the CLI has.
+  //
+  // Positional options mean an option belongs to whichever command it follows, which is
+  // what someone typing it expects. The cost is that `--endpoint` must now come before
+  // the subcommand — `ash --endpoint URL job list` — and after one it is an *error*
+  // rather than a silent misparse, which is the same trade in the opposite direction.
+  .enablePositionalOptions();
 
 const endpoint = () => program.opts().endpoint;
 
