@@ -21,6 +21,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { withTransaction } from '../db/pool.js';
+import { AdvisoryLock, takeAdvisoryLock } from '../db/locks.js';
 import { placeJob, Outcome } from '../domain/placement.js';
 import { checkQuota } from '../domain/quota.js';
 import * as nodesRepo from '../repos/nodes.js';
@@ -38,10 +39,21 @@ export const Placement = Object.freeze({
 /**
  * Schedules one claimed job.
  *
- * The whole pass runs in a single transaction. That is what makes concurrent schedulers
- * safe: the job row is locked while capacity is read and the binding is written, so two
- * passes cannot both read the same free GPU and both promise it away. (`clusterView`
- * derives allocations from job rows, so the lock covers the capacity read as well.)
+ * The whole pass runs in a single transaction, and the transaction opens by taking the
+ * scheduling advisory lock, so exactly one pass is in flight across every control-plane
+ * replica at a time.
+ *
+ * The lock is not redundant with the row lock below, and the distinction is worth
+ * stating because the row lock looks like it should be enough. It is not. Locking this
+ * job's row stops another pass from scheduling *this* job; it says nothing about a pass
+ * scheduling a *different* job. Both gates below read aggregates — `projectUsage` over
+ * the project's jobs, `clusterView` over every job bound to a node — and neither read
+ * takes a lock. Under READ COMMITTED each pass therefore sees a snapshot in which the
+ * other's binding has not been committed, both find the same free GPU, and both promise
+ * it away. Every row lock involved is held correctly throughout.
+ *
+ * Taking the advisory lock *before* the row lock also fixes a consistent acquisition
+ * order, which is what keeps two passes from deadlocking against each other.
  *
  * @returns {Promise<{placement: string, node: object|null, reason: string}>}
  */
@@ -49,6 +61,8 @@ export async function scheduleJob(pool, jobId, { logger = null } = {}) {
   const passId = randomUUID();
 
   return withTransaction(pool, async (client) => {
+    await takeAdvisoryLock(client, AdvisoryLock.SCHEDULING_PASS);
+
     const job = await jobsRepo.getJobForUpdate(client, jobId);
     if (!job) {
       throw new Error(`scheduler: job ${jobId} vanished mid-pass`);

@@ -363,4 +363,101 @@ describe('scheduler (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
       assert.match(body.passes[0].decisions[0].reason, /GPU\(s\) free; 4 requested/);
     });
   });
+
+  /**
+   * Two control-plane replicas scheduling at the same time.
+   *
+   * The row lock on the job being scheduled is not what makes this safe, so these do not
+   * test it. Each pass locks a *different* job row and is entirely correct about the row
+   * it holds; what they share is the unlocked aggregate underneath — `clusterView` sums
+   * `training_jobs` to work out what is already committed — and under READ COMMITTED
+   * neither pass can see the other's uncommitted binding. See `db/locks.js`.
+   */
+  describe('concurrent schedulers', () => {
+    const LOCK_CLASSID = 0x4153;
+    const LOCK_OBJID = 1;
+
+    /** Is some backend waiting on the scheduling advisory lock right now? */
+    async function waiterCount() {
+      const { rows } = await pool.query(
+        `SELECT count(*)::int AS n FROM pg_locks
+         WHERE locktype = 'advisory' AND classid = $1 AND objid = $2 AND NOT granted`,
+        [LOCK_CLASSID, LOCK_OBJID],
+      );
+      return rows[0].n;
+    }
+
+    test('a scheduling pass waits for the advisory lock rather than reading past it', async () => {
+      const submitted = await submit({ resources: { cpu: 1, gpu: 1 } });
+      await claimNextJob(pool);
+
+      // Stand in for the other replica: hold the lock, and nothing else.
+      const holder = await pool.connect();
+      let pass;
+      try {
+        await holder.query('BEGIN');
+        await holder.query('SELECT pg_advisory_xact_lock($1, $2)', [LOCK_CLASSID, LOCK_OBJID]);
+
+        pass = scheduleJob(pool, submitted.id);
+
+        // Poll rather than sleep: the assertion is "it is blocked on this lock", and
+        // pg_locks is the only thing that answers that without guessing at a duration.
+        let waiting = 0;
+        for (let i = 0; i < 100 && waiting === 0; i += 1) {
+          waiting = await waiterCount();
+          if (waiting === 0) await new Promise((r) => { setTimeout(r, 20); });
+        }
+        assert.equal(waiting, 1, 'the pass should be blocked on the scheduling lock');
+
+        // And blocked means blocked: it has not quietly decided anything meanwhile.
+        const stillQueued = await getJob(pool, submitted.id);
+        assert.equal(stillQueued.placement?.node_id ?? null, null);
+
+        await holder.query('COMMIT');
+      } finally {
+        holder.release();
+      }
+
+      // Released, so it proceeds — the lock delays a pass, it does not lose one.
+      const result = await pass;
+      assert.equal(result.placement, Placement.BOUND);
+    });
+
+    test('two passes cannot both bind the same free GPUs', async () => {
+      // The node has 2 GPUs. Each job wants both, so exactly one can ever be right.
+      const first = await submit({ resources: { cpu: 1, gpu: 2 } });
+      const second = await submit({ resources: { cpu: 1, gpu: 2 } });
+
+      // Both must be SCHEDULING before either pass runs, so that the passes overlap
+      // rather than queueing behind the claim.
+      await claimNextJob(pool);
+      await claimNextJob(pool);
+
+      const [a, b] = await Promise.all([
+        scheduleJob(pool, first.id),
+        scheduleJob(pool, second.id),
+      ]);
+
+      const bound = [a, b].filter((r) => r.placement === Placement.BOUND);
+      const requeued = [a, b].filter((r) => r.placement === Placement.REQUEUED);
+      assert.equal(bound.length, 1, 'exactly one job may hold the node\'s 2 GPUs');
+      assert.equal(requeued.length, 1);
+      assert.match(requeued[0].reason, /GPU/);
+
+      // The invariant the race would have broken, asserted against the ledger itself
+      // rather than against the two return values.
+      const [node] = await listNodes(pool);
+      const committed = await pool.query(
+        `SELECT COALESCE(SUM(gpu_request), 0)::int AS gpu
+         FROM training_jobs
+         WHERE scheduled_node_id = $1
+           AND state = ANY($2::text[])`,
+        [node.id, [JobState.SCHEDULING, JobState.STARTING, JobState.RUNNING]],
+      );
+      assert.ok(
+        committed.rows[0].gpu <= 2,
+        `node over-committed: ${committed.rows[0].gpu} GPUs promised of 2`,
+      );
+    });
+  });
 });
