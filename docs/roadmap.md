@@ -24,7 +24,9 @@ of at month nine.
   by whoever remembered to. Both are in now — `.github/workflows/ci.yml` and
   `eslint.config.js` — and they are recorded here as arriving late rather than quietly
   ticked off, because a plan that marks undone work as done is worse than one that leaves
-  it open
+  it open. CI later grew a second job that stands up a real k3d cluster and runs
+  `make e2e` on it, so the Phase 2 exit criterion below is machine-verified rather than
+  verified when somebody remembers
 - Architecture document and ADRs 0001–0006
 - PostgreSQL schema (`db/migrations/0001_init.sql`)
 - OpenAPI v1 specification (`api/openapi.yaml`)
@@ -847,7 +849,7 @@ report nothing. `make cluster-dns-check` asks a Pod; `make cluster-dns` restores
 | 7 | Distributed training (DDP across both 2080 Tis) | Needs a reliable scheduler underneath |
 | 8 | AshGPU as a real `GpuProvider` | AshGPU does not exist yet (ADR 0005) |
 | 9 | Ashcode integration | Weekend of work once the API is good; not the hard part |
-| 10 | Audit log, Kubernetes RBAC, an identity provider | Auth, project RBAC and rate limiting are **done** — see below |
+| 10 | Kubernetes RBAC, an identity provider | Auth, project RBAC, rate limiting and the audit trail are **done** — see below |
 
 ---
 
@@ -879,6 +881,10 @@ places; this is the part of Phase 10 that is now built, and the part that is not
   quota.
 - **Rate limiting**, in two budgets. See below; the short version is that the interesting
   one is the budget for callers who have *not* authenticated.
+- **An audit trail of refusals**, written at the decision rather than at the response —
+  because the API answers 404 to "you may not see this project" on purpose, so its own
+  status codes are an unreliable narrator about authorization. Readable through
+  `ash audit denials` and `ash audit summary`.
 - `ash login`, `ash whoami`, `ash token create|list|revoke`, `ash member add|remove|list`.
 
 ### Upgrading an existing cluster
@@ -950,6 +956,45 @@ entries and escapes with one burst per eviction. The honest fix is a shared coun
 PostgreSQL, which v1 does not have, and `ASHML_TRUST_PROXY` defaults to off so that the
 second problem stays a deliberate choice rather than a default.
 
+### The audit trail, and the reason it is not a hook on 403
+
+Job state changes have been audited since Phase 1 (`job_events`) — what the platform
+*did*. What it *declined to do* left no trace at all: `api_tokens.last_used_at` recorded
+that a credential had been presented, never what it was refused.
+
+The obvious implementation is a hook that records every 403, and it would miss the
+refusals that matter most. A caller who asks about a project they are not a member of is
+answered **404**, deliberately, so that project names cannot be enumerated
+(`resolveProject`). The same is true of a job, an artifact, a deployment — anything
+addressed by an opaque id. So the API's own status codes are a deliberately unreliable
+narrator about authorization, and an audit built on them would file the probing it exists
+to surface under "not found", where nobody would look. The services that refuse therefore
+attach a `denial` descriptor to the error at the point of decision, and each row carries
+both the refusal and the status the caller was actually given. The two are allowed to
+disagree, and `ash audit denials` prints the disagreement in a column headed TOLD.
+
+**Only refusals of a caller the platform could identify.** A 401 has no principal — what
+it has is an address and a token prefix, and no ceiling on how many a stranger can
+produce. A row per 401 would be an INSERT-per-packet amplifier, which is the failure the
+rate limiter in this same phase exists to prevent, handed straight back through its own
+audit trail. Unauthenticated refusals are counted in `ashml_auth_failures_total` and
+logged instead. An audit row should be worth reading; "somebody unknown presented an
+invalid token" is a rate, not a record.
+
+**Buffered, and dropped rather than queued when it cannot keep up.** Writing inline would
+put an INSERT on the path of every refusal — a path whose rate the caller chooses — so
+denials go into a bounded buffer that flushes in batches and never blocks a response. The
+buffer is bounded and overflow is *dropped*: an audit that grows without limit under load
+is a memory leak that fires exactly when the platform is already in trouble, and the
+honest failure is a gap in the record with `ashml_audit_dropped_total` saying how large it
+is. A failed write loses its batch for the same reason — re-queueing would turn a database
+that is down into a buffer that never drains.
+
+**No foreign keys**, which is the one thing in the schema that looks like an oversight and
+is not. Every other id in this database cascades or nulls when its subject is deleted; an
+audit row that a DELETE can erase or anonymise is not an audit row. The subject is copied
+in as text at the time, so the record still reads after the account it names has gone.
+
 ### Not built
 
 - **No identity provider.** No OIDC, no SSO, no passwords. Tokens are issued out of band
@@ -959,8 +1004,6 @@ second problem stays a deliberate choice rather than a default.
   AshML's own service account creates every workload, so a project's pods are isolated by
   AshML's admission checks and not by the cluster's. A compromised training image is
   therefore contained by the namespace, not by the project.
-- **No audit log of authorization decisions.** Job state changes are audited; refusals are
-  not. `api_tokens.last_used_at` is the only trail, and it is deliberately coarse.
 - **The training run token is visible in the Job's pod spec** to anyone who can already
   read Jobs in that namespace. It is per-attempt and revoked when the attempt ends, which
   bounds the exposure, but it is not hidden. The serving token is in a Secret, for an

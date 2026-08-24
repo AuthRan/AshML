@@ -491,6 +491,93 @@ nodeCmd
     });
   });
 
+// -------------------------------------------------------------------- audit
+
+const audit = program
+  .command('audit')
+  .description('What the platform refused, and to whom (platform administrators)');
+
+/** The two columns that need explaining, kept together so they explain each other. */
+function denialRow(d) {
+  return [
+    d.occurred_at?.slice(0, 19).replace('T', ' ') ?? '-',
+    d.subject,
+    d.permission,
+    // What the caller was *told*, which is not always what happened: a project you are
+    // not a member of answers 404 so its name cannot be enumerated. The row beside it
+    // says what was really refused.
+    d.status,
+    `${d.method} ${d.route}`,
+    d.project_name ?? '-',
+  ];
+}
+
+audit
+  .command('denials')
+  .description('Requests that were refused, newest first')
+  .option('--user <id>', 'only this account')
+  .option('--permission <name>', 'only refusals of this permission')
+  .option('--since <hours>', 'only the last N hours', (v) => Number.parseInt(v, 10))
+  .option('--limit <n>', 'how many to show', (v) => Number.parseInt(v, 10))
+  .option('--json', 'emit raw JSON')
+  .action(async (opts) => {
+    const query = new URLSearchParams();
+    if (opts.user) query.set('user', opts.user);
+    if (opts.permission) query.set('permission', opts.permission);
+    if (opts.since) query.set('since_hours', String(opts.since));
+    if (opts.limit) query.set('limit', String(opts.limit));
+
+    const suffix = query.size ? `?${query}` : '';
+    const body = await api(endpoint(), `/api/v1/audit/denials${suffix}`);
+    output(opts, body, ({ denials }) => {
+      if (denials.length === 0) {
+        console.log('nothing was refused');
+        return;
+      }
+      const table = newTable(['WHEN', 'WHO', 'PERMISSION', 'TOLD', 'REQUEST', 'PROJECT']);
+      for (const d of denials) table.push(denialRow(d));
+      console.log(table.toString());
+      console.error(
+        '\nTOLD is the status the caller received. A 404 against a named project is a '
+        + 'refusal wearing a 404, so that project names cannot be enumerated.',
+      );
+    });
+  });
+
+audit
+  .command('summary')
+  .description('Who has been refused lately, and for what')
+  .option('--since <hours>', 'window, in hours (default 24)', (v) => Number.parseInt(v, 10))
+  .option('--limit <n>', 'how many callers to show', (v) => Number.parseInt(v, 10))
+  .option('--json', 'emit raw JSON')
+  .action(async (opts) => {
+    const query = new URLSearchParams();
+    if (opts.since) query.set('since_hours', String(opts.since));
+    if (opts.limit) query.set('limit', String(opts.limit));
+
+    const suffix = query.size ? `?${query}` : '';
+    const body = await api(endpoint(), `/api/v1/audit/summary${suffix}`);
+    output(opts, body, ({ callers }) => {
+      if (callers.length === 0) {
+        console.log('nobody has been refused in this window');
+        return;
+      }
+      // One row per caller rather than per refusal: an account with four hundred denials
+      // is the finding, and reading it off four hundred rows is how it gets missed.
+      const table = newTable(['WHO', 'KIND', 'DENIALS', 'LAST', 'PERMISSIONS']);
+      for (const c of callers) {
+        table.push([
+          c.subject,
+          c.principal,
+          c.denials,
+          c.last_seen?.slice(0, 19).replace('T', ' ') ?? '-',
+          c.permissions.join(', '),
+        ]);
+      }
+      console.log(table.toString());
+    });
+  });
+
 // -------------------------------------------------------------------- jobs
 
 /** States after which no further output will ever appear, so `--follow` can stop. */

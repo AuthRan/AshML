@@ -135,6 +135,18 @@ export function loadConfig(env = process.env) {
       maxKeys: parseLimit(env.ASHML_RATE_LIMIT_MAX_KEYS, 'ASHML_RATE_LIMIT_MAX_KEYS') ?? 10_000,
     },
 
+    // The authorization audit trail (Phase 10, spec §31).
+    //
+    // Denials are buffered and written in batches, so that a refusal costs the request
+    // that produced it nothing. Two knobs, and both are about the same failure: what
+    // happens when refusals arrive faster than PostgreSQL takes them. The buffer is
+    // bounded and overflow is dropped rather than queued — an audit that grows without
+    // limit is a memory leak that fires exactly when the platform is already in trouble,
+    // and `ashml_audit_dropped_total` says how large the gap is rather than hiding it.
+    auditBufferSize: parseLimit(env.ASHML_AUDIT_BUFFER, 'ASHML_AUDIT_BUFFER') ?? 1000,
+    auditFlushIntervalMs:
+      parseLimit(env.ASHML_AUDIT_FLUSH_MS, 'ASHML_AUDIT_FLUSH_MS') ?? 2000,
+
     // Whether to believe `X-Forwarded-For` about who is calling.
     //
     // Off, because it is only ever safe when something in front of this server rewrites

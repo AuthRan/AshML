@@ -146,6 +146,28 @@ export function createMetrics({ collectDefaults = true } = {}) {
       registers: [registry],
     }),
 
+    authzDenials: new Counter({
+      name: `${PREFIX}authz_denials_total`,
+      help: 'Requests refused to a caller the platform could identify, by permission and by what the caller was told',
+      // `status` because 403 and 404 both appear here and the difference is deliberate:
+      // a project you are not a member of answers 404 so its name cannot be enumerated.
+      labelNames: ['permission', 'status'],
+      registers: [registry],
+    }),
+
+    authFailures: new Counter({
+      name: `${PREFIX}auth_failures_total`,
+      help: 'Requests refused before a caller was known. Counted rather than audited: a 401 has no principal and no ceiling on how many a stranger can produce',
+      labelNames: ['reason'],
+      registers: [registry],
+    }),
+
+    auditDropped: new Counter({
+      name: `${PREFIX}audit_dropped_total`,
+      help: 'Audit rows lost — the buffer was full, or the write failed. A gap in the record, stated rather than hidden',
+      registers: [registry],
+    }),
+
     rateLimited: new Counter({
       name: `${PREFIX}rate_limited_total`,
       help: 'Requests refused by the rate limiter, by which limiter refused them',

@@ -17,6 +17,7 @@ import {
   authenticate, authorize, resolveProject, UnauthenticatedError, ForbiddenError,
 } from '../services/auth.js';
 import { NotFoundError } from '../services/errors.js';
+import { describeDenial } from '../services/audit.js';
 import { Permission, PrincipalKind, userPrincipal, can } from '../domain/roles.js';
 import * as authRepo from '../repos/auth.js';
 
@@ -74,16 +75,6 @@ export async function installAuth(app, { enabled = true } = {}) {
   /**
    * The principal used when authentication is switched off.
    *
-   * Built once at startup, and built as a *real* principal from the seeded local
-   * administrator rather than as a bypass flag threaded through the checks. Every
-   * authorization check below therefore runs exactly as it does in production — the
-   * difference is only that everyone is the same administrator. A bypass that skipped the
-   * checks would mean the disabled mode exercised a different code path from the one that
-   * ships, and the e2e scripts that run in this mode would stop being evidence about it.
-   */
-  /**
-   * The principal used when authentication is switched off.
-   *
    * Built once, at startup, and built as a *real* principal from the seeded local
    * administrator rather than as a bypass flag threaded through the checks. Every
    * authorization check below therefore runs exactly as it does in production — the only
@@ -124,6 +115,13 @@ export async function installAuth(app, { enabled = true } = {}) {
     const principal = token ? await authenticate(app.db, token) : null;
 
     if (!principal) {
+      // Counted, not audited. There is no principal to name and no ceiling on how many a
+      // stranger can produce, so a row per 401 would be an INSERT-per-packet amplifier —
+      // the failure `auth/rate-limit.js` exists to prevent, handed back through its own
+      // audit trail. The reason label separates "sent nothing" from "sent something
+      // wrong", which is the only distinction a rate can usefully carry.
+      app.metrics?.authFailures?.inc({ reason: token ? 'invalid_token' : 'no_token' });
+
       // WWW-Authenticate is what tells a generic HTTP client that this is a credentials
       // problem it could fix, rather than a 401 the server made up.
       reply.header('WWW-Authenticate', 'Bearer realm="ashml"');
@@ -214,7 +212,13 @@ export async function installAuth(app, { enabled = true } = {}) {
     const principal = request.principal;
     if (!principal) throw new UnauthenticatedError();
     if (principal.kind !== PrincipalKind.USER) {
-      throw new ForbiddenError('a workload token may not list resources');
+      // Audited like any other refusal. PROJECT_READ is the honest name for what a list
+      // endpoint is: enumerating a project's contents is reading it, and a workload that
+      // tried is worth a row whether it was a bug in an image or something worse.
+      throw describeDenial(
+        new ForbiddenError('a workload token may not list resources'),
+        { permission: Permission.PROJECT_READ },
+      );
     }
     return principal.isAdmin ? null : principal.userId;
   });
@@ -260,7 +264,10 @@ export async function installAuth(app, { enabled = true } = {}) {
       // judged on the permission it actually holds.
       if (!can(request.principal, Permission.PROJECT_READ, scope)
         && !can(request.principal, permission, scope)) {
-        throw notFound;
+        // Another refusal that answers 404, and so another one the audit trail can only
+        // learn about here. `permission` rather than PROJECT_READ, because that is what
+        // the caller was reaching for; the 404 they receive is recorded beside it.
+        throw describeDenial(notFound, { permission, projectId: scope.projectId ?? null });
       }
 
       authorize(request.principal, permission, scope);

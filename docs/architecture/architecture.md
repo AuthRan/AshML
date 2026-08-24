@@ -331,8 +331,18 @@ installed *ahead of* authentication and charged only once a 401 has happened. Pr
 `/metrics` are exempt, because a limiter that throttles them converts an overload into the
 outage it was there to prevent. ADR 0014 has the numbers and why they are what they are.
 
-**Not built:** no identity provider, no Kubernetes RBAC or per-project service accounts,
-no audit of refusals. AshML's own service account creates every workload, so a project's
-pods are isolated by AshML's admission checks and not by the cluster's. Rate limiting
-counts in one process, so two API replicas are two budgets. ADR 0013 has the reasoning and
-the full list.
+**Refusals are recorded where they are decided, not where they are sent.** `job_events`
+covers what the platform did; `authz_denials` covers what it declined to do. The
+distinction is forced by the 404-not-403 rule above: on exactly the refusals an audit
+exists to surface, the API answers "not found" on purpose, so a hook reading status codes
+would file an outsider enumerating project names as a series of typos. Each row carries
+the refusal *and* what the caller was told, and lets the two disagree. Denials are
+buffered and batched — an INSERT on a path whose rate the caller chooses is the same
+hazard the rate limiter above addresses — and overflow is dropped with a counter rather
+than queued. ADR 0015.
+
+**Not built:** no identity provider, no Kubernetes RBAC or per-project service accounts.
+AshML's own service account creates every workload, so a project's pods are isolated by
+AshML's admission checks and not by the cluster's. Rate limiting counts in one process, so
+two API replicas are two budgets, and the audit trail records refusals rather than
+successful privileged actions. ADR 0013 has the reasoning and the full list.

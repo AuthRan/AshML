@@ -65,7 +65,11 @@ export const SKIP_MESSAGE =
  */
 export async function truncateAll(pool) {
   assertDestroyable(TEST_DATABASE_URL);
-  await pool.query('TRUNCATE projects CASCADE');
+  // `authz_denials` has to be named, because it deliberately has no foreign keys: an
+  // audit row that a DELETE elsewhere can erase is not an audit row (see its migration).
+  // The property that makes it survive a deleted user is the same one that makes it
+  // survive a cascade, so a test suite has to say it means this one too.
+  await pool.query('TRUNCATE projects, authz_denials CASCADE');
 }
 
 /**

@@ -14,7 +14,7 @@ verify artifacts, version models, and serve them with real traffic splitting.**
 [**▶ Live demo**](https://authran.github.io/AshML/demo/) ·
 [**Project site**](https://authran.github.io/AshML/) ·
 [**Architecture**](docs/architecture/architecture.md) ·
-[**Decisions (14 ADRs)**](docs/adr/) ·
+[**Decisions (15 ADRs)**](docs/adr/) ·
 [**Quick start**](#quick-start) ·
 [**What is not built**](#known-limitations)
 
@@ -29,7 +29,7 @@ verify artifacts, version models, and serve them with real traffic splitting.**
 | **Reproducible** | same seed, same image digest → `0.6559` / `0.9687` twice, step for step |
 | **Serving** | 1 000 test images at **66.0%** top-1, 8.7 ms per image on CPU |
 | **Recovery** | training pod SIGKILLed mid-epoch → resumes weights, optimizer, schedule *and* data order |
-| **Scope** | Phases 0–5 complete · 11 ADRs · integration tests on real Postgres + MinIO in CI |
+| **Scope** | Phases 0–5 complete · 15 ADRs · integration tests on real Postgres + MinIO, and one end-to-end run on a real k3d cluster, in CI |
 
 </div>
 
@@ -50,9 +50,10 @@ an ingress, and Ashcode — is listed with reasons in
 > artifact an AshML run produced, and every answer carries the model version and artifact
 > id that served it. It is the serving slice of the platform, not the platform: the
 > scheduler, the executor and the control-plane API need a Kubernetes cluster, and the
-> API now authenticates every request and limits how often each caller may make one (see
-> [Who can do what](#who-can-do-what)), but it still has no audit of refusals, so it is
-> not something to put on a public URL.
+> API now authenticates every request, limits how often each caller may make one, and
+> keeps a record of everything it refused (see [Who can do what](#who-can-do-what)) — but
+> there is still no identity provider and no Kubernetes RBAC, so it is not something to
+> put on a public URL.
 > What runs where is spelled out on the [project site](https://authran.github.io/AshML/).
 >
 > The demo page is on GitHub Pages rather than the Hugging Face Space, because Hugging
@@ -551,8 +552,51 @@ Two things it does not do, both worth knowing before this is put behind anything
 Why it is shaped this way, including why the anonymous number is higher than it looks
 like it should be, is [ADR 0014](docs/adr/0014-two-rate-limits-and-where-each-one-runs.md).
 
+### What it refused, and who it refused
+
+```bash
+ash audit summary                  # who has been refused lately, and for what
+ash audit denials --since 24       # every refusal, newest first
+```
+
+Refusals are recorded **where the decision is made, not where the response is sent**, and
+that is the whole design rather than an implementation detail. Remember that a project you
+are not a member of answers 404 — so on precisely the refusals an audit exists to surface,
+the API says "not found" on purpose. A hook that recorded every 403 would file an outsider
+working through your project names as a series of typos.
+
+So each row carries the refusal *and* the status the caller was actually given, and lets
+them disagree. `ash audit denials` heads that column TOLD:
+
+```
+WHEN                 WHO                PERMISSION    TOLD  REQUEST                     PROJECT
+2026-08-25 09:14:02  carol@example.com  PROJECT_READ  404   GET /api/v1/projects/:name  vision
+2026-08-25 09:14:03  carol@example.com  PROJECT_READ  404   GET /api/v1/projects/:name  fraud
+2026-08-25 09:14:05  carol@example.com  PROJECT_READ  404   GET /api/v1/projects/:name  billing
+```
+
+Three things it deliberately does not do:
+
+- **It does not record 401s.** A request with no valid credential has no principal to
+  name and no ceiling on how many a stranger can produce, so a row per 401 would be an
+  INSERT-per-packet amplifier — the failure the rate limit above exists to prevent, handed
+  back through its own audit trail. Those are counted in `ashml_auth_failures_total`.
+- **It does not block the request.** Denials are buffered and written in batches. The
+  buffer is bounded and overflow is *dropped*, because an audit that grows without limit
+  under load is a memory leak that fires exactly when the platform is already in trouble.
+  `ashml_audit_dropped_total` says how large the gap is rather than hiding it.
+- **It has no foreign keys** — the one thing in that table that reads as an oversight and
+  is not. An audit row a `DELETE` elsewhere can erase or anonymise is not an audit row, so
+  the subject is copied in as text and the record still reads after the account it names
+  has gone.
+
+Reading it is `PLATFORM_ADMIN`, for the reason in
+[ADR 0015](docs/adr/0015-audit-the-decision-not-the-response.md): the trail names people
+and what they reached for, and a caller who could read their own refusals would have a way
+to map the boundary they had just been stopped at.
+
 Full reasoning about the credentials themselves, and an explicit list of what is *not*
-built — no identity provider, no Kubernetes RBAC, no audit of refusals — is in
+built — no identity provider, no Kubernetes RBAC — is in
 [ADR 0013](docs/adr/0013-tokens-for-people-and-tokens-for-pods.md) and
 [`docs/roadmap.md`](docs/roadmap.md).
 
@@ -861,6 +905,8 @@ docs/              architecture, roadmap, ADRs
 | `ASHML_RATE_LIMIT_ANON_PER_MINUTE` | `600` | Requests a minute per source address for callers with no valid credential — what keeps a token lookup from being an attack. Not lower, because everything behind one NAT shares it |
 | `ASHML_RATE_LIMIT_MAX_KEYS` | `10000` | Callers remembered at once, about a megabyte. Past it the least recently seen is forgotten |
 | `ASHML_TRUST_PROXY` | `false` | Whether `X-Forwarded-For` decides who is calling. Required behind an ingress, dangerous without one — see [How often you can call](#how-often-you-can-call) |
+| `ASHML_AUDIT_BUFFER` | `1000` | Denials held in memory before overflow is dropped. Dropped, not queued: `ashml_audit_dropped_total` counts the gap |
+| `ASHML_AUDIT_FLUSH_MS` | `2000` | How often the buffer is written |
 | `ASHML_DATABASE_URL` | `postgresql://ashml:ashml@127.0.0.1:5432/ashml` | PostgreSQL connection |
 | `ASHML_DB_POOL_MAX` | `10` | Maximum pooled connections |
 | `ASHML_K8S_BACKEND` | `kubernetes` | `kubernetes` or `sim` |
@@ -959,10 +1005,23 @@ npm run openapi       # regenerate api/openapi.yaml after changing routes
 **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the lint and the full
 suite on every push, with Postgres and MinIO as service containers — so the integration
 tests actually *run* there rather than skipping, and the job fails if they skip, because a
-skip and a pass look identical in a summary line. It does not run anything that needs
-Kubernetes: `make e2e`, `make e2e-rollout`, the chaos scripts and `make journey` drive a
-real cluster and stay a thing a person runs, rather than a green tick implying coverage
-that is not there.
+skip and a pass look identical in a summary line.
+
+A second job stands up a **real k3d cluster** and runs `make e2e` on it: the Phase 2 exit
+criterion, checked against `kubectl` as well as against AshML's own view, so a pass cannot
+be produced by the control plane merely believing itself. This file used to say CI could
+run nothing that needed Kubernetes, on the grounds that a shared runner is not a realistic
+cluster. That is true of some of these scripts and was applied to all of them — and the
+cost was that the project's headline claim was verified only when its author remembered
+to. What `make e2e` asserts does not depend on the runner resembling anything: a job
+submitted through the API becomes a Kubernetes Job, runs a real container, and reaches
+SUCCEEDED through observed Pod status.
+
+The rest stay a thing a person runs, now for reasons specific to each rather than one
+blanket one. `make e2e-scheduler` is written against the capacity of the development
+machine; `make e2e-rollout` measures a traffic split and needs ~2 GB of PyTorch images;
+the chaos scripts assert on recovery timing; `make journey` needs all four images and
+CIFAR-10.
 
 **Lint rules are chosen to catch defects, not to have opinions.** Every rule in
 [`eslint.config.js`](eslint.config.js) can fail on code that looks fine and is wrong, and
@@ -1023,10 +1082,11 @@ functionality, scheduling, distributed training, or performance numbers.**
    frontier-model project.
 3. **AshGPU is not integrated.** The provider seam exists; the implementation does not.
 4. **Authentication has no identity provider.** Tokens are issued out of band and `ash
-   login` stores one — no OIDC, no SSO, no passwords. There is also no audit log of refused
-   requests, and no Kubernetes RBAC: AshML's own service account creates every workload, so
-   a project's pods are isolated by AshML's admission checks rather than by the cluster's.
-   Rate limiting exists but counts in one process, so two API replicas are two budgets.
+   login` stores one — no OIDC, no SSO, no passwords. There is also no Kubernetes RBAC:
+   AshML's own service account creates every workload, so a project's pods are isolated by
+   AshML's admission checks rather than by the cluster's. Rate limiting exists but counts
+   in one process, so two API replicas are two budgets; the audit trail records refusals
+   and not successful privileged actions, and nothing prunes it.
    [ADR 0013](docs/adr/0013-tokens-for-people-and-tokens-for-pods.md) lists the rest.
 
 ## License

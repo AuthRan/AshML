@@ -21,6 +21,7 @@ import {
   Permission, Role, can, userPrincipal, runPrincipal, servingPrincipal, isRole,
 } from '../domain/roles.js';
 import { ConflictError, NotFoundError, ValidationError, UNIQUE_VIOLATION } from './errors.js';
+import { describeDenial } from './audit.js';
 
 /** 401: we do not know who is calling. */
 export class UnauthenticatedError extends Error {
@@ -95,7 +96,13 @@ export async function authenticate(pool, token) {
 export function authorize(principal, permission, scope = {}) {
   if (!principal) throw new UnauthenticatedError();
   if (!can(principal, permission, scope)) {
-    throw new ForbiddenError(`this token may not ${permission}`);
+    // Described here, at the decision, rather than left for a hook to infer from the
+    // status code — see `resolveProject` below for why the status cannot be trusted to
+    // say what happened. `services/audit.js` turns this into a row.
+    throw describeDenial(
+      new ForbiddenError(`this token may not ${permission}`),
+      { permission, projectId: scope.projectId ?? null },
+    );
   }
 }
 
@@ -116,9 +123,27 @@ export async function resolveProject(pool, principal, name, permission) {
   const notFound = new NotFoundError(`project "${name}" not found`);
 
   if (!project) throw notFound;
-  if (!can(principal, Permission.PROJECT_READ, { projectId: project.id })) throw notFound;
+  if (!can(principal, Permission.PROJECT_READ, { projectId: project.id })) {
+    // The refusal the audit trail most needs and the one a status-code-based audit would
+    // never see: the caller is told 404 so that project names cannot be enumerated, so
+    // the honest account of what happened exists only here. The row records the denial
+    // *and* the 404 the caller got, and lets the two disagree.
+    throw describeDenial(notFound, {
+      permission: Permission.PROJECT_READ,
+      projectId: project.id,
+      projectName: project.name,
+    });
+  }
 
-  authorize(principal, permission, { projectId: project.id });
+  try {
+    authorize(principal, permission, { projectId: project.id });
+  } catch (err) {
+    // `authorize` is given the project's id and not its name, because a permission check
+    // has no use for a name. An audit row does: this is the only frame that holds both,
+    // so it is where the readable half is added.
+    if (err.denial) err.denial.projectName = project.name;
+    throw err;
+  }
   return project;
 }
 

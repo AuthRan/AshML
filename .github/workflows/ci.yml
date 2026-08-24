@@ -10,13 +10,27 @@
 # as service containers, so `pass` here means the SQL ran, the queue's `SKIP LOCKED`
 # behaved, and an artifact upload was confirmed against a real bucket.
 #
-# **It does not run anything that needs Kubernetes.** `make e2e`, `make e2e-scheduler`,
-# `make e2e-rollout`, the chaos scripts and `make journey` all drive a real k3d cluster,
-# create real Pods and kill them. Standing one up in a hosted runner is possible; what it
-# would prove is weaker than it looks, because the thing those scripts test is the
-# behaviour of a cluster under load and a shared runner is not one. They stay a thing a
-# person runs against the development cluster, and the roadmap says so rather than a
-# green tick implying coverage that is not there.
+# **It runs one thing that needs Kubernetes, and only one.** An earlier version of this
+# file said CI could run nothing that needed a cluster, on the grounds that "the thing
+# those scripts test is the behaviour of a cluster under load, and a shared runner is not
+# one". That is true of some of them and was applied to all of them, which was too broad —
+# and the cost of being too broad is that the project's *headline* claim, the Phase 2 exit
+# criterion, was verified only when its author remembered to run it.
+#
+# So `make e2e` runs here, in the `e2e` job below. What it asserts does not depend on the
+# runner resembling a real cluster: a job submitted through the API becomes a Kubernetes
+# Job, runs a real container, and reaches SUCCEEDED through *observed Pod status* — with
+# every claim cross-checked against `kubectl`, so a pass cannot be produced by the control
+# plane merely believing itself. A two-core hosted runner answers that question exactly as
+# well as a workstation does.
+#
+# The rest stay out, and now for reasons specific to each rather than one blanket one.
+# `make e2e-scheduler` overfills the cluster and is written against the capacity the
+# development machine has; `make e2e-rollout` measures a traffic split across pods and
+# needs ~2 GB of PyTorch images; the chaos scripts kill pods and assert on recovery timing;
+# `make journey` needs all four images and CIFAR-10. Those remain a thing a person runs
+# against the development cluster, and the roadmap says so rather than a green tick
+# implying coverage that is not there.
 #
 # **There is no GPU here either**, so nothing in CI touches the NVIDIA provider. That is
 # the same limitation the whole project has (ADR 0008) and is stated rather than papered
@@ -142,3 +156,95 @@ jobs:
             exit 1
           fi
           echo "Integration suites ran against the service containers."
+
+  # ------------------------------------------------------------------ e2e
+
+  e2e:
+    name: Kubernetes end-to-end (k3d)
+    runs-on: ubuntu-latest
+
+    # A cluster, an image build and a real container. Well under the `test` job's
+    # allowance, because if this one is still going after twenty minutes something has
+    # hung rather than been slow.
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ashml
+          POSTGRES_PASSWORD: ashml
+          POSTGRES_DB: ashml
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ashml -d ashml"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      ASHML_DATABASE_URL: postgresql://ashml:ashml@127.0.0.1:5432/ashml
+      # No bucket in this job, and none needed: the Phase 2 smoke workload writes no
+      # artifacts. `none` is the honest description of a control plane with no store
+      # rather than a simulation of one, so this is a statement about the job, not a
+      # substitution — and if the script ever starts uploading, it fails loudly here
+      # instead of quietly asserting against a fake.
+      ASHML_ARTIFACT_STORE: none
+      # The GPUs are not what is under test; the cluster very much is. `e2e.mjs` sets
+      # both itself, and they are repeated here so a reader of this file can see what
+      # this job is and is not claiming.
+      ASHML_GPU_PROVIDER: sim
+      ASHML_K8S_BACKEND: kubernetes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # Pinned, and installed from the project's own release rather than through a
+      # third-party action: a workflow that pipes an unpinned script into a shell is one
+      # upstream commit away from running something nobody reviewed, and the same is true
+      # of an action referenced by a moving tag.
+      - name: Install k3d
+        env:
+          K3D_VERSION: v5.8.3
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/k3d-io/k3d/${K3D_VERSION}/install.sh" \
+            | TAG="${K3D_VERSION}" bash
+          k3d version
+
+      # `make cluster` rather than a hand-written `k3d cluster create`, so the cluster CI
+      # asserts against is the same one a reader gets from the README's quick start —
+      # same k3s version, same node count, same disabled ingress. Two definitions that
+      # can drift is how a green tick stops describing the thing anybody runs.
+      - name: Create the cluster
+        run: make cluster
+
+      # Builds the smoke image and imports it into the k3d nodes' containerd. The import
+      # is not optional: a k3d node cannot see the host daemon, so without it every Pod
+      # sits in ErrImagePull and the failure reads like a registry problem.
+      - name: Build and import the smoke workload image
+        run: make image
+
+      - name: Migrate
+        run: npm run migrate up
+
+      # The Phase 2 exit criterion, asserted against `kubectl` as well as against AshML's
+      # own view — which is what makes it evidence rather than a self-report.
+      - name: End-to-end against k3d
+        run: make e2e
+
+      # Only on failure, and worth the lines: a red tick that says "timed out waiting for
+      # SUCCEEDED" and nothing else costs a full re-run to learn anything from.
+      - name: What the cluster thought
+        if: failure()
+        run: |
+          kubectl --context k3d-ashml get nodes -o wide || true
+          kubectl --context k3d-ashml get jobs,pods -n ashml-jobs -o wide || true
+          kubectl --context k3d-ashml describe pods -n ashml-jobs || true
+          kubectl --context k3d-ashml logs -n ashml-jobs --all-containers --tail=100 -l app=ashml || true

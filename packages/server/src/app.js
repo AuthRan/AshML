@@ -38,8 +38,10 @@ import { registerDeploymentRoutes } from './routes/deployments.js';
 import { registerObservabilityRoutes } from './routes/observability.js';
 import { registerUiRoutes } from './routes/ui.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerAuditRoutes } from './routes/audit.js';
 import { installAuth } from './auth/install.js';
 import { installRateLimit } from './auth/rate-limit.js';
+import { AuditLog } from './services/audit.js';
 import { createMetrics } from './observability/metrics.js';
 import { createPool } from './db/pool.js';
 import { IllegalTransitionError } from './domain/job-state.js';
@@ -170,9 +172,27 @@ export async function buildApp(config, {
   const ownsStore = store === null;
   app.decorate('db', pool ?? createPool(config));
   app.addHook('onClose', async (instance) => {
+    // Before the pool closes, or the last denials of the process are written to a pool
+    // that has gone — which is the moment they are most worth having.
+    await instance.audit.close();
     if (ownsPool) await instance.db.end();
     if (ownsStore) await instance.artifactStore.close();
   });
+
+  /**
+   * The authorization audit trail, buffered.
+   *
+   * Started here rather than in index.js — unlike the executor, this has to exist for
+   * `app.inject` too, because a refusal in a test is a refusal. It writes on a timer and
+   * is drained on close, so nothing is lost to a graceful shutdown.
+   */
+  const audit = new AuditLog(app.db, {
+    logger: app.log,
+    metrics,
+    intervalMs: config.auditFlushIntervalMs,
+    capacity: config.auditBufferSize,
+  }).start();
+  app.decorate('audit', audit);
 
   app.addSchema(errorSchema);
   app.addSchema(deviceSchema);
@@ -226,6 +246,7 @@ export async function buildApp(config, {
       tags: [
         { name: 'system', description: 'Health and version' },
         { name: 'auth', description: 'Tokens, identity, and project membership' },
+        { name: 'audit', description: 'What the platform refused, and to whom' },
         { name: 'gpus', description: 'GPU inventory and telemetry' },
         { name: 'projects', description: 'Projects and quotas' },
         { name: 'datasets', description: 'Datasets and their immutable versions' },
@@ -255,6 +276,25 @@ export async function buildApp(config, {
       request.log.error({ err }, 'request failed');
     }
 
+    // The one funnel every refusal already passes through, which is why the audit is
+    // written from here. What it records is the `denial` the *service* attached at the
+    // decision — not the status below it, which for project isolation deliberately says
+    // 404 about a refusal that was really a 403 (services/auth.js). Both are stored, and
+    // they are allowed to disagree.
+    if (err.denial && request.principal) {
+      app.audit.record({
+        principal: request.principal,
+        denial: err.denial,
+        status,
+        request: {
+          method: request.method,
+          route: request.routeOptions?.url ?? request.url,
+          requestId: request.id,
+          remoteAddr: request.ip,
+        },
+      });
+    }
+
     // 5xx messages are hidden by default because an unexpected exception's message is
     // an internal detail — a SQL fragment, a stack, a connection string. `expose` is
     // for the 5xx that were *constructed* to be read: an upstream's own answer relayed
@@ -277,6 +317,7 @@ export async function buildApp(config, {
 
   await app.register(registerHealthRoutes);
   await app.register(registerAuthRoutes);
+  await app.register(registerAuditRoutes);
   await app.register(registerObservabilityRoutes);
   await app.register(registerUiRoutes);
   await app.register(registerGpuRoutes);
