@@ -58,17 +58,24 @@ make that small — the target is that a loop needs `run.log_metrics({...}, step
 nothing else — but it is not zero, and the honest limitation is that AshML sees nothing
 from a job that does not opt in.
 
-**The API takes writes from inside the cluster**, which is a new direction of traffic. It
-is unauthenticated in v1, like the rest of the API — auth is Phase 10 — so a job can
-currently report metrics for another job by id. Two things limit the damage in the
-meantime, and both are deliberate:
+**The API takes writes from inside the cluster**, which is a new direction of traffic.
+~~It is unauthenticated in v1, like the rest of the API — auth is Phase 10 — so a job can
+currently report metrics for another job by id.~~ **Closed in Phase 10** (ADR 0013): a
+training attempt carries a token scoped to that job and that attempt, so
+`POST /api/v1/jobs/:id/metrics` is refused for any job but its own — and no *person* can
+write it at all, not an owner and not a platform administrator, because the value of the
+record is that the pod reported what it measured rather than what somebody expected.
+
+The two properties below were the mitigations in the meantime. Both are still true and
+still enforced, and both are worth having independently of authentication:
 
 - The experiment id is copied from the job server-side, never taken from the request, so
   a run cannot attach its numbers to an experiment it does not belong to.
 - Metrics are refused for a job that has not been launched, so ids cannot be probed by
   writing to them.
 
-Neither is a substitute for authentication. Stated plainly rather than left implied.
+Neither was a substitute for authentication, which is why this paragraph said so plainly
+while there was none.
 
 **Late reports are accepted.** A run that buffers metrics and flushes at the end reports
 after its pod is gone, and an upload confirmed after the job succeeded is the normal case

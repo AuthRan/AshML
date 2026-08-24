@@ -36,6 +36,7 @@
  *   a control plane running with its deployment sync loop, reachable from a pod:
  *     HOST_IP=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
  *     ASHML_API_ADVERTISE_URL=http://$HOST_IP:8080 ASHML_S3_ENDPOINT=http://$HOST_IP:9000 npm start
+ *   export ASHML_TOKEN=$(make -s token)   # the API is default-deny since Phase 10
  *
  * It trains the two versions it rolls out, because two versions someone made by hand are
  * a test of a hand-made setup. They are deliberately tiny — MAX_STEPS, and they say so —
@@ -49,6 +50,7 @@ import { spawn } from 'node:child_process';
 
 // Pinned to one context rather than following `current-context`. See scripts/lib/kubectl.mjs.
 import { kubectl, requireContext, contextArgs, KUBE_CONTEXT } from './lib/kubectl.mjs';
+import { withToken, explainIfUnauthorized } from './lib/token.mjs';
 
 const ENDPOINT = (process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 const NAMESPACE = process.env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs';
@@ -71,11 +73,15 @@ const DEPLOYMENT = MODEL;
 async function api(method, path, body) {
   const response = await fetch(`${ENDPOINT}${path}`, {
     method,
-    headers: body ? { 'content-type': 'application/json' } : {},
+    headers: withToken(body ? { 'content-type': 'application/json' } : {}),
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await response.text();
-  if (response.status >= 400) throw new Error(`${method} ${path} -> ${response.status}: ${text}`);
+  if (response.status >= 400) {
+    throw new Error(
+      `${method} ${path} -> ${response.status}: ${text}${explainIfUnauthorized(response.status)}`,
+    );
+  }
   return text ? JSON.parse(text) : {};
 }
 

@@ -1,6 +1,7 @@
 # Exercises the Phase 4 reporting contract inside the cluster: metrics pushed from the
 # container, checkpoints uploaded to object storage, the experiment stamped by the run.
 #
+#   export ASHML_TOKEN=$(make -s token)   # or: ash login
 #   ash experiment create sdk-smoke --project vision
 #   ash job submit examples/training/sdk-smoke.yaml --experiment <experiment-id>
 #

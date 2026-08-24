@@ -9,6 +9,7 @@ GPU number anywhere in this document, because no GPU reaches a node on this clus
 (ADR 0008) — a "projected" GPU figure would be the exact thing Rule 5 forbids.
 
 ```bash
+export ASHML_TOKEN=$(make -s token)         # the API is default-deny; bench needs one
 make bench                                  # everything
 node scripts/bench.mjs --inference --json   # one section, machine-readable
 ```

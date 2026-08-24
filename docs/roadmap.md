@@ -879,6 +879,15 @@ places; this is the part of Phase 10 that is now built, and the part that is not
   quota.
 - `ash login`, `ash whoami`, `ash token create|list|revoke`, `ash member add|remove|list`.
 
+### Upgrading an existing cluster
+
+Rebuild every image — `make image && make resnet-image && make model-server-image &&
+make router-image`. All four talk to the control plane and all four now have to prove who
+they are. An older image calls the API anonymously and fails in a way that does not name
+the cause: a model server with `HTTP 401 fetching the model`, which looks like a
+control-plane fault; a training pod with `ApiError: authentication required` at its first
+artifact upload, minutes into an otherwise healthy run.
+
 ### The one asymmetry worth stating
 
 **A person cannot report a run's results — not even a platform administrator.** The value

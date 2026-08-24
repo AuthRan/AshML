@@ -8,7 +8,7 @@
  * `npm start` gives you the API and the dashboard at one address and there is no second
  * thing to deploy or keep in sync.
  *
- * **It holds no logic.** The page is a browser client of the same public API `ash` calls,
+ * **It holds no logic.** The page is a browser client of the same API `ash` calls,
  * which is the rule the CLI already follows (spec §28): anything the dashboard shows, the
  * API can be asked for directly, and nothing is computed here that is not computed for
  * every other caller. That is also why it adds no endpoints of its own — a `/overview`

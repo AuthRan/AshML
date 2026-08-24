@@ -124,8 +124,9 @@ router-image: ## Build the model router image and load it into the cluster
 # The public demo is the *serving* slice of this platform and nothing more: the same
 # `serve.py` a Deployment runs, loading a model version this control plane registered.
 # The control plane itself is not deployable to a public URL -- it creates Kubernetes
-# Jobs and has no authentication until Phase 10 -- and the Space's README says so rather
-# than letting a live link imply otherwise.
+# Jobs, and while it authenticates every request since Phase 10 it still has no rate
+# limiting and no audit of refusals -- and the Space's README says so rather than letting
+# a live link imply otherwise.
 
 SPACE_PROJECT ?= ashml-demo
 SPACE_MODEL   ?= resnet18-cifar10
@@ -214,7 +215,7 @@ test: ## Unit and integration tests
 	npm test
 
 .PHONY: test-sdk
-test-sdk: ## Python SDK tests (add ASHML_ENDPOINT to include the live suite)
+test-sdk: ## Python SDK tests (ASHML_ENDPOINT + ASHML_TOKEN adds the live suite)
 	python3 -m unittest discover -s sdk/python/tests -v
 
 .PHONY: e2e
@@ -271,7 +272,14 @@ chaos-resume-resnet: ## The same chaos, against ResNet-18: weights, optimizer an
 	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} CHAOS_WORKLOAD=resnet CHAOS_TIMEOUT_MS=600000 node scripts/chaos-resume.mjs
 
 .PHONY: bench
-bench: ## Measured benchmarks against a running control plane (see docs/benchmarks.md)
+bench: ## Measured benchmarks against a running control plane (needs ASHML_TOKEN)
+	# Like every target here that talks to a control plane somebody else started --
+	# bench, the three chaos scripts, e2e-rollout, space and journey -- this needs a
+	# token, because the API is default-deny since Phase 10:
+	#
+	#   export ASHML_TOKEN=$$(make -s token)
+	#
+	# The scripts say so themselves on a 401 rather than leaving you to work it out.
 	# Needs a control plane already running, because what is being measured includes the
 	# event loop that is also running a scheduler. Set BENCH_PROJECT to a project with a
 	# READY deployment to include the inference sweep.

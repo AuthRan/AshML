@@ -4,13 +4,27 @@
 accepts it — which is the half a stub can never check, because a stub agrees with
 whatever the SDK does.
 
-Skips visibly when there is no server, in the same spirit as the JavaScript integration
-suites. Point it at one with::
+Skips visibly when it cannot run, in the same spirit as the JavaScript integration
+suites — never silently, and never by failing. Point it at a server with::
 
     ASHML_ENDPOINT=http://127.0.0.1:8080 python3 -m unittest discover -s sdk/python/tests
 
 The server must have an artifact store configured, or the upload assertions cannot mean
 anything.
+
+**Against an authenticated control plane this suite needs two credentials**, and the
+second one is the interesting part:
+
+* ``ASHML_TOKEN`` — a user token, for the setup calls that create the project, the
+  experiment and the job. ``make token`` prints one.
+* ``ASHML_RUN_TOKEN`` — the credential the *run* reports with. This one cannot be created
+  by hand: the control plane mints it when it launches a pod, and reporting a run's own
+  results is the one thing no person's token may do, however privileged (ADR 0013). So
+  there is no way for a test outside a pod to obtain one over HTTP.
+
+That leaves two honest ways to run this suite: against a control plane started with
+``ASHML_AUTH_ENABLED=false`` (which is what the k3d scripts use), or with a run token
+lifted from a real pod. Anything else skips, and says which of the two is missing.
 """
 
 from __future__ import annotations
@@ -29,17 +43,48 @@ import ashml  # noqa: E402
 from ashml._client import ApiError, Client  # noqa: E402
 
 ENDPOINT = os.environ.get("ASHML_ENDPOINT", "http://127.0.0.1:8080")
+TOKEN = os.environ.get("ASHML_TOKEN") or None
+RUN_TOKEN = os.environ.get("ASHML_RUN_TOKEN") or None
 
 
-def _server_is_up() -> bool:
+def _status(path: str, token: str | None) -> int | None:
+    """The status of a GET, or None if nothing answered."""
+    request = urllib.request.Request(f"{ENDPOINT}{path}")
+    if token:
+        request.add_header("authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(f"{ENDPOINT}/healthz", timeout=2) as res:
-            return res.status == 200
+        with urllib.request.urlopen(request, timeout=2) as res:
+            return res.status
+    except urllib.error.HTTPError as err:
+        return err.code
     except (urllib.error.URLError, TimeoutError, OSError):
-        return False
+        return None
 
 
-SKIP = None if _server_is_up() else f"no AshML at {ENDPOINT} — start one to include these tests"
+def _why_skip() -> str | None:
+    """Which of the preconditions is missing, named precisely."""
+    if _status("/healthz", None) != 200:
+        return f"no AshML at {ENDPOINT} — start one to include these tests"
+
+    # `/api/v1/version` needs a principal but no permission, so it is the cheapest probe
+    # for "is this server authenticated, and does my token work".
+    if _status("/api/v1/version", None) == 200:
+        return None  # ASHML_AUTH_ENABLED=false: everything below works without credentials
+
+    if not TOKEN:
+        return (f"{ENDPOINT} is authenticated and ASHML_TOKEN is not set — "
+                "run `export ASHML_TOKEN=$(make -s token)`")
+    if _status("/api/v1/version", TOKEN) != 200:
+        return f"{ENDPOINT} rejected ASHML_TOKEN — wrong endpoint, or the token is revoked"
+    if not RUN_TOKEN:
+        return ("ASHML_RUN_TOKEN is not set. Reporting a run's results is refused for "
+                "every user token by design, and a run token is minted only when the "
+                "control plane launches a pod — so this suite needs one lifted from a "
+                "real pod, or a control plane started with ASHML_AUTH_ENABLED=false")
+    return None
+
+
+SKIP = _why_skip()
 
 
 @unittest.skipIf(SKIP, SKIP)
@@ -48,7 +93,7 @@ class LiveTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api = Client(ENDPOINT)
+        cls.api = Client(ENDPOINT, token=TOKEN)
         cls.project = f"sdk-{os.getpid()}-{int(time.time())}"
         cls.api.request("POST", "/api/v1/projects", {"name": cls.project, "gpu_quota": 8})
 
@@ -91,6 +136,7 @@ class LiveTest(unittest.TestCase):
             endpoint=ENDPOINT,
             job_id=job["id"],
             experiment_id=self.experiment["id"],
+            token=RUN_TOKEN,
             strict=True,
             **options,
         )
@@ -178,7 +224,10 @@ class LiveTest(unittest.TestCase):
             "resources": {"cpu": 1, "gpu": 99},
         })
 
-        run = ashml.init(endpoint=ENDPOINT, job_id=queued["id"], report_start=False, strict=True)
+        run = ashml.init(
+            endpoint=ENDPOINT, job_id=queued["id"], token=RUN_TOKEN,
+            report_start=False, strict=True,
+        )
         with self.assertRaises(ApiError) as caught:
             run.log_metrics({"loss": 1.0}, step=0)
             run.flush()

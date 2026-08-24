@@ -31,8 +31,9 @@ message would ever point at.
 It is **not** the platform. AshML's control plane — the REST API, the scheduler that
 decides whether a job may run and on which node, the executor that drives Kubernetes Jobs,
 the artifact verification, the model registry and the traffic-splitting router — needs a
-Kubernetes cluster, PostgreSQL and an object store. It also has no authentication until
-Phase 10, so it is deliberately not something to put behind a public URL.
+Kubernetes cluster, PostgreSQL and an object store. The API authenticates every request
+now, but it still has no rate limiting and no audit of refusals, so it is deliberately not
+something to put behind a public URL.
 
 To run the whole thing: [github.com/AuthRan/AshML](https://github.com/AuthRan/AshML).
 

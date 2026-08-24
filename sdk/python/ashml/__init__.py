@@ -13,8 +13,11 @@ which means a training script has to say something. This package exists to make 
         run.log_artifact("checkpoints/final.pt", kind="model")
 
 ``init()`` takes its identity from the environment AshML injects into every training
-container — ``ASHML_ENDPOINT``, ``ASHML_JOB_ID``, ``ASHML_EXPERIMENT_ID`` — so the same
-script runs unchanged under the platform and, with those set by hand, outside it.
+container — ``ASHML_ENDPOINT``, ``ASHML_JOB_ID``, ``ASHML_EXPERIMENT_ID`` and
+``ASHML_RUN_TOKEN`` — so the same script runs unchanged under the platform. The first
+three can be set by hand to run outside a job; the token cannot, because the control plane
+mints it when it launches a pod and reporting a run's results is the one thing no person's
+credential may do (ADR 0013).
 
 A retried job is additionally offered the checkpoint it can resume from, and a workload
 that wants to take up the offer asks for it::

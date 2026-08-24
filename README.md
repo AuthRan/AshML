@@ -488,6 +488,20 @@ the roadmap and never fixed: the metric and artifact ingest paths took writes fr
 the cluster with no authentication at all, so anything that could reach the control plane
 could report results for any job.
 
+> **Upgrading an existing cluster: rebuild every image.** Each one talks to the control
+> plane, and each one now has to prove who it is:
+>
+> ```bash
+> make image && make resnet-image && make model-server-image && make router-image
+> ```
+>
+> An image built before Phase 10 ignores the `ASHML_RUN_TOKEN` AshML gives it and calls the
+> API anonymously. The failures do not look like credential problems, which is the reason
+> this is a callout and not a footnote: a model server dies with `HTTP 401 fetching the
+> model`, which reads as a control-plane fault, and a training pod crashes with
+> `ApiError: authentication required` at its *first artifact upload* — minutes into a run
+> that had otherwise been going fine.
+
 Full reasoning, and an explicit list of what is *not* built — no identity provider, no
 Kubernetes RBAC, no rate limiting, no audit of refusals — is in
 [ADR 0013](docs/adr/0013-tokens-for-people-and-tokens-for-pods.md) and

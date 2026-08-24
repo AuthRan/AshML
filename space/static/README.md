@@ -40,8 +40,8 @@ different filter and would quietly shift the answers.
 It is not the platform. The scheduler that decides whether a job may run and where, the
 executor driving Kubernetes Jobs, artifact verification, the model registry and the
 traffic-splitting router all need a cluster, PostgreSQL and an object store. The control
-plane API also has no authentication until Phase 10, so it is deliberately not on a public
-URL.
+plane API authenticates every request now, but still has no rate limiting and no audit of
+refusals, so it is deliberately not on a public URL.
 
 - **Source:** https://github.com/AuthRan/AshML
 - **Project site:** https://authran.github.io/AshML/

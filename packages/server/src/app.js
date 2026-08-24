@@ -183,9 +183,28 @@ export async function buildApp(config, {
         title: 'AshML API',
         description:
           'Control-plane API for the AshML Kubernetes-native GPU ML platform. '
-          + 'Generated from the route schemas — do not edit by hand.',
+          + 'Generated from the route schemas — do not edit by hand.\n\n'
+          + 'Default deny: every `/api/v1` request needs `Authorization: Bearer <token>`. '
+          + 'A person gets one from `ash token create`; the first one comes from '
+          + '`make token`, which writes it straight to the database because the endpoint '
+          + 'that mints tokens needs one itself. Training and serving pods are handed '
+          + 'their own scoped credentials by the platform and do not use these.',
         version: config.version,
       },
+      // Declared so the /docs page offers an Authorize box. Without it every "Try it
+      // out" on this page answers 401 with nothing the reader can do about it, and a
+      // generated client emits no auth support at all — which is a poor advertisement
+      // for an API whose first property is that it authenticates.
+      components: {
+        securitySchemes: {
+          bearerAuth: {
+            type: 'http',
+            scheme: 'bearer',
+            description: 'An AshML API token. See `ash token create`.',
+          },
+        },
+      },
+      security: [{ bearerAuth: [] }],
       servers: [{ url: '/', description: 'Current host' }],
       tags: [
         { name: 'system', description: 'Health and version' },

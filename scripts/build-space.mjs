@@ -18,12 +18,14 @@
  * being bytes nobody confirmed, and shipping it would put the platform's own guarantee
  * behind something that never earned it.
  *
+ *   export ASHML_TOKEN=$(make -s token)   # the API is default-deny since Phase 10
  *   node scripts/build-space.mjs --project ashml-demo --model resnet18-cifar10
  */
 
 import { mkdir, writeFile, readdir, copyFile } from 'node:fs/promises';
 import { argv, env, exit } from 'node:process';
 import path from 'node:path';
+import { withToken, explainIfUnauthorized } from './lib/token.mjs';
 
 const ENDPOINT = env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080';
 const ROOT = path.resolve(import.meta.dirname, '..');
@@ -38,9 +40,14 @@ function arg(name, fallback) {
 }
 
 async function api(pathname) {
-  const response = await fetch(`${ENDPOINT}${pathname}`, { headers: { accept: 'application/json' } });
+  const response = await fetch(`${ENDPOINT}${pathname}`, {
+    headers: withToken({ accept: 'application/json' }),
+  });
   if (!response.ok) {
-    throw new Error(`GET ${pathname} -> ${response.status} ${await response.text()}`);
+    throw new Error(
+      `GET ${pathname} -> ${response.status} ${await response.text()}`
+      + explainIfUnauthorized(response.status),
+    );
   }
   return response.json();
 }

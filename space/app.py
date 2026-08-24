@@ -162,8 +162,9 @@ Kubernetes-native ML platform: the same `serve.py` the cluster deploys, loading 
 artifact an AshML training run produced, normalising exactly the way it was trained.
 
 It is not the platform. The scheduler, the executor, the artifact verification, the model
-registry and the traffic-splitting router need a cluster — and the control plane API has
-no authentication until Phase 10, so it is deliberately not on a public URL.
+registry and the traffic-splitting router need a cluster — and while the control plane API
+authenticates every request, it has no rate limiting and no audit of refusals, so it is
+deliberately not on a public URL.
 [**The repository**](https://github.com/AuthRan/AshML) ·
 [**The project site**](https://authran.github.io/AshML/)
 """

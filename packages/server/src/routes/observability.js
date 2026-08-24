@@ -7,7 +7,11 @@
  * (ADR 0009 — training metrics are pushed by the run, infrastructure metrics are scraped
  * from here).
  *
- * Unauthenticated, like the rest of v1 (auth is Phase 10). What it exposes is counts and
+ * Unauthenticated — the one deliberate exception to Phase 10's default deny, listed in
+ * `auth/install.js`'s PUBLIC_PATHS and protected by not being routable from outside the
+ * cluster rather than by a credential: a scrape target that needs a token turns an auth
+ * misconfiguration into an outage of the thing that would have reported it. What it
+ * exposes is counts and
  * durations plus project and deployment *names* — no hyperparameters, no metric values
  * from a run, no artifact URIs. That is not a substitute for authentication and is not
  * offered as one; it is the reason this is the endpoint least urgent to protect.

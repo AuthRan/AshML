@@ -133,6 +133,48 @@ second pass:
 - The CLI truncated its credential file before rewriting it, so a crash mid-write lost
   every endpoint's token rather than one. Now written to a temporary file and renamed.
 
+## Upgrading
+
+**Every image must be rebuilt** — the two trainers, the model server and the router:
+
+```bash
+make image && make resnet-image && make model-server-image && make router-image
+```
+
+Each of them talks to the control plane, and an image built before this change ignores the
+`ASHML_RUN_TOKEN` it is given and calls the API anonymously. What makes this worth a
+section rather than a line is that neither failure names the cause:
+
+- a **model server** dies with `HTTP 401 fetching the model`, which reads as a
+  control-plane fault;
+- a **training pod** runs normally and then crashes at its first artifact upload with
+  `ApiError: authentication required: send a bearer token` — minutes in, on a run that had
+  been reporting nothing and looking fine.
+
+Both were found by running `make journey` against images already in the cluster, and the
+second was found only after the first was fixed. The initial version of this section said
+training images needed no rebuild, on the reasoning that the SDK warns rather than fails
+when it has no token. That reasoning was about `init()`; it says nothing about the
+*reports*, and every report is refused.
+
+## One operational hazard, found the hard way
+
+**A control plane from before this change, still running against the same database, undoes
+it.** Not partially — completely, for anything it happens to claim. Its executor takes
+jobs off the shared queue and launches them with no token, and its API accepts their
+unauthenticated reports, because it predates the code that would refuse them.
+
+This is worth writing down because of how it presents. Everything looks fine: jobs run,
+metrics arrive, the journey passes. Nothing in either process complains, and the *new*
+control plane is behaving perfectly — it is simply not the one that handled that job. It
+was found here by noticing that a training pod had reported 22 metric points while its
+Pod spec contained no `ASHML_RUN_TOKEN` at all, which is not a state either version can
+produce on its own.
+
+There is no code fix, and adding one — a version handshake, an instance registry — would
+be machinery for a mistake that a sentence prevents: **stop the old control plane before
+starting the new one**, and if a result looks impossible, check how many are running.
+
 ## Consequences
 - Every integration suite now authenticates, so they exercise the default-deny path that
   ships rather than a switched-off variant of it.

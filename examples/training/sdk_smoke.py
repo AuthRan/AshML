@@ -13,7 +13,8 @@ Run it under the platform:
 
 or against a control plane from the shell:
 
-    ASHML_ENDPOINT=http://127.0.0.1:8080 ASHML_JOB_ID=<id> python3 examples/training/sdk_smoke.py
+    ASHML_ENDPOINT=http://127.0.0.1:8080 ASHML_JOB_ID=<id> \
+#     ASHML_RUN_TOKEN=<the token AshML injects into the pod> python3 examples/training/sdk_smoke.py
 """
 
 import json

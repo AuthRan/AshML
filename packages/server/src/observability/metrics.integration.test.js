@@ -191,7 +191,7 @@ describe('/metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
   });
 
   test('a scrape carries no hyperparameters, artifact URIs or metric values', async () => {
-    // What the endpoint is allowed to know. It is unauthenticated like the rest of v1, so
+    // What the endpoint is allowed to know. It is the one endpoint Phase 10 left public, so
     // the list of what it exposes — counts, durations, and project and deployment names —
     // is a property worth asserting rather than a habit.
     const { lines } = await scrape();
@@ -224,9 +224,10 @@ describe('/metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
 
   test('a 404 on an arbitrary path mints no series', async () => {
     // Nothing matched, so there is no route — and whatever was typed must not become a
-    // label. This is the same hole from the other side: an unauthenticated endpoint that
-    // anyone can add series to is an unauthenticated endpoint anyone can fill the disk
-    // with.
+    // label. Phase 10 narrowed this from the other side: an unmatched path is refused with
+    // a 401 before it reaches a handler at all. The property is still worth asserting,
+    // because the caller who gets that far now holds a valid token, and a caller with a
+    // token must not be able to mint a series per typo.
     await app.inject({ method: 'GET', url: '/api/v1/does-not-exist-6a1f' });
 
     const { lines } = await scrape();

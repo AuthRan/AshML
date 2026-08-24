@@ -1,10 +1,23 @@
 openapi: 3.1.0
 info:
   title: AshML API
-  description: Control-plane API for the AshML Kubernetes-native GPU ML platform.
-    Generated from the route schemas — do not edit by hand.
+  description: >-
+    Control-plane API for the AshML Kubernetes-native GPU ML platform. Generated
+    from the route schemas — do not edit by hand.
+
+
+    Default deny: every `/api/v1` request needs `Authorization: Bearer <token>`.
+    A person gets one from `ash token create`; the first one comes from `make
+    token`, which writes it straight to the database because the endpoint that
+    mints tokens needs one itself. Training and serving pods are handed their
+    own scoped credentials by the platform and do not use these.
   version: 0.1.0-dev
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: An AshML API token. See `ash token create`.
   schemas:
     def-0:
       type: object
@@ -4082,6 +4095,8 @@ paths:
 servers:
   - url: /
     description: Current host
+security:
+  - bearerAuth: []
 tags:
   - name: system
     description: Health and version

@@ -21,6 +21,7 @@
  *   a control plane reachable *from a pod* (see the README's two-addresses note):
  *     HOST_IP=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
  *     ASHML_API_ADVERTISE_URL=http://$HOST_IP:8080 ASHML_S3_ENDPOINT=http://$HOST_IP:9000 npm start
+ *   export ASHML_TOKEN=$(make -s token)   # the API is default-deny since Phase 10
  *
  * Run: make chaos-resume
  */
@@ -31,6 +32,7 @@ import assert from 'node:assert/strict';
 // and pinned to one context rather than following `current-context`, because this script
 // deletes a pod. See scripts/lib/kubectl.mjs.
 import { kubectl, requireContext, KUBE_CONTEXT } from './lib/kubectl.mjs';
+import { withToken, explainIfUnauthorized } from './lib/token.mjs';
 
 const ENDPOINT = (process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 const NAMESPACE = process.env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs';
@@ -113,13 +115,15 @@ const project = `chaos-${suffix}`;
 async function api(method, path, body) {
   const response = await fetch(`${ENDPOINT}${path}`, {
     method,
-    headers: body ? { 'content-type': 'application/json' } : {},
+    headers: withToken(body ? { 'content-type': 'application/json' } : {}),
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
   if (response.status >= 400) {
-    throw new Error(`${method} ${path} -> ${response.status}: ${text}`);
+    throw new Error(
+      `${method} ${path} -> ${response.status}: ${text}${explainIfUnauthorized(response.status)}`,
+    );
   }
   return payload;
 }

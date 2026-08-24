@@ -1,5 +1,6 @@
 # ResNet-18 on CIFAR-10 — the Phase 4 exit criterion, as actually run.
 #
+#   export ASHML_TOKEN=$(make -s token)   # or: ash login
 #   ash experiment create resnet-cifar --project vision --dataset cifar10 --dataset-version v1
 #   ash job submit examples/training/resnet-cifar.yaml --experiment <experiment-id>
 #

@@ -66,8 +66,8 @@ graph over the full test set and refuses to write the export unless they agree:<
 <p>It is not the platform. The scheduler that decides whether a job may run and where, the
 executor driving Kubernetes Jobs, artifact verification, the model registry and the
 traffic-splitting router all need a cluster, PostgreSQL and an object store. The control
-plane API also has no authentication until Phase&nbsp;10, so it is deliberately not on a
-public URL.</p>
+plane API authenticates every request now, but still has no rate limiting and no audit
+of refusals, so it is deliberately not on a public URL.</p>
 
 <ul>
   <li><a href="https://github.com/AuthRan/AshML">Source on GitHub</a></li>

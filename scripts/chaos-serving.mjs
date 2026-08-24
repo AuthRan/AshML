@@ -25,6 +25,7 @@
  * plane running with its deployment sync loop, reachable at ASHML_ENDPOINT.
  *
  * Run: make chaos-serving
+ *   export ASHML_TOKEN=$(make -s token)   # the API is default-deny since Phase 10
  */
 
 import assert from 'node:assert/strict';
@@ -33,6 +34,7 @@ import { spawn } from 'node:child_process';
 // kubectl is pinned to one context rather than following `current-context`, because this
 // script deletes a pod. See scripts/lib/kubectl.mjs.
 import { kubectl, requireContext, contextArgs, KUBE_CONTEXT } from './lib/kubectl.mjs';
+import { withToken, explainIfUnauthorized } from './lib/token.mjs';
 
 const ENDPOINT = (process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 const NAMESPACE = process.env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs';
@@ -47,11 +49,15 @@ const INSTANCES = Number(process.env.CHAOS_INSTANCES ?? 8);
 async function api(method, path, body) {
   const response = await fetch(`${ENDPOINT}${path}`, {
     method,
-    headers: body ? { 'content-type': 'application/json' } : {},
+    headers: withToken(body ? { 'content-type': 'application/json' } : {}),
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await response.text();
-  if (response.status >= 400) throw new Error(`${method} ${path} -> ${response.status}: ${text}`);
+  if (response.status >= 400) {
+    throw new Error(
+      `${method} ${path} -> ${response.status}: ${text}${explainIfUnauthorized(response.status)}`,
+    );
+  }
   return text ? JSON.parse(text) : {};
 }
 

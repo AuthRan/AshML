@@ -107,9 +107,13 @@ Two rules, both of which have a specific failure behind them:
   is one series per job.
 - **A label may only carry a name that resolved.** Prediction metrics are labelled from
   the deployment row, after the lookup, so a request naming a deployment that does not
-  exist mints nothing. `/metrics` is unauthenticated (auth is Phase 10), and an
-  unauthenticated endpoint anyone can add series to is an unauthenticated endpoint anyone
-  can fill the disk with.
+  exist mints nothing. `/metrics` is the one endpoint Phase 10 left public — Prometheus
+  scrapes it, and a scrape target that needs a token turns an auth misconfiguration into
+  an outage of the thing that would have reported it — so it is protected by not being
+  routable from outside the cluster rather than by a credential. The routes that *mint*
+  these labels are default-deny now, which narrows the vector considerably; an endpoint
+  anyone can add series to is still an endpoint anyone can fill the disk with, and this is
+  still the one to be careful about.
 
 cAdvisor is filtered to four series for the same reason. Unfiltered it is tens of
 thousands, and that is the usual reason a small Prometheus falls over.

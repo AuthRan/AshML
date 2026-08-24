@@ -431,6 +431,7 @@ make cluster        <span class="c"># create the local k3d cluster</span>
 make image          <span class="c"># build the workload image, load it into the cluster</span>
 npm start           <span class="c"># the control plane: API + executor</span>
 
+export ASHML_TOKEN=$(make -s token)   <span class="c"># the API is default-deny</span>
 make journey        <span class="c"># the §50 user journey, all nine steps, ~8 minutes</span></code></pre>
     </div>
     <p class="cap">Requires Node.js 22+, Docker, and <a href="https://k3d.io">k3d</a> +

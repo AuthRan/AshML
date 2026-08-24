@@ -6,6 +6,7 @@
  * on, rather than figures somebody typed. Re-run it and the numbers move; that is the
  * point.
  *
+ *   export ASHML_TOKEN=$(make -s token)   # the API is default-deny since Phase 10
  *   make bench                       # everything, against a running control plane
  *   node scripts/bench.mjs --api     # one section
  *   node scripts/bench.mjs --json    # for scripting
@@ -28,6 +29,7 @@
 
 import os from 'node:os';
 import process from 'node:process';
+import { withToken, explainIfUnauthorized } from './lib/token.mjs';
 
 const ENDPOINT = process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080';
 const PROJECT = process.env.BENCH_PROJECT ?? null;
@@ -46,13 +48,15 @@ const sections = ['api', 'scheduling', 'inference'].filter(
 async function api(path, { method = 'GET', body = null } = {}) {
   const res = await fetch(new URL(path, ENDPOINT), {
     method,
-    headers: body ? { 'content-type': 'application/json' } : undefined,
+    headers: withToken(body ? { 'content-type': 'application/json' } : {}),
     body: body ? JSON.stringify(body) : undefined,
   });
   const payload = await res.json().catch(() => null);
   if (!res.ok) {
     const message = payload?.error?.message ?? res.statusText;
-    throw new Error(`${method} ${path} -> ${res.status}: ${message}`);
+    throw new Error(
+      `${method} ${path} -> ${res.status}: ${message}${explainIfUnauthorized(res.status)}`,
+    );
   }
   return payload;
 }

@@ -37,10 +37,20 @@ added would be one that could conflict with theirs. Everything here is standard 
 | `ASHML_JOB_ID` | the platform | Which run this is. Required. |
 | `ASHML_ENDPOINT` | the platform | Where the control plane is. Required. |
 | `ASHML_EXPERIMENT_ID` | the platform | Set when the job was submitted against an experiment |
+| `ASHML_RUN_TOKEN` | the platform | The credential this attempt reports with. Scoped to this job and this attempt, minted when the pod launches and revoked when the attempt ends |
 
-AshML sets all three in the container and **protects them from being overwritten** by a
+AshML sets all four in the container and **protects them from being overwritten** by a
 job's own `spec.env` — a job that could shadow `ASHML_JOB_ID` would report its results
-onto another run's record. Outside a job, pass them to `init()` explicitly.
+onto another run's record.
+
+Outside a job, `init()` still needs an endpoint and a job id passed explicitly — but the
+token is a different matter. A run token is minted by the control plane when it launches
+a pod, so there is no way to obtain one by hand, and no *person's* token will do either:
+reporting a run's own results is the one thing no user account can do, however privileged
+(ADR 0013). So a script run outside a job reports nothing against an authenticated control
+plane, and `init()` warns rather than failing, because a control plane running with
+`ASHML_AUTH_ENABLED=false` accepts the reports anyway and that is the mode the
+end-to-end scripts use.
 
 `ASHML_ENDPOINT` only appears if the control plane was configured with
 `ASHML_API_ADVERTISE_URL`. If it was not, `init()` says so rather than guessing an
@@ -119,8 +129,11 @@ guess is the one thing it must never contain (spec Rule 5).
 
 ```bash
 python3 -m unittest discover -s sdk/python/tests -v      # unit, no server needed
-ASHML_ENDPOINT=http://127.0.0.1:8080 \
-  python3 -m unittest discover -s sdk/python/tests -v    # adds the live suite
+
+# Adds the live suite. The token is not optional: the API is default-deny, and without
+# one the live tests fail rather than skip — which is the worse of the two outcomes.
+ASHML_ENDPOINT=http://127.0.0.1:8080 ASHML_TOKEN=$(make -s token) \
+  python3 -m unittest discover -s sdk/python/tests -v
 ```
 
 The unit tests run against a real HTTP server on a real socket rather than a patched
