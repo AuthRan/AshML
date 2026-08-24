@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 
 import { buildApp } from '../app.js';
 import { loadConfig } from '../config.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE } from '../test-support/db.js';
+import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -26,6 +26,7 @@ describe('datasets (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     const config = loadConfig({ ASHML_GPU_PROVIDER: 'sim', ASHML_VERSION: '0.0.0-test' });
     app = await buildApp(config, { logger: false, pool });
     await app.ready();
+    await authenticateAs(app, pool);
   });
 
   after(async () => {

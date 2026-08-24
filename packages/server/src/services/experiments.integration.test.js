@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 
 import { buildApp } from '../app.js';
 import { loadConfig } from '../config.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE } from '../test-support/db.js';
+import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -26,6 +26,7 @@ describe('experiments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     const config = loadConfig({ ASHML_GPU_PROVIDER: 'sim', ASHML_VERSION: '0.0.0-test' });
     app = await buildApp(config, { logger: false, pool });
     await app.ready();
+    await authenticateAs(app, pool);
   });
 
   after(async () => {
@@ -225,8 +226,30 @@ describe('experiments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
   });
 
   describe('a run reporting on itself', () => {
-    function report(id, payload) {
-      return app.inject({ method: 'POST', url: `/api/v1/experiments/${id}/report`, payload });
+    /**
+     * An experiment with a job attached, and the run token that job reports with.
+     *
+     * The name of this block is now load-bearing. Reproducibility capture is addressed by
+     * *experiment* id, but it is still the run describing itself, so only a run token
+     * whose job belongs to that experiment is accepted (ADR 0013) — a person cannot
+     * author the record, because the whole value of it is that the pod reported what it
+     * observed rather than what somebody expected (ADR 0009, spec Rule 5).
+     *
+     * So these tests need a real job in the experiment, where before they could report
+     * against a bare one.
+     */
+    async function experimentWithRun(payload) {
+      const experiment = (await createExperiment(payload)).json();
+      const submitted = await submitJob({ experiment: experiment.id });
+      assert.equal(submitted.statusCode, 201, submitted.payload);
+      const job = submitted.json();
+      return { experiment, headers: await asRun(pool, job.id) };
+    }
+
+    function report(id, payload, headers) {
+      return app.inject({
+        method: 'POST', url: `/api/v1/experiments/${id}/report`, payload, headers,
+      });
     }
 
     test('a fresh experiment has started nothing and observed nothing', async () => {
@@ -241,14 +264,14 @@ describe('experiments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     });
 
     test('reporting a start stamps the time and records what the run observed', async () => {
-      const experiment = (await createExperiment()).json();
+      const { experiment, headers } = await experimentWithRun();
 
       const res = await report(experiment.id, {
         phase: 'started',
         framework: 'pytorch 2.4.1',
         hardware: { gpus: 1, model: 'NVIDIA GeForce RTX 2080 Ti', cuda: '12.4' },
         sdk_version: '0.1.0',
-      });
+      }, headers);
       assert.equal(res.statusCode, 200, res.payload);
 
       const reported = res.json();
@@ -263,10 +286,10 @@ describe('experiments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     });
 
     test('finishing stamps the end without disturbing the start', async () => {
-      const experiment = (await createExperiment()).json();
-      const started = (await report(experiment.id, { phase: 'started' })).json();
+      const { experiment, headers } = await experimentWithRun();
+      const started = (await report(experiment.id, { phase: 'started' }, headers)).json();
 
-      const finished = (await report(experiment.id, { phase: 'finished' })).json();
+      const finished = (await report(experiment.id, { phase: 'finished' }, headers)).json();
       assert.equal(finished.started_at, started.started_at);
       assert.ok(finished.ended_at);
       assert.ok(
@@ -276,15 +299,15 @@ describe('experiments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     });
 
     test('a second run does not reset when the experiment started', async () => {
-      const experiment = (await createExperiment()).json();
+      const { experiment, headers } = await experimentWithRun();
       const first = (await report(experiment.id, {
         phase: 'started', framework: 'pytorch 2.4.1',
-      })).json();
+      }, headers)).json();
 
       // A retry is the ordinary case. The experiment started when its first run did.
       const second = (await report(experiment.id, {
         phase: 'started', framework: 'pytorch 2.5.0',
-      })).json();
+      }, headers)).json();
 
       assert.equal(second.started_at, first.started_at, 'started_at is COALESCEd, not overwritten');
       // The observed fields do move: the useful answer to "what did this run on" is
@@ -293,24 +316,37 @@ describe('experiments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     });
 
     test('finishing a run whose start was never reported is accepted', async () => {
-      const experiment = (await createExperiment()).json();
+      const { experiment, headers } = await experimentWithRun();
 
       // A crashed reporter, or an SDK upgraded mid-run. Half a record beats none, so
       // this is stamped rather than refused.
-      const res = await report(experiment.id, { phase: 'finished' });
+      const res = await report(experiment.id, { phase: 'finished' }, headers);
       assert.equal(res.statusCode, 200, res.payload);
       assert.ok(res.json().ended_at);
       assert.equal(res.json().started_at, null, 'and the gap stays visible');
     });
 
     test('a phase the platform does not know is refused', async () => {
-      const experiment = (await createExperiment()).json();
-      const res = await report(experiment.id, { phase: 'paused' });
+      const { experiment, headers } = await experimentWithRun();
+      const res = await report(experiment.id, { phase: 'paused' }, headers);
       assert.equal(res.statusCode, 400, res.payload);
     });
 
     test('reporting against an unknown experiment is a 404', async () => {
+      // No run token can exist for an experiment that does not exist, so this asks as a
+      // person — and gets the 404 that comes before any permission is considered.
       const res = await report('00000000-0000-0000-0000-000000000000', { phase: 'started' });
+      assert.equal(res.statusCode, 404);
+    });
+
+    test('a run cannot report against an experiment its job is not in', async () => {
+      // The point of scoping this to the run rather than to the project: an EDITOR-level
+      // credential would be enough to write any experiment's record, and a run token is
+      // not that.
+      const mine = await experimentWithRun();
+      const theirs = await experimentWithRun({ name: 'other-experiment' });
+
+      const res = await report(theirs.experiment.id, { phase: 'started' }, mine.headers);
       assert.equal(res.statusCode, 404);
     });
   });

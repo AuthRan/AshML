@@ -486,6 +486,33 @@ export function createKubernetesBackend({
     },
 
     /**
+     * Creates or replaces a Secret.
+     *
+     * Replaced rather than left alone, unlike a Service: the whole point of this object
+     * is that its contents change when a credential is rotated, and a Secret has no
+     * cluster-assigned immutable fields to collide with.
+     *
+     * Rotating it does not restart anything. That is deliberate and is the reason the
+     * serving token lives here rather than inline in the pod template: a Pod reads a
+     * Secret-backed environment variable once, at start, so the running pods keep the
+     * value they were given and only pods created after the rotation see the new one.
+     */
+    async applySecret(manifest) {
+      const { core } = connect();
+      const ns = manifest.metadata.namespace ?? namespace;
+      try {
+        await core.createNamespacedSecret({ namespace: ns, body: manifest });
+      } catch (err) {
+        if (statusOf(err) !== 409) throw err;
+        await core.replaceNamespacedSecret({
+          namespace: ns,
+          name: manifest.metadata.name,
+          body: manifest,
+        });
+      }
+    },
+
+    /**
      * Creates the Service if it is absent.
      *
      * Not replaced when it already exists: a Service's `spec.clusterIP` is assigned by

@@ -16,16 +16,31 @@ import Table from 'cli-table3';
 import { parse as parseYaml } from 'yaml';
 
 import { imageToInstance } from './png.js';
+import {
+  storeToken, forgetToken, resolveToken, credentialsPath,
+} from './credentials.js';
 
 const DEFAULT_ENDPOINT = process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080';
 
-/** Calls the control plane, unwrapping the standard error envelope (spec §45). */
-async function api(endpoint, path, { method = 'GET', body } = {}) {
+/**
+ * Calls the control plane, unwrapping the standard error envelope (spec §45).
+ *
+ * The token is resolved per call rather than once at startup so that `--endpoint` and
+ * `--token` are still honoured by commands that run before any of this is parsed, and so
+ * that `ash login` can call the API with a token it has not stored yet.
+ */
+async function api(endpoint, path, { method = 'GET', body, token } = {}) {
+  const bearer = token ?? await resolveToken(endpoint, { flag: program.opts().token });
+
+  const headers = {};
+  if (body) headers['content-type'] = 'application/json';
+  if (bearer) headers.authorization = `Bearer ${bearer}`;
+
   let res;
   try {
     res = await fetch(new URL(path, endpoint), {
       method,
-      headers: body ? { 'content-type': 'application/json' } : undefined,
+      headers,
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch (err) {
@@ -37,6 +52,23 @@ async function api(endpoint, path, { method = 'GET', body } = {}) {
   if (!res.ok) {
     const code = payload?.error?.code ?? `HTTP_${res.status}`;
     const message = payload?.error?.message ?? res.statusText;
+
+    // A bare "UNAUTHENTICATED: authentication required" is accurate and useless: the
+    // reader's next question is always what to do about it, and the answer depends on
+    // whether they have never logged in or are holding something stale.
+    if (res.status === 401) {
+      throw new Error(
+        `${code}: ${message}\n`
+        + `  Run \`ash login --endpoint ${endpoint}\` with a token, or set ASHML_TOKEN.`,
+      );
+    }
+    if (res.status === 403) {
+      throw new Error(
+        `${code}: ${message}\n`
+        + '  You are authenticated but this token does not carry that permission. '
+        + '`ash whoami` shows what it does carry.',
+      );
+    }
     throw new Error(`${code}: ${message}`);
   }
   return payload;
@@ -158,6 +190,7 @@ program
   .description('AshML command-line client')
   .version('0.1.0')
   .option('--endpoint <url>', 'AshML API endpoint', DEFAULT_ENDPOINT)
+  .option('--token <token>', 'bearer token; overrides ASHML_TOKEN and the stored login')
   // Without this, commander recognises the program's own options *after* a subcommand
   // too — so `ash deployment rollout x --version 2` matched the program's `--version`,
   // printed "0.1.0" and exited 0. Silently: the rollout never happened and the shell saw
@@ -171,6 +204,165 @@ program
   .enablePositionalOptions();
 
 const endpoint = () => program.opts().endpoint;
+
+// ---------------------------------------------------------------- auth
+
+/**
+ * `ash login` stores a token; it does not obtain one.
+ *
+ * There is no password to exchange, so "logging in" is: take a token the platform
+ * already issued, check it against the endpoint it is for, and write it down. Checking
+ * before writing is the point — a stored token that turns out to be wrong produces a
+ * confusing failure in whatever command runs next, rather than here, where the reader is
+ * still thinking about credentials.
+ */
+program
+  .command('login')
+  .description('Store an API token for an endpoint, after checking that it works')
+  .option('--token <token>', 'the token; read from ASHML_TOKEN if omitted')
+  .action(async (opts) => {
+    const token = opts.token ?? process.env.ASHML_TOKEN;
+    if (!token) {
+      throw new Error(
+        'no token given. Pass --token, or set ASHML_TOKEN.\n'
+        + '  A platform administrator issues one with `ash token create <name>`.',
+      );
+    }
+
+    const who = await api(endpoint(), '/api/v1/auth/whoami', { token });
+    const path = await storeToken(endpoint(), token);
+
+    console.log(`logged in to ${endpoint()} as ${who.email ?? who.kind}`);
+    console.log(`token stored in ${path}`);
+  });
+
+program
+  .command('logout')
+  .description('Forget the stored token for an endpoint')
+  .action(async () => {
+    const had = await forgetToken(endpoint());
+    console.log(had
+      ? `forgotten the token for ${endpoint()}`
+      : `no stored token for ${endpoint()} (${credentialsPath()})`);
+  });
+
+program
+  .command('whoami')
+  .description('Who the current token belongs to, and what it can reach')
+  .action(async () => {
+    const who = await api(endpoint(), '/api/v1/auth/whoami');
+
+    if (who.kind !== 'USER') {
+      // Worth rendering rather than refusing: someone debugging a pod will paste its
+      // token in here, and "this is a run token for job X" is the answer they need.
+      console.log(`${who.kind} token`);
+      if (who.job_id) console.log(`job        ${who.job_id} (attempt ${who.attempt})`);
+      if (who.deployment_id) console.log(`deployment ${who.deployment_id}`);
+      return;
+    }
+
+    console.log(`${who.email}${who.is_admin ? '  (platform administrator)' : ''}`);
+    if (!who.projects?.length) {
+      console.log('member of no projects');
+      return;
+    }
+    const table = new Table({ head: ['PROJECT', 'ROLE'] });
+    for (const p of who.projects) table.push([p.project_id, p.role]);
+    console.log(table.toString());
+  });
+
+const token = program.command('token').description('Manage your API tokens');
+
+token
+  .command('create <name>')
+  .description('Create an API token (the value is shown once and never again)')
+  .option('--expires-in <days>', 'expire after N days', (v) => Number.parseInt(v, 10))
+  .action(async (name, opts) => {
+    const body = { name };
+    if (opts.expiresIn) body.expires_in_days = opts.expiresIn;
+
+    const created = await api(endpoint(), '/api/v1/auth/tokens', { method: 'POST', body });
+
+    // On stdout, alone, so `ash token create ci | ...` is usable and the surrounding
+    // explanation does not end up in the pipe.
+    console.error(`token "${created.name}" created. It is shown once — store it now.`);
+    console.log(created.token);
+  });
+
+token
+  .command('list')
+  .description('Your live API tokens')
+  .action(async () => {
+    const { tokens } = await api(endpoint(), '/api/v1/auth/tokens');
+    if (!tokens.length) {
+      console.log('no tokens');
+      return;
+    }
+    const table = new Table({ head: ['NAME', 'PREFIX', 'CREATED', 'LAST USED', 'EXPIRES'] });
+    for (const t of tokens) {
+      table.push([
+        t.name,
+        `${t.prefix}…`,
+        t.created_at?.slice(0, 19).replace('T', ' ') ?? '-',
+        t.last_used_at?.slice(0, 19).replace('T', ' ') ?? 'never',
+        t.expires_at?.slice(0, 19).replace('T', ' ') ?? 'never',
+      ]);
+    }
+    console.log(table.toString());
+  });
+
+token
+  .command('revoke <name>')
+  .description('Revoke one of your API tokens')
+  .action(async (name) => {
+    await api(endpoint(), `/api/v1/auth/tokens/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    console.log(`token "${name}" revoked`);
+  });
+
+// ---------------------------------------------------------------- members
+
+const member = program.command('member').description('Manage who can reach a project');
+
+member
+  .command('list <project>')
+  .description('Who can reach this project')
+  .action(async (projectName) => {
+    const { members } = await api(endpoint(), `/api/v1/projects/${projectName}/members`);
+    const table = new Table({ head: ['EMAIL', 'NAME', 'ROLE', 'SINCE'] });
+    for (const m of members) {
+      table.push([
+        m.email, m.display_name, m.role,
+        m.created_at?.slice(0, 10) ?? '-',
+      ]);
+    }
+    console.log(table.toString());
+  });
+
+member
+  .command('add <project> <email>')
+  .description('Add a member, or change their role')
+  .option('--role <role>', 'OWNER, EDITOR or VIEWER', 'VIEWER')
+  .action(async (projectName, email, opts) => {
+    const role = opts.role.toUpperCase();
+    const m = await api(
+      endpoint(),
+      `/api/v1/projects/${projectName}/members/${encodeURIComponent(email)}`,
+      { method: 'PUT', body: { role } },
+    );
+    console.log(`${m.email} is now ${m.role} on ${projectName}`);
+  });
+
+member
+  .command('remove <project> <email>')
+  .description('Remove a member')
+  .action(async (projectName, email) => {
+    await api(
+      endpoint(),
+      `/api/v1/projects/${projectName}/members/${encodeURIComponent(email)}`,
+      { method: 'DELETE' },
+    );
+    console.log(`${email} removed from ${projectName}`);
+  });
 
 // ---------------------------------------------------------------- projects
 

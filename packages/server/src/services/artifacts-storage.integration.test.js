@@ -26,8 +26,7 @@ import { discoverCluster } from './nodes.js';
 import { getJob } from './jobs.js';
 import {
   connectOrNull, connectStoreOrNull, truncateAll, uniqueName,
-  SKIP_MESSAGE, STORE_SKIP_MESSAGE,
-} from '../test-support/db.js';
+  SKIP_MESSAGE, STORE_SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 const store = pool ? await connectStoreOrNull() : null;
@@ -43,6 +42,13 @@ describe('artifacts against a real store (integration)', { skip }, () => {
   let app;
   let backend;
   let project;
+  const runHeaders = new Map();
+  const artifactJob = new Map();
+
+  async function asJob(jobId) {
+    if (!runHeaders.has(jobId)) runHeaders.set(jobId, await asRun(pool, jobId));
+    return runHeaders.get(jobId);
+  }
 
   before(async () => {
     const config = loadConfig({
@@ -53,6 +59,7 @@ describe('artifacts against a real store (integration)', { skip }, () => {
     backend = createSimBackend({ namespace: 'ashml-test', autoAdvance: false });
     app = await buildApp(config, { logger: false, pool, k8s: backend, store });
     await app.ready();
+    await authenticateAs(app, pool);
     await discoverCluster(pool, backend, app.gpuProvider);
   });
 
@@ -63,6 +70,8 @@ describe('artifacts against a real store (integration)', { skip }, () => {
 
   beforeEach(async () => {
     await truncateAll(pool);
+    runHeaders.clear();
+    artifactJob.clear();
     backend._reset();
     const res = await app.inject({
       method: 'POST',
@@ -96,19 +105,32 @@ describe('artifacts against a real store (integration)', { skip }, () => {
     return job;
   }
 
-  function register(jobId, body = {}) {
-    return app.inject({
+  /**
+   * Registers as the run.
+   *
+   * Registering an artifact and confirming its upload are the run saying what it
+   * produced, and no person can do either (ADR 0013) — so these hold a run token, and
+   * remember which job each artifact came from so `complete`, addressed by artifact id,
+   * can present the right one.
+   */
+  async function register(jobId, body = {}) {
+    const res = await app.inject({
       method: 'POST',
       url: `/api/v1/jobs/${jobId}/artifacts`,
       payload: { kind: 'checkpoint', name: 'epoch-1', step: 100, ...body },
+      headers: await asJob(jobId),
     });
+    if (res.statusCode === 201) artifactJob.set(res.json().artifact.id, jobId);
+    return res;
   }
 
-  function complete(id, body) {
+  async function complete(id, body) {
+    const jobId = artifactJob.get(id);
     return app.inject({
       method: 'POST',
       url: `/api/v1/artifacts/${id}/complete`,
       payload: body,
+      headers: jobId ? await asJob(jobId) : {},
     });
   }
 

@@ -6,10 +6,13 @@
  * reads from the database and the scheduler reads the same rows.
  */
 
+import { Permission } from '../domain/roles.js';
+
 export async function registerGpuRoutes(app) {
   app.get(
     '/api/v1/gpus',
     {
+      config: { permission: Permission.PLATFORM_ADMIN },
       schema: {
         tags: ['gpus'],
         summary: 'List GPUs visible to the active provider',

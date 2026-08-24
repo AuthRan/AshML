@@ -34,6 +34,7 @@ dependency graph already.
 from __future__ import annotations
 
 import os
+import warnings
 
 from ._client import ApiError, Client
 from ._run import Artifact, Run
@@ -49,6 +50,7 @@ def init(
     job_id: str | None = None,
     experiment_id: str | None = None,
     resume_artifact_id: str | None = None,
+    token: str | None = None,
     report_start: bool = True,
     strict: bool = False,
     timeout: float = 10.0,
@@ -65,6 +67,10 @@ def init(
         leaves it unset otherwise, so a workload asks with :meth:`Run.fetch_resume`
         rather than being told. See :meth:`Run.fetch_resume` for why a promised resume
         that cannot be fetched raises instead of quietly starting over.
+    :param token: the credential this attempt reports with. AshML injects it as
+        ``ASHML_RUN_TOKEN`` and it is scoped to this job and this attempt, so it can
+        report these results and nothing else. Pass it explicitly only when running the
+        script outside a job.
     :param report_start: also stamps the experiment's start and records the framework
         and hardware this run observed. Turn it off for a script that attaches to an
         already-running experiment.
@@ -79,6 +85,7 @@ def init(
     job_id = job_id or os.environ.get("ASHML_JOB_ID")
     experiment_id = experiment_id or os.environ.get("ASHML_EXPERIMENT_ID") or None
     resume_artifact_id = resume_artifact_id or os.environ.get("ASHML_RESUME_FROM") or None
+    token = token or os.environ.get("ASHML_RUN_TOKEN") or None
 
     if not job_id:
         raise RuntimeError(
@@ -91,9 +98,23 @@ def init(
             "the control plane is configured with an advertised URL "
             "(ASHML_API_ADVERTISE_URL); outside a job, pass endpoint= explicitly."
         )
+    if not token:
+        # Not fatal, and deliberately so. A control plane running with
+        # ASHML_AUTH_ENABLED=false injects no token and accepts the reports anyway, and
+        # that is the mode the k3d end-to-end scripts use. Against an authenticated
+        # control plane every report will fail with 401 — which is the right outcome, and
+        # this warning is what connects it to its cause rather than leaving somebody
+        # reading a stack of 401s from inside a pod.
+        warnings.warn(
+            "ashml.init(): no ASHML_RUN_TOKEN in the environment. Reports will be "
+            "rejected unless the control plane is running with authentication "
+            "disabled.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     run = Run(
-        Client(endpoint, timeout=timeout),
+        Client(endpoint, timeout=timeout, token=token),
         job_id,
         experiment_id=experiment_id,
         resume_artifact_id=resume_artifact_id,

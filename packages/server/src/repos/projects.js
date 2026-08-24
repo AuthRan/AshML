@@ -1,6 +1,12 @@
 /** SQL for projects and their resource quotas. */
 
-/** Fixed local user until authentication exists (see migration 1755000100000). */
+/**
+ * The seeded local user (migration 1755000100000).
+ *
+ * Since Phase 10 this is no longer the implicit author of everything — projects record
+ * whoever created them. It survives as the identity the control plane runs as when
+ * ASHML_AUTH_ENABLED=false, and as the owner backfilled onto projects that predate auth.
+ */
 export const LOCAL_USER_ID = '00000000-0000-0000-0000-000000000001';
 
 const PROJECT_COLUMNS = `
@@ -56,14 +62,24 @@ export async function updateQuota(client, projectId, quota) {
   return rows.length ? rows[0] : null;
 }
 
-export async function createProject(client, { name, description = '', quota = {} }) {
+export async function createProject(client, { name, description = '', quota = {}, ownerId = LOCAL_USER_ID }) {
   const { rows } = await client.query(
     `INSERT INTO projects (name, description, owner_id)
      VALUES ($1, $2, $3)
      RETURNING id`,
-    [name, description, LOCAL_USER_ID],
+    [name, description, ownerId],
   );
   const projectId = rows[0].id;
+
+  // The creator is a member, not merely a foreign key. `projects.owner_id` records who
+  // made it; `project_members` is what every authorization check reads, and a project
+  // whose creator was not in it would be a project its creator could not open.
+  await client.query(
+    `INSERT INTO project_members (project_id, user_id, role)
+     VALUES ($1, $2, 'OWNER')
+     ON CONFLICT DO NOTHING`,
+    [projectId, ownerId],
+  );
 
   // A project always has a quota row, even if it is all zeros, so the scheduler can
   // join unconditionally rather than handling a missing row (Phase 3).
@@ -98,12 +114,25 @@ export async function getProjectByName(client, name) {
   return rows.length ? toProject(rows[0]) : null;
 }
 
-export async function listProjects(client) {
+/**
+ * Projects visible to one caller.
+ *
+ * Scoping happens in SQL rather than by filtering afterwards. Fetching every project and
+ * discarding the ones the caller may not see would work, and would also mean the count,
+ * the ordering and any future pagination were computed over rows that are not theirs —
+ * the classic way a "you have 3 projects" ends up reading 300.
+ *
+ * `userId: null` means a platform administrator: no filter, because they may see all.
+ */
+export async function listProjects(client, { userId = null } = {}) {
+  const scoped = userId !== null;
   const { rows } = await client.query(
     `SELECT ${PROJECT_COLUMNS}
      FROM projects p
      LEFT JOIN resource_quotas q ON q.project_id = p.id
+     ${scoped ? 'JOIN project_members m ON m.project_id = p.id AND m.user_id = $1' : ''}
      ORDER BY p.created_at DESC`,
+    scoped ? [userId] : [],
   );
   return rows.map(toProject);
 }

@@ -18,6 +18,7 @@
  *     readLogs(namespace, name, options): Promise<string>,
  *     applyDeployment(manifest): Promise<void>,
  *     applyService(manifest): Promise<void>,
+ *     applySecret(manifest): Promise<void>,
  *     observeDeployment(namespace, name): Promise<DeploymentObservation|null>,
  *     deleteDeployment(namespace, name): Promise<void>,
  *     callService(namespace, name, options): Promise<ServiceResponse>,

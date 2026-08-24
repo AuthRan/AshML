@@ -89,13 +89,25 @@ export async function getExperimentById(client, id) {
   return rows.length ? toExperiment(rows[0]) : null;
 }
 
-export async function listExperiments(client, { projectName = null, limit = 50 } = {}) {
+/**
+ * Experiments, optionally narrowed to a project.
+ *
+ * `visibleToUserId` filters by membership in SQL, for the same reason as `listJobs`: a
+ * post-filter would interact with the LIMIT and silently short the page.
+ */
+export async function listExperiments(client, {
+  projectName = null, limit = 50, visibleToUserId = null,
+} = {}) {
   const { rows } = await client.query(
     `SELECT ${EXPERIMENT_COLUMNS} ${EXPERIMENT_FROM}
      WHERE ($1::text IS NULL OR p.name = $1)
+       AND ($3::uuid IS NULL OR EXISTS (
+         SELECT 1 FROM project_members m
+         WHERE m.project_id = p.id AND m.user_id = $3
+       ))
      ORDER BY e.created_at DESC
      LIMIT $2`,
-    [projectName, limit],
+    [projectName, limit, visibleToUserId],
   );
   return rows.map(toExperiment);
 }

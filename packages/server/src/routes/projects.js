@@ -1,6 +1,8 @@
 /** Project endpoints. */
 
 import * as projectService from '../services/projects.js';
+import { Permission, PrincipalKind } from '../domain/roles.js';
+import { ForbiddenError } from '../services/auth.js';
 
 const quotaSchema = {
   type: 'object',
@@ -40,6 +42,7 @@ export async function registerProjectRoutes(app) {
   app.post(
     '/api/v1/projects',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['projects'],
         summary: 'Create a project',
@@ -62,8 +65,22 @@ export async function registerProjectRoutes(app) {
       },
     },
     async (request, reply) => {
-      const project = await projectService.createProject(app.db, request.body);
-      request.log.info({ project: project.name }, 'project created');
+      // Any authenticated *person* may create a project and owns what they create. There
+      // is no permission to check against, because there is nothing yet to hold one on —
+      // the creation is the grant. What must still be refused is a run token: a training
+      // pod has no business creating projects, and `can` denies it every permission
+      // except reporting for its own job, so there is no permission that expresses this.
+      if (request.principal.kind !== PrincipalKind.USER) {
+        throw new ForbiddenError('a run token may not create projects');
+      }
+
+      const project = await projectService.createProject(app.db, {
+        ...request.body,
+        ownerId: request.principal.userId,
+      });
+      request.log.info(
+        { project: project.name, owner: request.principal.email }, 'project created',
+      );
       return reply.status(201).send(project);
     },
   );
@@ -71,6 +88,7 @@ export async function registerProjectRoutes(app) {
   app.get(
     '/api/v1/projects',
     {
+      config: { authenticatedOnly: true },
       schema: {
         tags: ['projects'],
         summary: 'List projects',
@@ -83,12 +101,17 @@ export async function registerProjectRoutes(app) {
         },
       },
     },
-    async () => ({ projects: await projectService.listProjects(app.db) }),
+    async (request) => ({
+      // An administrator sees every project; everyone else sees the ones they are in;
+      // a workload is refused (auth/install.js).
+      projects: await projectService.listProjects(app.db, { userId: app.listScope(request) }),
+    }),
   );
 
   app.get(
     '/api/v1/projects/:name',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['projects'],
         summary: 'Get a project by name',
@@ -103,12 +126,13 @@ export async function registerProjectRoutes(app) {
         },
       },
     },
-    async (request) => projectService.getProject(app.db, request.params.name),
+    async (request) => app.readableProject(request, request.params.name),
   );
 
   app.patch(
     '/api/v1/projects/:name/quota',
     {
+      config: { permission: Permission.PLATFORM_ADMIN },
       schema: {
         tags: ['projects'],
         summary: 'Change a project\'s resource quota',

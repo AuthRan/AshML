@@ -59,6 +59,7 @@ export async function registerHealthRoutes(app) {
   app.get(
     '/api/v1/version',
     {
+      config: { authenticatedOnly: true },
       schema: {
         tags: ['system'],
         summary: 'Server version and active GPU provider',

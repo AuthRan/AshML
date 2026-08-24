@@ -178,7 +178,14 @@ db-down: ## Stop PostgreSQL and MinIO
 
 .PHONY: migrate
 migrate: ## Apply database migrations
-	npm run migrate
+	# `up` is not optional: node-pg-migrate takes a direction and exits non-zero without
+	# one, so a bare `npm run migrate` failed — in the Quick start, on a reader's first
+	# five commands. `make migrate-down` is the deliberate other direction.
+	npm run migrate up
+
+.PHONY: migrate-down
+migrate-down: ## Roll back the most recent migration
+	npm run migrate down
 
 .PHONY: db-test
 db-test: ## Create and migrate the dedicated test database (integration tests wipe it)
@@ -192,6 +199,15 @@ db-test: ## Create and migrate the dedicated test database (integration tests wi
 .PHONY: dev
 dev: ## Run the control plane against the local cluster
 	npm run dev
+
+.PHONY: token
+token: ## Issue an API token for the seeded local user, and print it
+	# The first token cannot come from the API, which needs one. This writes directly to
+	# the database, so minting requires access that could already read every row (ADR 0013).
+	#
+	#   export ASHML_TOKEN=$$(make -s token)
+	#
+	@node scripts/issue-token.mjs --user local@ashml.dev --name cli
 
 .PHONY: test
 test: ## Unit and integration tests

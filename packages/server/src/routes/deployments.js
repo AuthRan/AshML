@@ -12,6 +12,7 @@
  */
 
 import * as deploymentService from '../services/deployments.js';
+import { Permission } from '../domain/roles.js';
 import * as inferenceService from '../services/inference.js';
 
 const deploymentSchema = {
@@ -137,6 +138,7 @@ export async function registerDeploymentRoutes(app) {
   app.post(
     '/api/v1/projects/:name/models/:model/deployments',
     {
+      config: { permission: Permission.PROJECT_WRITE },
       schema: {
         tags: ['deployments'],
         summary: 'Deploy a model version',
@@ -217,6 +219,7 @@ export async function registerDeploymentRoutes(app) {
   app.post(
     '/api/v1/projects/:name/deployments/:deployment/rollout',
     {
+      config: { permission: Permission.PROJECT_WRITE },
       schema: {
         tags: ['deployments'],
         summary: 'Move a share of the traffic onto one version',
@@ -260,6 +263,7 @@ export async function registerDeploymentRoutes(app) {
   app.post(
     '/api/v1/projects/:name/deployments/:deployment/promote',
     {
+      config: { permission: Permission.PROJECT_WRITE },
       schema: {
         tags: ['deployments'],
         summary: 'End a rollout: one version takes all the traffic',
@@ -292,6 +296,7 @@ export async function registerDeploymentRoutes(app) {
   app.delete(
     '/api/v1/projects/:name/deployments/:deployment/targets/:version',
     {
+      config: { permission: Permission.PROJECT_WRITE },
       schema: {
         tags: ['deployments'],
         summary: 'Stop serving a version entirely, and remove its pods',
@@ -326,6 +331,7 @@ export async function registerDeploymentRoutes(app) {
   app.get(
     '/api/v1/deployments/:id/routing',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['deployments'],
         summary: 'The traffic split a router should apply',
@@ -387,6 +393,10 @@ export async function registerDeploymentRoutes(app) {
       },
     },
     async (request) => {
+      // Addressed by deployment id rather than by project name, because this is the
+      // endpoint the router itself polls. ROUTING_READ rather than PROJECT_READ so a
+      // router's token follows its own table without being able to read anything else.
+      await app.requireDeployment(request, request.params.id, Permission.ROUTING_READ);
       const deployment = await deploymentService.getDeployment(app.db, request.params.id);
       return {
         deployment_id: deployment.id,
@@ -408,6 +418,7 @@ export async function registerDeploymentRoutes(app) {
   app.get(
     '/api/v1/projects/:name/deployments',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['deployments'],
         summary: "List a project's deployments",
@@ -432,6 +443,7 @@ export async function registerDeploymentRoutes(app) {
   app.get(
     '/api/v1/projects/:name/deployments/:deployment',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['deployments'],
         summary: 'Show a deployment',
@@ -463,6 +475,9 @@ export async function registerDeploymentRoutes(app) {
     '/api/v1/projects/:name/deployments/:deployment/predict',
     {
       bodyLimit: PREDICT_BODY_LIMIT,
+      // Read, not write: asking a served model a question changes nothing about the
+      // project, so a VIEWER may try the model they can already see.
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['deployments'],
         summary: 'Ask a deployment for predictions',
@@ -599,6 +614,7 @@ export async function registerDeploymentRoutes(app) {
   app.get(
     '/api/v1/projects/:name/deployments/:deployment/metadata',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['deployments'],
         summary: 'Ask the pods what they actually have loaded',
@@ -654,6 +670,7 @@ export async function registerDeploymentRoutes(app) {
   app.delete(
     '/api/v1/projects/:name/deployments/:deployment',
     {
+      config: { permission: Permission.PROJECT_WRITE },
       schema: {
         tags: ['deployments'],
         summary: 'Remove a deployment',

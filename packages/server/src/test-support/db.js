@@ -136,3 +136,82 @@ export async function connectStoreOrNull() {
 export const STORE_SKIP_MESSAGE =
   `MinIO not reachable at ${process.env.ASHML_S3_ENDPOINT ?? 'http://127.0.0.1:9000'} — `
   + 'run `npm run db:up` to include these tests';
+
+/**
+ * The seeded local user (migration 1755000100000), who is a platform administrator.
+ */
+export const LOCAL_USER_ID = '00000000-0000-0000-0000-000000000001';
+
+/**
+ * Gives an app's `inject` a real bearer token, and returns it.
+ *
+ * Since Phase 10 the API is default-deny, so a test that injects without credentials
+ * gets a 401 on everything and tests nothing. There are two ways to deal with that and
+ * only one of them is worth having:
+ *
+ *   - build the test app with `ASHML_AUTH_ENABLED=false`, which is one line and means
+ *     the suite never exercises the authentication path that ships; or
+ *   - mint a real token and send it, which is this.
+ *
+ * So the integration suites run against the same default-deny server a user gets, and
+ * every existing assertion about behaviour is now also an assertion that an authenticated
+ * caller reaches it. What they do not cover is refusal — that a *wrong* token is turned
+ * away — which is `auth.integration.test.js`'s job rather than something to be smeared
+ * across every file.
+ *
+ * The token is minted for the seeded administrator, so tests keep the cross-project
+ * visibility they were written against. `truncateAll` does not remove it: `api_tokens`
+ * hangs off `users`, not `projects`.
+ */
+export async function authenticateAs(app, pool, {
+  userId = LOCAL_USER_ID, name = 'integration-tests',
+} = {}) {
+  const { mintToken, TokenKind } = await import('../auth/tokens.js');
+  const { token, hash, prefix } = mintToken(TokenKind.USER);
+
+  await pool.query(
+    `INSERT INTO api_tokens (user_id, name, token_hash, prefix)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id, name)
+       DO UPDATE SET token_hash = EXCLUDED.token_hash,
+                     prefix     = EXCLUDED.prefix,
+                     revoked_at = NULL`,
+    [userId, name, hash, prefix],
+  );
+
+  withBearer(app, token);
+  return token;
+}
+
+/**
+ * Wraps `app.inject` so every call carries a bearer token.
+ *
+ * Wrapping rather than editing several hundred call sites, and merging headers rather
+ * than replacing them, so a test that sets its own Authorization header — deliberately, to
+ * check a refusal — still overrides this one.
+ */
+export function withBearer(app, token) {
+  const raw = app.inject.bind(app);
+  app.inject = (opts, ...rest) => raw(
+    { ...opts, headers: { authorization: `Bearer ${token}`, ...(opts?.headers ?? {}) } },
+    ...rest,
+  );
+  return app;
+}
+
+/**
+ * Headers that authenticate as one attempt of one job.
+ *
+ * The ingest endpoints — metrics, artifact registration, artifact completion — are
+ * reachable only by the run that produced the thing, and deliberately not by a person
+ * (ADR 0013). So a test that exercises them has to hold a run token, and this mints one.
+ *
+ * It revokes whatever the executor minted when it launched the job, which is fine and is
+ * the same thing a retry does. The plaintext of the executor's token is not recoverable —
+ * that is the point of storing only the hash — so a test cannot reuse it.
+ */
+export async function asRun(pool, jobId, { attempt = 0 } = {}) {
+  const { issueRunToken } = await import('../services/auth.js');
+  const { token } = await issueRunToken(pool, jobId, attempt);
+  return { authorization: `Bearer ${token}` };
+}

@@ -25,7 +25,7 @@ import { JobState } from '../domain/job-state.js';
 import { runOnce } from './executor.js';
 import { discoverCluster } from './nodes.js';
 import { getJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE } from '../test-support/db.js';
+import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -37,6 +37,13 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
   let app;
   let backend;
   let project;
+  const runHeaders = new Map();
+
+  /** Producing an artifact is the run's act, not a person's (ADR 0013). */
+  async function asJob(jobId) {
+    if (!runHeaders.has(jobId)) runHeaders.set(jobId, await asRun(pool, jobId));
+    return runHeaders.get(jobId);
+  }
 
   const NAMESPACE = 'ashml-test';
 
@@ -52,6 +59,7 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
     backend = createSimBackend({ namespace: NAMESPACE, autoAdvance: false });
     app = await buildApp(config, { logger: false, pool, k8s: backend, store: createNoneStore() });
     await app.ready();
+    await authenticateAs(app, pool);
     await discoverCluster(pool, backend, app.gpuProvider);
   });
 
@@ -62,6 +70,7 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
 
   beforeEach(async () => {
     await truncateAll(pool);
+    runHeaders.clear();
     backend._reset();
     const res = await app.inject({
       method: 'POST',
@@ -98,6 +107,7 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
     const created = await app.inject({
       method: 'POST',
       url: `/api/v1/jobs/${job.id}/artifacts`,
+      headers: await asJob(job.id),
       payload: {
         kind: 'model',
         name: 'model.pt',
@@ -110,6 +120,7 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
     const completed = await app.inject({
       method: 'POST',
       url: `/api/v1/artifacts/${artifact.id}/complete`,
+      headers: await asJob(job.id),
       payload: { digest: 'sha256:abc', size_bytes: 2048 },
     });
     assert.equal(completed.statusCode, 200, completed.payload);

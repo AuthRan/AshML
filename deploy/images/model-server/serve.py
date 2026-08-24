@@ -47,6 +47,11 @@ def env_int(name, default):
 
 
 ENDPOINT = os.environ.get("ASHML_ENDPOINT", "").rstrip("/")
+# The credential AshML mounts into this pod from the deployment's Secret (Phase 10). It
+# is scoped to this deployment and may do exactly two things: fetch artifacts belonging
+# to its project, and read this deployment's routing table. Absent when the control plane
+# runs with authentication disabled, in which case the request works without it.
+RUN_TOKEN = os.environ.get("ASHML_RUN_TOKEN", "")
 ARTIFACT_ID = os.environ.get("ASHML_ARTIFACT_ID", "")
 MODEL_URL = os.environ.get("ASHML_MODEL_URL", "")
 ARCH = os.environ.get("ASHML_MODEL_ARCH", "resnet18-cifar")
@@ -253,9 +258,13 @@ def resolve_model_url():
             "was not told which model to serve"
         )
 
+    headers = {"accept": "application/json"}
+    if RUN_TOKEN:
+        headers["authorization"] = f"Bearer {RUN_TOKEN}"
+
     request = urllib.request.Request(
         f"{ENDPOINT}/api/v1/artifacts/{ARTIFACT_ID}/download",
-        headers={"accept": "application/json"},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:

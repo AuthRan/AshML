@@ -50,7 +50,9 @@ an ingress, and Ashcode — is listed with reasons in
 > artifact an AshML run produced, and every answer carries the model version and artifact
 > id that served it. It is the serving slice of the platform, not the platform: the
 > scheduler, the executor and the control-plane API need a Kubernetes cluster, and the
-> API is unauthenticated until Phase 10, so it is not something to put on a public URL.
+> API now authenticates every request (see [Who can do what](#who-can-do-what)), but it
+> still has no rate limiting and no audit of refusals, so it is not something to put on a
+> public URL.
 > What runs where is spelled out on the [project site](https://authran.github.io/AshML/).
 >
 > The demo page is on GitHub Pages rather than the Hugging Face Space, because Hugging
@@ -151,6 +153,7 @@ one is this machine's Chrome pointed at a live control plane.
 - [Serving what was trained](#serving-what-was-trained)
 - [Asking it a question](#asking-it-a-question)
 - [Splitting traffic between versions](#splitting-traffic-between-versions)
+- [Who can do what](#who-can-do-what)
 - [Surviving a killed pod](#surviving-a-killed-pod)
 - [See it run](#see-it-run) · [Watching it work](#watching-it-work) · [Looking at it](#looking-at-it)
 - [The whole thing, in order](#the-whole-thing-in-order)
@@ -425,6 +428,71 @@ that did not send a real request to a real address:
   every version-shifting command there is. The program now uses positional options, and
   `packages/cli/src/cli.test.js` runs the real binary to keep it that way.
 
+## Who can do what
+
+The API is **default deny**. Every request needs a bearer token, and every `/api/v1`
+route has to declare the permission it needs — checked when the route is *registered*, so
+a route that declares nothing makes the server fail to start rather than quietly
+answering to anybody. Forgetting is a boot error with the path in the message, which is
+the opposite of how this usually goes wrong.
+
+```bash
+export ASHML_TOKEN=$(make -s token)   # the first token; written straight to the database
+ash login                             # checks it, then stores it per-endpoint
+ash whoami
+```
+
+Three project roles, and a platform administrator who is not a project role at all:
+
+| | VIEWER | EDITOR | OWNER | platform admin |
+|---|:--:|:--:|:--:|:--:|
+| Read the project, its jobs, metrics, models | ✓ | ✓ | ✓ | ✓ |
+| Submit jobs, register models, deploy | | ✓ | ✓ | ✓ |
+| Add and remove members | | | ✓ | ✓ |
+| Change a quota, read cluster inventory | | | | ✓ |
+| Report a run's own metrics and artifacts | | | | |
+
+```bash
+ash member add my-project someone@example.com --role EDITOR
+```
+
+Three things in that table are deliberate and worth saying out loud.
+
+**Quotas are not a project permission.** A quota a project owner can raise is not a quota,
+so granting capacity sits with somebody other than the person it constrains (spec §31).
+Cluster inventory is there for the same reason: it describes the host, not one project's
+use of it.
+
+**Nobody can report a run's results.** Not an owner, not an administrator. That row is
+empty on purpose: the value of the record is that the *pod* reported what it observed
+(ADR 0009), and an endpoint a person can post to is an endpoint where the number might
+have been chosen instead of measured. The only thing that can write it is the run itself.
+
+**A project you are not in answers 404, not 403.** A 403 confirms the name is real, which
+is how an outsider enumerates projects. If you *can* see the project but not write to it,
+you get a truthful 403 — hiding it then would just be confusing.
+
+### What a pod is allowed to be
+
+The other half is that not every caller is a person. A training attempt is handed a **run
+token** scoped to that job and that attempt; a deployment is handed a **serving token**
+scoped to its own weights and its own routing table. Both are minted at launch and revoked
+when the workload ends — and on a retry, the previous attempt's token is revoked *before*
+the next one is minted, so a pod that is still shutting down cannot report metrics into
+the run that replaced it. That is not a hypothetical failure: it would not error, it would
+write one attempt's numbers onto another's.
+
+A run token can report for its own job and fetch artifacts in its own project. It cannot
+read the project, list anything, or mint a token. This closes the hole Phase 4 recorded in
+the roadmap and never fixed: the metric and artifact ingest paths took writes from inside
+the cluster with no authentication at all, so anything that could reach the control plane
+could report results for any job.
+
+Full reasoning, and an explicit list of what is *not* built — no identity provider, no
+Kubernetes RBAC, no rate limiting, no audit of refusals — is in
+[ADR 0013](docs/adr/0013-tokens-for-people-and-tokens-for-pods.md) and
+[`docs/roadmap.md`](docs/roadmap.md).
+
 ## Surviving a killed pod
 
 A job with `max_retries` above zero, whose failure a retry could plausibly survive, comes
@@ -602,6 +670,9 @@ make db-test         # a separate database for the tests, which truncate everyth
 make test
 
 npm start            # start the control plane (API + executor)
+
+export ASHML_TOKEN=$(make -s token)   # the API is default-deny; this is the first token
+ash whoami
 ```
 
 `make e2e` runs the whole path against the real cluster — submit, run, log, fail,
@@ -718,6 +789,10 @@ docs/              architecture, roadmap, ADRs
 | `ASHML_LOG_LEVEL` | `info` | pino log level |
 | `ASHML_GPU_PROVIDER` | `nvidia` | `nvidia` or `sim` |
 | `ASHML_SIM_GPUS` | `2` | Device count for the `sim` provider |
+| `ASHML_AUTH_ENABLED` | `true` | Default deny. `false` acts as the seeded local administrator, for `make dev` and the k3d end-to-end scripts — never for a reachable control plane |
+| `ASHML_RUN_TOKEN_TTL` | `86400` | Seconds a workload's token stays valid |
+| `ASHML_RUN_TOKEN_GRACE` | `300` | Seconds a *finished* run's token keeps working, so the final checkpoint's upload — confirmed after the pod exits — still lands. A retry revokes immediately regardless |
+| `ASHML_TOKEN` | — | Read by `ash` when nothing is stored by `ash login` |
 | `ASHML_DATABASE_URL` | `postgresql://ashml:ashml@127.0.0.1:5432/ashml` | PostgreSQL connection |
 | `ASHML_DB_POOL_MAX` | `10` | Maximum pooled connections |
 | `ASHML_K8S_BACKEND` | `kubernetes` | `kubernetes` or `sim` |
@@ -879,6 +954,12 @@ functionality, scheduling, distributed training, or performance numbers.**
 2. **11 GB per GPU.** Workloads are sized to fit. This is a platform project, not a
    frontier-model project.
 3. **AshGPU is not integrated.** The provider seam exists; the implementation does not.
+4. **Authentication has no identity provider.** Tokens are issued out of band and `ash
+   login` stores one — no OIDC, no SSO, no passwords. There is also no rate limiting, no
+   audit log of refused requests, and no Kubernetes RBAC: AshML's own service account
+   creates every workload, so a project's pods are isolated by AshML's admission checks
+   rather than by the cluster's. [ADR 0013](docs/adr/0013-tokens-for-people-and-tokens-for-pods.md)
+   lists the rest.
 
 ## License
 

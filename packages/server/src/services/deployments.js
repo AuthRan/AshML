@@ -33,10 +33,12 @@
  */
 
 import { withTransaction } from '../db/pool.js';
+import { issueServingToken } from './auth.js';
 import { ArtifactStatus } from '../domain/artifact-status.js';
 import { ModelStatus } from '../domain/model-status.js';
 import {
   buildTargetManifest, buildTargetServiceManifest, buildServiceManifest, buildRouterManifest,
+  buildServingSecretManifest, servingSecretName,
   kubeDeploymentName, kubeTargetName, serviceUrl, targetServiceUrl,
   frontSelector,
 } from '../k8s/manifest.js';
@@ -328,17 +330,34 @@ export async function deployModel(pool, backend, {
  * rather than waiting a sync interval to be pointed anywhere.
  */
 export async function applyDesiredState(pool, backend, deploymentId, {
-  namespace = 'ashml-jobs', apiUrl = null, arch = null,
+  namespace = 'ashml-jobs', apiUrl = null, arch = null, servingTokenTtlSeconds = null,
 } = {}) {
   const deployment = await deploymentsRepo.getDeploymentById(pool, deploymentId);
   if (!deployment) throw new NotFoundError(`deployment ${deploymentId} not found`);
+
+  // One credential for every pod this pass writes — the model servers and the router
+  // alike. They are one workload with one set of rights: fetch this project's artifacts,
+  // and follow this deployment's routing table (domain/roles.js).
+  //
+  // It goes into a Secret, and the pod templates reference that Secret by name. Putting
+  // the value in the template instead would make the template differ on every apply, and
+  // since this function re-writes every target whenever anything changes, a traffic-weight
+  // change would restart every serving pod — an outage in the middle of the rollout the
+  // weights exist to avoid.
+  const { token: servingToken } = await issueServingToken(pool, deployment.id, {
+    ttlSeconds: servingTokenTtlSeconds,
+  });
+  const secretName = servingSecretName(deployment);
+  await backend.applySecret(buildServingSecretManifest(deployment, servingToken, { namespace }));
 
   for (const target of deployment.targets) {
     // `arch` overrides only what the artifact failed to record; it is per-deployment, so
     // it cannot be right for one target and wrong for another.
     const resolved = { ...target, arch: target.arch ?? arch };
     try {
-      await backend.applyDeployment(buildTargetManifest(deployment, resolved, { namespace, apiUrl }));
+      await backend.applyDeployment(
+        buildTargetManifest(deployment, resolved, { namespace, apiUrl, secretName }),
+      );
       await backend.applyService(buildTargetServiceManifest(deployment, resolved, { namespace }));
     } catch (err) {
       await deploymentsRepo.recordObservation(pool, deployment.id, {
@@ -354,7 +373,7 @@ export async function applyDesiredState(pool, backend, deploymentId, {
     });
   }
 
-  await applyRouter(pool, backend, deployment, { namespace, apiUrl });
+  await applyRouter(pool, backend, deployment, { namespace, apiUrl, secretName });
 
   const front = desiredFront(deployment);
   if (!deployment.k8s_name) {
@@ -402,10 +421,10 @@ export async function applyDesiredState(pool, backend, deploymentId, {
  * waits for before moving onto it. So this runs on the apply path, well before anything
  * is routed through it.
  */
-async function applyRouter(pool, backend, deployment, { namespace, apiUrl }) {
+async function applyRouter(pool, backend, deployment, { namespace, apiUrl, secretName = null }) {
   if (desiredFront(deployment).kind !== 'router') return;
 
-  const manifest = buildRouterManifest(deployment, { namespace, apiUrl });
+  const manifest = buildRouterManifest(deployment, { namespace, apiUrl, secretName });
   await backend.applyDeployment(manifest);
   if (deployment.router_k8s_name !== manifest.metadata.name) {
     await deploymentsRepo.recordRouter(pool, deployment.id, manifest.metadata.name);
@@ -700,14 +719,24 @@ async function moveFrontDoor(pool, backend, deployment, { namespace, logger = nu
  * about — which is the treadmill this file's header warns against, arriving by a side
  * door.
  */
-async function scaleDownRetired(pool, backend, deployment, { namespace, apiUrl = null, logger = null }) {
+async function scaleDownRetired(pool, backend, deployment, {
+  namespace, apiUrl = null, logger = null,
+}) {
   const retired = deployment.targets.filter((t) => (
     t.traffic_weight === 0 && t.version !== deployment.serving_version && t.k8s_name
   ));
 
   for (const target of retired) {
     try {
-      await backend.applyDeployment(buildTargetManifest(deployment, target, { namespace, apiUrl }));
+      // The Secret reference is stable, so it is rebuilt here from the deployment rather
+      // than threaded in: this path scales a retired version to zero and must not differ
+      // from the template that version already has, or it would roll pods on the way to
+      // deleting them.
+      await backend.applyDeployment(
+        buildTargetManifest(deployment, target, {
+          namespace, apiUrl, secretName: servingSecretName(deployment),
+        }),
+      );
       logger?.info?.({
         deployment_id: deployment.id, version: target.version,
       }, 'version scaled to zero: out of rotation and no longer serving');

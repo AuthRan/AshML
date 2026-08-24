@@ -23,7 +23,7 @@ import { ArtifactStatus } from '../domain/artifact-status.js';
 import { runOnce } from './executor.js';
 import { discoverCluster } from './nodes.js';
 import { getJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE } from '../test-support/db.js';
+import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -35,6 +35,21 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
   let app;
   let backend;
   let project;
+  /**
+   * Run-token headers, because the ingest endpoints belong to the run.
+   *
+   * Registering an artifact, confirming it and abandoning it are all the run saying what
+   * it produced, and no person can do them — not even an administrator (ADR 0013). So the
+   * tests hold a run token per job, and remember which job each artifact came from so that
+   * `complete` and `fail`, which are addressed by artifact id, can present the right one.
+   */
+  const runHeaders = new Map();
+  const artifactJob = new Map();
+
+  async function asJob(jobId) {
+    if (!runHeaders.has(jobId)) runHeaders.set(jobId, await asRun(pool, jobId));
+    return runHeaders.get(jobId);
+  }
 
   before(async () => {
     const config = loadConfig({
@@ -45,6 +60,7 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
     backend = createSimBackend({ namespace: 'ashml-test', autoAdvance: false });
     app = await buildApp(config, { logger: false, pool, k8s: backend, store: createNoneStore() });
     await app.ready();
+    await authenticateAs(app, pool);
     await discoverCluster(pool, backend, app.gpuProvider);
   });
 
@@ -55,6 +71,8 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
 
   beforeEach(async () => {
     await truncateAll(pool);
+    runHeaders.clear();
+    artifactJob.clear();
     backend._reset();
     const res = await app.inject({
       method: 'POST',
@@ -107,8 +125,10 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
     return job;
   }
 
-  function register(jobId, body = {}) {
-    return app.inject({
+  /** `as: 'user'` for the cases where the job id names nothing to mint against. */
+  async function register(jobId, body = {}, { as = 'run' } = {}) {
+    const headers = as === 'user' ? {} : await asJob(jobId);
+    const res = await app.inject({
       method: 'POST',
       url: `/api/v1/jobs/${jobId}/artifacts`,
       payload: {
@@ -118,19 +138,37 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
         step: 100,
         ...body,
       },
+      headers,
     });
+    const artifact = res.statusCode === 201 ? res.json().artifact : null;
+    if (artifact) artifactJob.set(artifact.id, jobId);
+    return res;
   }
 
-  function complete(id, body = {}) {
+  async function headersForArtifact(id) {
+    const jobId = artifactJob.get(id);
+    // An artifact this suite did not register — an invented id, or one belonging to a job
+    // it never made — has no run to speak for it. The ordinary identity is right there:
+    // the answer under test is a 404, which comes before any permission is considered.
+    return jobId ? asJob(jobId) : {};
+  }
+
+  async function complete(id, body = {}) {
     return app.inject({
       method: 'POST',
       url: `/api/v1/artifacts/${id}/complete`,
       payload: { digest: 'sha256:abc123', size_bytes: 4096, ...body },
+      headers: await headersForArtifact(id),
     });
   }
 
-  function fail(id, payload) {
-    return app.inject({ method: 'POST', url: `/api/v1/artifacts/${id}/fail`, payload });
+  async function fail(id, payload) {
+    return app.inject({
+      method: 'POST',
+      url: `/api/v1/artifacts/${id}/fail`,
+      payload,
+      headers: await headersForArtifact(id),
+    });
   }
 
   test('registration records intent, not existence', async () => {
@@ -184,6 +222,7 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
       method: 'POST',
       url: `/api/v1/jobs/${job.id}/artifacts`,
       payload: { kind: 'checkpoint', name: 'epoch-1' },
+      headers: await asJob(job.id),
     });
     assert.equal(res.statusCode, 400, res.payload);
     assert.equal(res.json().error.code, 'URI_REQUIRED');
@@ -330,7 +369,7 @@ describe('artifacts (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
 
   test('unknown jobs and artifacts are 404s', async () => {
     const missing = '00000000-0000-0000-0000-000000000000';
-    assert.equal((await register(missing)).statusCode, 404);
+    assert.equal((await register(missing, {}, { as: 'user' })).statusCode, 404);
     assert.equal((await complete(missing)).statusCode, 404);
     assert.equal((await fail(missing, {})).statusCode, 404);
     assert.equal(

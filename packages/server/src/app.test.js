@@ -18,6 +18,12 @@ const testConfig = loadConfig({
   ASHML_SIM_GPUS: '3',
   ASHML_VERSION: '0.0.0-test',
   ASHML_DATABASE_URL: 'postgresql://ashml:ashml@127.0.0.1:1/ashml_not_listening',
+  // These are route-shape tests — serialization, the error envelope, what the dashboard
+  // fetches — and they run against a database that is deliberately not listening. In this
+  // mode every request acts as the seeded local administrator without touching the
+  // database, so the routing under test is reachable. Authentication itself is covered by
+  // `services/auth.integration.test.js`, against a server with it on.
+  ASHML_AUTH_ENABLED: 'false',
 });
 
 describe('ashml-server', () => {

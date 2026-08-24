@@ -75,6 +75,23 @@
   svg .line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
+  .authbar {
+    display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+    padding: .7rem 1rem; margin: 0 0 .5rem;
+    border-bottom: 1px solid var(--line, #2a2f3a);
+  }
+  .authbar input {
+    flex: 0 1 22rem; padding: .35rem .5rem;
+    font: inherit; font-family: ui-monospace, monospace;
+    color: inherit; background: transparent;
+    border: 1px solid var(--line, #2a2f3a); border-radius: 4px;
+  }
+  .authbar button {
+    padding: .35rem .8rem; font: inherit; cursor: pointer;
+    color: inherit; background: transparent;
+    border: 1px solid var(--line, #2a2f3a); border-radius: 4px;
+  }
+  .authbar button:hover { border-color: currentColor; }
 </style>
 </head>
 <body>
@@ -86,6 +103,18 @@
     <span id="freshness">—</span>
   </span>
 </header>
+
+<!--
+  Hidden once a token is stored. It is a plain field rather than a login form because
+  there is nothing to log in to: the token is issued by `ash token create` and pasted
+  here, and the page keeps it in localStorage for this browser only.
+-->
+<div id="auth" class="authbar" hidden>
+  <label for="token">API token</label>
+  <input id="token" type="password" placeholder="ashml_u_…" autocomplete="off" spellcheck="false">
+  <button id="token-save" type="button">Use</button>
+  <span class="note">Create one with <code>ash token create dashboard</code>. Stored in this browser only.</span>
+</div>
 
 <main>
   <section>
@@ -146,8 +175,52 @@ function age(iso) {
   return `${Math.floor(s / 86400)}d`;
 }
 
+/**
+ * The viewer's token.
+ *
+ * The page is served without credentials — it is static HTML and grants nothing — but
+ * every endpoint it reads is default-deny since Phase 10, so the browser has to present
+ * a token like any other client. It is kept in localStorage, which is per-origin and
+ * per-browser and never reaches the control plane except as this header.
+ *
+ * There is no login page and there should not be: a password form here would be a second
+ * way to authenticate, with its own session handling to get wrong, for a page that is
+ * deliberately read-only and holds no logic (see routes/ui.js).
+ */
+const TOKEN_KEY = 'ashml.token';
+
+function token() {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || '';
+  } catch {
+    // Private windows and blocked site data throw on access rather than returning null.
+    return '';
+  }
+}
+
+function setToken(value) {
+  try {
+    if (value) localStorage.setItem(TOKEN_KEY, value);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // Nothing to do: the field below still holds it for this page load.
+  }
+}
+
+/** Thrown when the answer is 401/403, so `tick` can ask for a token instead of a retry. */
+class Unauthorized extends Error {}
+
 async function get(path) {
-  const res = await fetch(path, { headers: { accept: 'application/json' } });
+  const headers = { accept: 'application/json' };
+  const bearer = token();
+  if (bearer) headers.authorization = `Bearer ${bearer}`;
+
+  const res = await fetch(path, { headers });
+  if (res.status === 401 || res.status === 403) {
+    throw new Unauthorized(res.status === 401
+      ? 'this dashboard needs an API token'
+      : 'this token cannot read that');
+  }
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
   return res.json();
 }
@@ -319,11 +392,27 @@ async function tick() {
   } catch (err) {
     // Say the reading is old rather than showing an old reading as if it were current.
     $('pulse').className = 'dot stale';
+    if (err instanceof Unauthorized) {
+      // A distinct message, because "cannot reach the control plane" would be a lie —
+      // it answered, and it said no.
+      $('freshness').textContent = err.message;
+      $('auth').hidden = false;
+      return;
+    }
     $('freshness').textContent = lastOk
       ? `stale — ${age(new Date(lastOk).toISOString())} since the last good read`
       : `cannot reach the control plane (${err.message})`;
   }
 }
+
+$('token').value = token();
+$('auth').hidden = Boolean(token());
+$('token-save').addEventListener('click', () => {
+  setToken($('token').value.trim());
+  $('auth').hidden = Boolean(token());
+  tick();
+});
+$('token').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('token-save').click(); });
 
 $('project').addEventListener('change', (e) => { selected = e.target.value; tick(); });
 tick();

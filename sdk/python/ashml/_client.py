@@ -53,15 +53,28 @@ class Client:
     restart, not to wait out an outage.
     """
 
-    def __init__(self, endpoint: str, *, timeout: float = 10.0, retries: int = 3):
+    def __init__(
+        self,
+        endpoint: str,
+        *,
+        timeout: float = 10.0,
+        retries: int = 3,
+        token: str | None = None,
+    ):
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
         self.retries = retries
+        # The run token the control plane injected into this pod (Phase 10). Read from
+        # the environment by ``ashml.init`` rather than here, so that this class stays a
+        # plain HTTP client with no opinion about where it is running.
+        self.token = token
 
     def request(self, method: str, path: str, body: dict | None = None) -> dict:
         url = f"{self.endpoint}{path}"
         data = json.dumps(body).encode() if body is not None else None
         headers = {"content-type": "application/json"} if data else {}
+        if self.token:
+            headers["authorization"] = f"Bearer {self.token}"
 
         last: ApiError | None = None
         for attempt in range(self.retries + 1):

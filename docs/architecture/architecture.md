@@ -289,3 +289,41 @@ metrics — GPU utilisation, memory, temperature — are scraped by Prometheus
 
 The specific question the observability stack must answer: *why is this job slow, and
 what is the bottleneck?* If a dashboard cannot contribute to that answer, it is decoration.
+
+## 12. Identity and authorization
+
+Two things call this API, and conflating them is the mistake this section exists to
+prevent: **people**, who hold long-lived tokens and belong to projects, and **workloads**,
+which hold a credential the platform minted for one pod and revokes when that pod is done.
+
+```
+person ──token──▶ api_tokens ──▶ project_members(role) ─┐
+                                                        ├──▶ domain/roles.js ──▶ yes / no
+pod ────token──▶ workload_tokens(RUN | SERVING) ────────┘
+```
+
+`domain/roles.js` is the whole decision, and it is a pure function: principal plus
+permission plus scope in, boolean out. No database, no request, no clock. That is not
+tidiness — an authorization bug produces *no symptom in a working system*, so the only way
+to know it is right is to enumerate it in a test, and nothing that reaches for I/O can be
+enumerated.
+
+**Authentication is global; authorization is per route.** A hook resolves the caller on
+every request; the route declares what it takes to call it. The declaration is checked
+when the route is *registered*, so an endpoint that declares nothing makes the process
+fail to start. The alternative — open until protected — fails silently and in the
+dangerous direction each time a route is added.
+
+**A run may write only what it observed, and nobody else may write it at all.** Metric and
+artifact ingest carry `RUN_REPORT`, which no person holds, not even a platform
+administrator. This follows from ADR 0009: the record is worth something because the pod
+reported what it measured, and an endpoint a human can post to is an endpoint where the
+number might have been chosen instead.
+
+**Quotas belong to the platform, not the project.** A limit its subject can raise is not a
+limit, so `PLATFORM_ADMIN` — not `OWNER` — changes a quota and reads cluster inventory.
+
+**Not built:** no identity provider, no Kubernetes RBAC or per-project service accounts,
+no rate limiting, no audit of refusals. AshML's own service account creates every
+workload, so a project's pods are isolated by AshML's admission checks and not by the
+cluster's. ADR 0013 has the reasoning and the full list.

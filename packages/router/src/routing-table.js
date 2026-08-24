@@ -40,6 +40,7 @@ export const FAILOVER_COOLDOWN_MS = 5_000;
  * @param {object} options
  * @param {string} options.endpoint the control plane's base URL
  * @param {string} options.deploymentId
+ * @param {string} [options.token] the deployment's workload credential, from its Secret
  * @param {number} [options.refreshMs]
  * @param {function} [options.fetchImpl] injectable, so the tests are not a web server
  * @param {function} [options.now] injectable, so the tests are not a stopwatch
@@ -47,6 +48,7 @@ export const FAILOVER_COOLDOWN_MS = 5_000;
 export function createRoutingTable({
   endpoint,
   deploymentId,
+  token = null,
   refreshMs = 5_000,
   timeoutMs = 5_000,
   fetchImpl = globalThis.fetch,
@@ -70,7 +72,13 @@ export function createRoutingTable({
   async function refresh() {
     try {
       const response = await fetchImpl(url, {
-        headers: { accept: 'application/json' },
+        headers: {
+          accept: 'application/json',
+          // Mounted from the deployment's Secret. It carries ROUTING_READ for this
+          // deployment and nothing else (server/src/domain/roles.js). Absent when the
+          // control plane runs with authentication disabled.
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (!response.ok) {

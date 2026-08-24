@@ -35,6 +35,7 @@ import { JobState } from '../packages/server/src/domain/job-state.js';
 // workstation with two clusters cannot assert against one while testing the other.
 // See scripts/lib/kubectl.mjs.
 import { kubectl, requireContext, KUBE_CONTEXT } from './lib/kubectl.mjs';
+import { authenticate } from './lib/auth.mjs';
 
 const NAMESPACE = process.env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs';
 const IMAGE = process.env.TRAINER_IMAGE ?? 'ashml/trainer:v1';
@@ -54,6 +55,9 @@ await requireContext();
 
 const app = await buildApp(config, { logger: false });
 await app.ready();
+// The API is default-deny. This script is evidence, so it authenticates rather than
+// turning authentication off (scripts/lib/auth.mjs).
+await authenticate(app);
 
 const suffix = Math.random().toString(36).slice(2, 8);
 const project = `sched-${suffix}`;

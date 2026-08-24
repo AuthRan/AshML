@@ -81,6 +81,30 @@ export function loadConfig(env = process.env) {
       presignTtlSeconds: parseCount(env.ASHML_S3_PRESIGN_TTL, 'ASHML_S3_PRESIGN_TTL') ?? 3600,
     },
 
+    // Authentication (Phase 10, spec §31).
+    //
+    // Required by default, and disabling it takes the same shape as every other
+    // "make this less real" switch in this file: explicit, opt-in, and named for what
+    // it does. An API that quietly accepts anonymous writes because a variable was unset
+    // is the failure this default exists to prevent — the previous behaviour, in other
+    // words. `disabled` acts as the seeded local administrator and logs a warning on
+    // every start, and exists so the k3d end-to-end scripts and a bare `make dev` still
+    // work without a token ceremony.
+    authEnabled: parseBool(env.ASHML_AUTH_ENABLED, 'ASHML_AUTH_ENABLED', true),
+
+    // How long a training pod's run token lives. Long enough for a slow epoch, short
+    // enough that a token scraped from a pod spec is not a standing grant — and it is
+    // revoked when the job ends regardless, so this is the backstop for a job whose
+    // terminal state was never observed, not the primary control.
+    runTokenTtlSeconds: parseCount(env.ASHML_RUN_TOKEN_TTL, 'ASHML_RUN_TOKEN_TTL') ?? 86_400,
+
+    // How long a *finished* run's token keeps working. Not zero, and that is the whole
+    // point: the final checkpoint's upload is confirmed after the pod has exited, so
+    // cutting the credential the moment the job reaches a terminal state would leave
+    // every successful run's model stuck at PENDING. A retry is the case that revokes
+    // immediately, and it does so regardless of this.
+    runTokenGraceSeconds: parseCount(env.ASHML_RUN_TOKEN_GRACE, 'ASHML_RUN_TOKEN_GRACE') ?? 300,
+
     databaseUrl: env.ASHML_DATABASE_URL
       ?? 'postgresql://ashml:ashml@127.0.0.1:5432/ashml',
     databasePoolMax: parseCount(env.ASHML_DB_POOL_MAX, 'ASHML_DB_POOL_MAX') ?? 10,

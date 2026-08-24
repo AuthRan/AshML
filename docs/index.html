@@ -380,15 +380,16 @@ confidence:  81.5%
       <code>0.6428</code> / <code>0.9933</code>, which is what AshML recorded for that
       artifact.</p>
       <p>It is <b>not</b> the control plane. The scheduler, the executor and the REST API
-      need a Kubernetes cluster, PostgreSQL and an object store; and the API is
-      unauthenticated until Phase 10, so it is deliberately not something to put on a public
-      URL. To run the whole thing, clone the repository — <code>make cluster &amp;&amp; make
-      journey</code> stands it up locally.</p>
+      need a Kubernetes cluster, PostgreSQL and an object store. The API authenticates
+      every request now, but it still has no rate limiting and no audit of refused
+      requests, so it is deliberately not something to put on a public URL. To run the
+      whole thing, clone the repository — <code>make cluster &amp;&amp; make journey</code>
+      stands it up locally.</p>
     </div>
     <table>
       <tr><th>Component</th><th>Where it runs</th></tr>
       <tr><td>The trained model</td><td>Live in your browser (ONNX), and in-cluster behind <code>serve.py</code></td></tr>
-      <tr><td>Control plane API + scheduler</td><td>Local only — needs Kubernetes; no auth until Phase 10</td></tr>
+      <tr><td>Control plane API + scheduler</td><td>Local only — needs Kubernetes; authenticated, but no rate limiting yet</td></tr>
       <tr><td>Router / traffic splitting</td><td>Local only — needs two versions and real pods</td></tr>
       <tr><td>Prometheus + Grafana</td><td>Local only — <code>make observability</code>, dashboards in git as JSON</td></tr>
       <tr><td>Unit + integration tests</td><td>CI, against real Postgres and MinIO service containers</td></tr>

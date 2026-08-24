@@ -6,6 +6,7 @@
  */
 
 import * as experimentService from '../services/experiments.js';
+import { Permission } from '../domain/roles.js';
 
 const experimentSchema = {
   $id: 'Experiment',
@@ -61,6 +62,7 @@ export async function registerExperimentRoutes(app) {
   app.post(
     '/api/v1/experiments',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['experiments'],
         summary: 'Create an experiment',
@@ -90,6 +92,9 @@ export async function registerExperimentRoutes(app) {
       },
     },
     async (request, reply) => {
+      // The project is in the body, so the declarative check cannot see it.
+      await app.requireProject(request, request.body.project, Permission.PROJECT_WRITE);
+
       const body = request.body;
       const experiment = await experimentService.createExperiment(app.db, {
         projectName: body.project,
@@ -112,6 +117,7 @@ export async function registerExperimentRoutes(app) {
   app.get(
     '/api/v1/experiments',
     {
+      config: { authenticatedOnly: true },
       schema: {
         tags: ['experiments'],
         summary: 'List experiments, newest first',
@@ -135,6 +141,7 @@ export async function registerExperimentRoutes(app) {
       experiments: await experimentService.listExperiments(app.db, {
         projectName: request.query.project ?? null,
         limit: request.query.limit ?? 50,
+        visibleToUserId: app.listScope(request),
       }),
     }),
   );
@@ -142,6 +149,7 @@ export async function registerExperimentRoutes(app) {
   app.get(
     '/api/v1/experiments/:id',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['experiments'],
         summary: 'Get an experiment',
@@ -156,12 +164,16 @@ export async function registerExperimentRoutes(app) {
         },
       },
     },
-    async (request) => experimentService.getExperiment(app.db, request.params.id),
+    async (request) => {
+      await app.requireExperiment(request, request.params.id, Permission.PROJECT_READ);
+      return experimentService.getExperiment(app.db, request.params.id);
+    },
   );
 
   app.post(
     '/api/v1/experiments/:id/report',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['experiments'],
         summary: 'A run reports its own start or finish',
@@ -198,6 +210,11 @@ export async function registerExperimentRoutes(app) {
       },
     },
     async (request) => {
+      // Reproducibility capture is the run describing itself, so it is a run's write.
+      // A person cannot make it: the whole value of the record is that the pod reported
+      // what it observed rather than what somebody expected (ADR 0009, spec Rule 5).
+      await app.requireExperiment(request, request.params.id, Permission.RUN_REPORT);
+
       const body = request.body;
       const experiment = await experimentService.reportRun(app.db, request.params.id, {
         phase: body.phase,

@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import warnings
 import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -119,6 +120,52 @@ class InitTest(unittest.TestCase):
 
             self.assertEqual(run.job_id, JOB)
             self.assertEqual(run.experiment_id, EXPERIMENT)
+
+    def test_sends_the_run_token_the_platform_injected(self):
+        # The credential AshML puts in the pod. Without it every report is a 401, and the
+        # SDK has no other way to prove it is the run it says it is.
+        with StubServer() as stub:
+            stub.script((200, {}))
+            env = {
+                "ASHML_ENDPOINT": stub.url,
+                "ASHML_JOB_ID": JOB,
+                "ASHML_EXPERIMENT_ID": EXPERIMENT,
+                "ASHML_RUN_TOKEN": "ashml_w_secret",
+            }
+            with unittest.mock.patch.dict(os.environ, env, clear=True):
+                ashml.init()
+
+            self.assertEqual(
+                stub.requests[0]["headers"]["Authorization"], "Bearer ashml_w_secret"
+            )
+
+    def test_warns_when_there_is_no_run_token(self):
+        # Not fatal: a control plane with authentication disabled injects none, and that
+        # is the mode the k3d end-to-end scripts use. But against an authenticated one
+        # every report will fail, and this warning is what connects those 401s to a cause
+        # somebody can act on from inside a pod.
+        with StubServer() as stub:
+            env = {"ASHML_ENDPOINT": stub.url, "ASHML_JOB_ID": JOB}
+            with unittest.mock.patch.dict(os.environ, env, clear=True):
+                with self.assertWarnsRegex(RuntimeWarning, "ASHML_RUN_TOKEN"):
+                    ashml.init(report_start=False)
+
+    def test_no_token_means_no_authorization_header(self):
+        # Rather than an empty or literal "Bearer None", which would be refused with a
+        # message about a malformed token instead of an absent one.
+        with StubServer() as stub:
+            stub.script((200, {}))
+            env = {
+                "ASHML_ENDPOINT": stub.url,
+                "ASHML_JOB_ID": JOB,
+                "ASHML_EXPERIMENT_ID": EXPERIMENT,
+            }
+            with unittest.mock.patch.dict(os.environ, env, clear=True):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    ashml.init()
+
+            self.assertNotIn("Authorization", stub.requests[0]["headers"])
 
     def test_refuses_to_guess_a_job_id(self):
         # Reporting into the void is the good outcome here; the bad one is reporting

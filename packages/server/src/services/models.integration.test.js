@@ -25,7 +25,7 @@ import { ModelStatus } from '../domain/model-status.js';
 import { runOnce } from './executor.js';
 import { discoverCluster } from './nodes.js';
 import { getJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE } from '../test-support/db.js';
+import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -37,6 +37,13 @@ describe('model registry (integration)', { skip: pool ? false : SKIP_MESSAGE }, 
   let app;
   let backend;
   let project;
+  const runHeaders = new Map();
+  const artifactJob = new Map();
+
+  async function asJob(jobId) {
+    if (!runHeaders.has(jobId)) runHeaders.set(jobId, await asRun(pool, jobId));
+    return runHeaders.get(jobId);
+  }
 
   before(async () => {
     const config = loadConfig({
@@ -47,6 +54,7 @@ describe('model registry (integration)', { skip: pool ? false : SKIP_MESSAGE }, 
     backend = createSimBackend({ namespace: 'ashml-test', autoAdvance: false });
     app = await buildApp(config, { logger: false, pool, k8s: backend, store: createNoneStore() });
     await app.ready();
+    await authenticateAs(app, pool);
     await discoverCluster(pool, backend, app.gpuProvider);
   });
 
@@ -57,6 +65,8 @@ describe('model registry (integration)', { skip: pool ? false : SKIP_MESSAGE }, 
 
   beforeEach(async () => {
     await truncateAll(pool);
+    runHeaders.clear();
+    artifactJob.clear();
     backend._reset();
     const res = await app.inject({
       method: 'POST',
@@ -92,14 +102,22 @@ describe('model registry (integration)', { skip: pool ? false : SKIP_MESSAGE }, 
     return job;
   }
 
-  /** A PENDING artifact belonging to a running job. */
+  /**
+   * A PENDING artifact belonging to a running job.
+   *
+   * Registered with a run token, because producing an artifact is the run's act and no
+   * person can perform it (ADR 0013). Everything downstream here — registering a version
+   * from it, promoting that version — is a person's act and uses the ordinary identity.
+   */
   async function pendingArtifact(job, name = 'final.pt') {
     const res = await app.inject({
       method: 'POST',
       url: `/api/v1/jobs/${job.id}/artifacts`,
       payload: { kind: 'model', name, uri: `file:///models/${name}` },
+      headers: await asJob(job.id),
     });
     assert.equal(res.statusCode, 201, res.payload);
+    artifactJob.set(res.json().artifact.id, job.id);
     return res.json().artifact;
   }
 
@@ -110,6 +128,7 @@ describe('model registry (integration)', { skip: pool ? false : SKIP_MESSAGE }, 
       method: 'POST',
       url: `/api/v1/artifacts/${artifact.id}/complete`,
       payload: { digest: 'sha256:abc', size_bytes: 2048 },
+      headers: await asJob(job.id),
     });
     assert.equal(done.statusCode, 200, done.payload);
     return done.json();
@@ -226,7 +245,12 @@ describe('model registry (integration)', { skip: pool ? false : SKIP_MESSAGE }, 
     test('an abandoned artifact cannot become a model either', async () => {
       const job = await runningJob();
       const artifact = await pendingArtifact(job);
-      await app.inject({ method: 'POST', url: `/api/v1/artifacts/${artifact.id}/fail`, payload: {} });
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/artifacts/${artifact.id}/fail`,
+        payload: {},
+        headers: await asJob(job.id),
+      });
 
       const res = await registerVersion('fraud-detector', artifact.id);
       assert.equal(res.statusCode, 409, res.payload);
@@ -252,7 +276,9 @@ describe('model registry (integration)', { skip: pool ? false : SKIP_MESSAGE }, 
 
     test('a version inherits the run’s own reported metrics', async () => {
       const job = await runningJob();
-      await app.inject({
+      // As the run: these are the numbers the training loop measured, and nothing else
+      // is allowed to author them (ADR 0013).
+      const reported = await app.inject({
         method: 'POST',
         url: `/api/v1/jobs/${job.id}/metrics`,
         payload: {
@@ -262,7 +288,9 @@ describe('model registry (integration)', { skip: pool ? false : SKIP_MESSAGE }, 
             { name: 'loss', value: 0.12, step: 100 },
           ],
         },
+        headers: await asJob(job.id),
       });
+      assert.equal(reported.statusCode, 201, reported.payload);
       const artifact = await readyArtifact(job);
 
       const version = (await registerVersion('fraud-detector', artifact.id)).json();

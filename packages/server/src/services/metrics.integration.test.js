@@ -19,7 +19,7 @@ import { JobState } from '../domain/job-state.js';
 import { runOnce } from './executor.js';
 import { discoverCluster } from './nodes.js';
 import { getJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE } from '../test-support/db.js';
+import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -31,6 +31,8 @@ describe('training metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }
   let app;
   let backend;
   let project;
+  /** jobId -> run-token headers, so a job reports with one identity throughout. */
+  const runHeaders = new Map();
 
   before(async () => {
     const config = loadConfig({
@@ -41,6 +43,7 @@ describe('training metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }
     backend = createSimBackend({ namespace: 'ashml-test', autoAdvance: false });
     app = await buildApp(config, { logger: false, pool, k8s: backend });
     await app.ready();
+    await authenticateAs(app, pool);
     await discoverCluster(pool, backend, app.gpuProvider);
   });
 
@@ -51,6 +54,7 @@ describe('training metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }
 
   beforeEach(async () => {
     await truncateAll(pool);
+    runHeaders.clear();
     backend._reset();
     const res = await app.inject({
       method: 'POST',
@@ -98,11 +102,29 @@ describe('training metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }
     return launched;
   }
 
-  function report(jobId, metrics) {
+  /**
+   * Reports as the run itself.
+   *
+   * Metric ingest is reachable only by the job that produced the numbers — not by a
+   * person, however privileged (ADR 0013) — so this holds a run token. Cached per job
+   * because minting a second one revokes the first, which is what a retry does and not
+   * what a test reporting twice means.
+   */
+  async function report(jobId, metrics, { as = 'run' } = {}) {
+    // `as: 'user'` is for the cases where no run token can exist — an id that names no
+    // job. There is nothing to mint against, and the answer under test is the 404 that
+    // comes before any permission is considered.
+    if (as === 'user') {
+      return app.inject({
+        method: 'POST', url: `/api/v1/jobs/${jobId}/metrics`, payload: { metrics },
+      });
+    }
+    if (!runHeaders.has(jobId)) runHeaders.set(jobId, await asRun(pool, jobId));
     return app.inject({
       method: 'POST',
       url: `/api/v1/jobs/${jobId}/metrics`,
       payload: { metrics },
+      headers: runHeaders.get(jobId),
     });
   }
 
@@ -162,9 +184,11 @@ describe('training metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }
   });
 
   test('metrics for an unknown job are a 404', async () => {
-    const res = await report('00000000-0000-0000-0000-000000000000', [
-      { name: 'loss', value: 1, step: 0 },
-    ]);
+    const res = await report(
+      '00000000-0000-0000-0000-000000000000',
+      [{ name: 'loss', value: 1, step: 0 }],
+      { as: 'user' },
+    );
     assert.equal(res.statusCode, 404);
     assert.equal(res.json().error.code, 'NOT_FOUND');
   });

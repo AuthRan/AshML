@@ -37,6 +37,8 @@ import { registerModelRoutes } from './routes/models.js';
 import { registerDeploymentRoutes } from './routes/deployments.js';
 import { registerObservabilityRoutes } from './routes/observability.js';
 import { registerUiRoutes } from './routes/ui.js';
+import { registerAuthRoutes } from './routes/auth.js';
+import { installAuth } from './auth/install.js';
 import { createMetrics } from './observability/metrics.js';
 import { createPool } from './db/pool.js';
 import { IllegalTransitionError } from './domain/job-state.js';
@@ -170,6 +172,10 @@ export async function buildApp(config, {
   app.addSchema(errorSchema);
   app.addSchema(deviceSchema);
 
+  // Before any route is registered, so that every route inherits the default-deny hook
+  // and there is no window in which a route exists unprotected (auth/install.js).
+  await installAuth(app, { enabled: config.authEnabled });
+
   await app.register(fastifySwagger, {
     openapi: {
       openapi: '3.1.0',
@@ -183,6 +189,7 @@ export async function buildApp(config, {
       servers: [{ url: '/', description: 'Current host' }],
       tags: [
         { name: 'system', description: 'Health and version' },
+        { name: 'auth', description: 'Tokens, identity, and project membership' },
         { name: 'gpus', description: 'GPU inventory and telemetry' },
         { name: 'projects', description: 'Projects and quotas' },
         { name: 'datasets', description: 'Datasets and their immutable versions' },
@@ -233,6 +240,7 @@ export async function buildApp(config, {
   });
 
   await app.register(registerHealthRoutes);
+  await app.register(registerAuthRoutes);
   await app.register(registerObservabilityRoutes);
   await app.register(registerUiRoutes);
   await app.register(registerGpuRoutes);

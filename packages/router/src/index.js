@@ -38,9 +38,13 @@ const endpoint = required('ASHML_ENDPOINT');
 const deploymentId = required('ASHML_DEPLOYMENT_ID');
 const port = Number(process.env.ASHML_PORT ?? 8082);
 const refreshMs = Number(process.env.ASHML_ROUTING_REFRESH_MS ?? 5_000);
+// Mounted from the deployment's Secret. Optional rather than `required` because a
+// control plane with authentication disabled injects none, and the router should still
+// come up there — the request simply goes out unauthenticated and is accepted.
+const token = process.env.ASHML_RUN_TOKEN ?? null;
 
 const metrics = createRouterMetrics({ deployment: process.env.ASHML_DEPLOYMENT_NAME ?? deploymentId });
-const table = createRoutingTable({ endpoint, deploymentId, refreshMs });
+const table = createRoutingTable({ endpoint, deploymentId, refreshMs, token });
 const app = createRouter({ table, metrics });
 
 // Fetched before listening, and a failure here is not fatal. The pod's readiness probe

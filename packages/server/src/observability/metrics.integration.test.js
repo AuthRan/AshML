@@ -23,7 +23,7 @@ import { JobState } from '../domain/job-state.js';
 import { ArtifactStatus } from '../domain/artifact-status.js';
 import { ModelStatus } from '../domain/model-status.js';
 import { discoverCluster } from '../services/nodes.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE } from '../test-support/db.js';
+import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -49,6 +49,7 @@ describe('/metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
       logger: false, pool, k8s: backend, store: createNoneStore(), collectDefaultMetrics: false,
     });
     await app.ready();
+    await authenticateAs(app, pool);
     await discoverCluster(pool, backend, app.gpuProvider);
   });
 
@@ -167,6 +168,7 @@ describe('/metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     await pool.query("UPDATE training_jobs SET state = 'RUNNING' WHERE id = $1", [job.id]);
 
     const reported = await app.inject({
+      headers: await asRun(pool, job.id),
       method: 'POST',
       url: `/api/v1/jobs/${job.id}/metrics`,
       payload: {

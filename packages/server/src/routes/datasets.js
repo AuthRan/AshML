@@ -6,6 +6,7 @@
  */
 
 import * as datasetService from '../services/datasets.js';
+import { Permission } from '../domain/roles.js';
 
 const datasetSchema = {
   $id: 'Dataset',
@@ -62,6 +63,7 @@ export async function registerDatasetRoutes(app) {
   app.post(
     '/api/v1/projects/:name/datasets',
     {
+      config: { permission: Permission.PROJECT_WRITE },
       schema: {
         tags: ['datasets'],
         summary: 'Create a dataset',
@@ -92,6 +94,7 @@ export async function registerDatasetRoutes(app) {
   app.get(
     '/api/v1/projects/:name/datasets',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['datasets'],
         summary: 'List a project\'s datasets',
@@ -112,6 +115,7 @@ export async function registerDatasetRoutes(app) {
   app.get(
     '/api/v1/projects/:name/datasets/:dataset',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['datasets'],
         summary: 'Get a dataset',
@@ -128,6 +132,7 @@ export async function registerDatasetRoutes(app) {
   app.post(
     '/api/v1/projects/:name/datasets/:dataset/versions',
     {
+      config: { permission: Permission.PROJECT_WRITE },
       schema: {
         tags: ['datasets'],
         summary: 'Register a dataset version',
@@ -174,6 +179,7 @@ export async function registerDatasetRoutes(app) {
   app.get(
     '/api/v1/projects/:name/datasets/:dataset/versions',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['datasets'],
         summary: 'List a dataset\'s versions, newest first',
@@ -196,6 +202,7 @@ export async function registerDatasetRoutes(app) {
   app.get(
     '/api/v1/projects/:name/datasets/:dataset/versions/:version',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['datasets'],
         summary: 'Get one dataset version',

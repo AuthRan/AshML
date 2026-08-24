@@ -18,6 +18,7 @@ import { buildJobManifest, kubeJobName } from '../k8s/manifest.js';
 import { JobState, isOutcome } from '../domain/job-state.js';
 import * as jobService from './jobs.js';
 import { scheduleJob, Placement } from './scheduler.js';
+import { issueRunToken, expireRunTokens } from './auth.js';
 
 /**
  * Launches one claimed job onto the cluster.
@@ -31,8 +32,24 @@ import { scheduleJob, Placement } from './scheduler.js';
  *
  * @returns {Promise<object>} the job, now STARTING
  */
-export async function launchJob(pool, backend, job, { logger = null, apiUrl = null } = {}) {
+export async function launchJob(pool, backend, job, {
+  logger = null, apiUrl = null, runTokenTtlSeconds = null,
+} = {}) {
   const namespace = backend.namespace;
+
+  // Minted before the Job is created, and scoped to this attempt. Any token from a
+  // previous attempt is revoked in the same transaction (services/auth.js), which is what
+  // stops a SIGKILLed pod that is still shutting down from reporting into the attempt
+  // that replaced it — a failure that would not error, it would write one run's numbers
+  // onto another's.
+  //
+  // Minting before `createJob` rather than after is the same ordering argument the
+  // comment above makes about the database: a crash between the two leaves an unused
+  // token, which expires; the reverse order would leave a running pod with no credential
+  // and no way to obtain one.
+  const { token: runToken } = await issueRunToken(pool, job.id, job.attempt ?? 0, {
+    ttlSeconds: runTokenTtlSeconds,
+  });
   // The node is passed through so the Pod lands where AshML decided, not where
   // Kubernetes would have chosen. Without this the scheduler's decision is a record of
   // an intention rather than a cause (see ADR 0003).
@@ -40,6 +57,7 @@ export async function launchJob(pool, backend, job, { logger = null, apiUrl = nu
     namespace,
     nodeName: job.placement?.node_name ?? null,
     apiUrl,
+    runToken,
   });
   const name = manifest.metadata.name;
 
@@ -85,7 +103,9 @@ export async function cancelWorkload(pool, backend, job, { logger = null } = {})
  *
  * @returns {Promise<string|null>} the new state, or null if it went back to the queue
  */
-export async function placeAndLaunch(pool, backend, job, { logger = null, apiUrl = null } = {}) {
+export async function placeAndLaunch(pool, backend, job, {
+  logger = null, apiUrl = null, runTokenTtlSeconds = null,
+} = {}) {
   if (!job.placement?.node_id) {
     const result = await scheduleJob(pool, job.id, { logger });
 
@@ -98,7 +118,7 @@ export async function placeAndLaunch(pool, backend, job, { logger = null, apiUrl
     job = await jobService.getJob(pool, job.id);
   }
 
-  await launchJob(pool, backend, job, { logger, apiUrl });
+  await launchJob(pool, backend, job, { logger, apiUrl, runTokenTtlSeconds });
   return JobState.STARTING;
 }
 
@@ -107,7 +127,9 @@ export async function placeAndLaunch(pool, backend, job, { logger = null, apiUrl
  *
  * @returns {Promise<string|null>} the new state, or null if nothing changed
  */
-export async function reconcileJob(pool, backend, job, { logger = null, apiUrl = null } = {}) {
+export async function reconcileJob(pool, backend, job, {
+  logger = null, apiUrl = null, runTokenTtlSeconds = null,
+} = {}) {
   if (job.state === JobState.CANCELLING) {
     await cancelWorkload(pool, backend, job, { logger });
     return JobState.CANCELLED;
@@ -116,7 +138,7 @@ export async function reconcileJob(pool, backend, job, { logger = null, apiUrl =
   // Claimed but not yet launched. It may not have been placed yet either — a job that
   // was requeued and re-claimed, or one interrupted mid-launch by a restart.
   if (job.state === JobState.SCHEDULING) {
-    return placeAndLaunch(pool, backend, job, { logger, apiUrl });
+    return placeAndLaunch(pool, backend, job, { logger, apiUrl, runTokenTtlSeconds });
   }
 
   const observation = await backend.observeJob(backend.namespace, job.k8s_job_name);
@@ -157,20 +179,38 @@ export async function reconcileJob(pool, backend, job, { logger = null, apiUrl =
  *   executor works identically without them; nothing here may depend on being observed
  * @returns {Promise<{reconciled: number, launched: number, requeued: number, retried: number, errors: number}>}
  */
-export async function runOnce(pool, backend, { logger = null, maxLaunches = 10, apiUrl = null, metrics = null } = {}) {
+export async function runOnce(pool, backend, {
+  logger = null, maxLaunches = 10, apiUrl = null, metrics = null, runTokenTtlSeconds = null,
+  runTokenGraceSeconds = 300,
+} = {}) {
   const summary = { reconciled: 0, launched: 0, requeued: 0, retried: 0, errors: 0 };
 
   const active = await jobService.listJobsToReconcile(pool);
   for (const job of active) {
     try {
-      const changed = await reconcileJob(pool, backend, job, { logger, apiUrl });
+      const changed = await reconcileJob(pool, backend, job, {
+        logger, apiUrl, runTokenTtlSeconds,
+      });
       if (changed) summary.reconciled += 1;
       // Counted here rather than derived from the `ashml_jobs` gauge, because a job that
       // succeeds and is deleted between two scrapes never appears in that gauge at all —
       // and "how many jobs failed today" must not depend on scrape timing. Only a state
       // *change* is counted, so a job re-observed in the same state on a later pass
       // (which `reconcileJob` reports as null) cannot inflate the total.
-      if (changed && isOutcome(changed)) metrics?.jobTerminations.inc({ state: changed });
+      if (changed && isOutcome(changed)) {
+        metrics?.jobTerminations.inc({ state: changed });
+        // The run is over, so its credential is on a short clock — expired, not revoked.
+        // The final checkpoint's upload completes *after* the pod is gone, and cutting
+        // the token at the terminal state would leave every successful run's model stuck
+        // at PENDING. A retry is the case that revokes outright, and it does so in
+        // `issueRunToken` before minting the next attempt's.
+        await expireRunTokens(pool, job.id, runTokenGraceSeconds).catch((err) => {
+          // Not fatal to the pass. The token already has a TTL and the next pass will not
+          // see this job again, so leaving it live a while longer is bounded — whereas
+          // failing the reconcile here would strand the job's terminal state.
+          logger?.error({ err, job_id: job.id }, 'expiring the run token failed');
+        });
+      }
     } catch (err) {
       summary.errors += 1;
       logger?.error({ err, job_id: job.id, state: job.state }, 'reconcile failed');
@@ -218,7 +258,9 @@ export async function runOnce(pool, backend, { logger = null, maxLaunches = 10, 
     if (!job) break; // Queue empty, or everything left in it was already refused.
 
     try {
-      const state = await placeAndLaunch(pool, backend, job, { logger, apiUrl });
+      const state = await placeAndLaunch(pool, backend, job, {
+        logger, apiUrl, runTokenTtlSeconds,
+      });
       if (state === null) {
         // Nothing fit, or the project is over quota. The job is back in the queue with
         // a recorded reason; move on to whatever is behind it.
@@ -261,6 +303,7 @@ export async function runOnce(pool, backend, { logger = null, maxLaunches = 10, 
  */
 export function startExecutor(pool, backend, {
   logger = null, intervalMs = 2000, maxLaunches = 10, apiUrl = null, metrics = null,
+  runTokenTtlSeconds = null, runTokenGraceSeconds = 300,
 } = {}) {
   let stopped = false;
   let timer = null;
@@ -274,7 +317,9 @@ export function startExecutor(pool, backend, {
     // to the configured interval is what shows that happening.
     const startedAt = process.hrtime.bigint();
     try {
-      const summary = await runOnce(pool, backend, { logger, maxLaunches, apiUrl, metrics });
+      const summary = await runOnce(pool, backend, {
+        logger, maxLaunches, apiUrl, metrics, runTokenTtlSeconds, runTokenGraceSeconds,
+      });
       metrics?.executorPasses.inc({ outcome: summary.errors > 0 ? 'partial' : 'ok' });
       if (summary.launched > 0 || summary.reconciled > 0 || summary.errors > 0
         || summary.requeued > 0 || summary.retried > 0) {

@@ -1,6 +1,7 @@
 /** Training job endpoints. */
 
 import { ALL_STATES } from '../domain/job-state.js';
+import { Permission } from '../domain/roles.js';
 import * as jobService from '../services/jobs.js';
 import * as schedulerService from '../services/scheduler.js';
 
@@ -84,6 +85,7 @@ export async function registerJobRoutes(app) {
   app.post(
     '/api/v1/jobs',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['jobs'],
         summary: 'Submit a training job',
@@ -136,6 +138,10 @@ export async function registerJobRoutes(app) {
       },
     },
     async (request, reply) => {
+      // The project is in the body rather than the path, so the declarative check cannot
+      // see it. Submitting spends the project's quota, so it is a write.
+      await app.requireProject(request, request.body.project, Permission.PROJECT_WRITE);
+
       const body = request.body;
       const resources = {
         cpu: body.resources?.cpu ?? 1,
@@ -179,6 +185,7 @@ export async function registerJobRoutes(app) {
   app.get(
     '/api/v1/jobs',
     {
+      config: { authenticatedOnly: true },
       schema: {
         tags: ['jobs'],
         summary: 'List training jobs',
@@ -204,6 +211,8 @@ export async function registerJobRoutes(app) {
         projectName: request.query.project ?? null,
         state: request.query.state ?? null,
         limit: request.query.limit ?? 50,
+        // Applied in SQL, before the LIMIT — see repos/jobs.js.
+        visibleToUserId: app.listScope(request),
       }),
     }),
   );
@@ -211,6 +220,7 @@ export async function registerJobRoutes(app) {
   app.get(
     '/api/v1/jobs/:id',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['jobs'],
         summary: 'Get a job',
@@ -225,12 +235,16 @@ export async function registerJobRoutes(app) {
         },
       },
     },
-    async (request) => jobService.getJob(app.db, request.params.id),
+    async (request) => {
+      await app.requireJob(request, request.params.id, Permission.PROJECT_READ);
+      return jobService.getJob(app.db, request.params.id);
+    },
   );
 
   app.get(
     '/api/v1/jobs/:id/events',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['jobs'],
         summary: 'Get a job\'s event history',
@@ -252,12 +266,16 @@ export async function registerJobRoutes(app) {
         },
       },
     },
-    async (request) => ({ events: await jobService.getJobEvents(app.db, request.params.id) }),
+    async (request) => {
+      await app.requireJob(request, request.params.id, Permission.PROJECT_READ);
+      return { events: await jobService.getJobEvents(app.db, request.params.id) };
+    },
   );
 
   app.post(
     '/api/v1/jobs/:id/cancel',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['jobs'],
         summary: 'Cancel a job',
@@ -282,6 +300,7 @@ export async function registerJobRoutes(app) {
       },
     },
     async (request) => {
+      await app.requireJob(request, request.params.id, Permission.PROJECT_WRITE);
       const job = await jobService.cancelJob(app.db, request.params.id, {
         reason: request.body?.reason ?? 'cancelled by user',
       });
@@ -293,6 +312,7 @@ export async function registerJobRoutes(app) {
   app.get(
     '/api/v1/jobs/:id/scheduling',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['jobs'],
         summary: 'Explain why a job was, or was not, scheduled',
@@ -368,6 +388,7 @@ export async function registerJobRoutes(app) {
       },
     },
     async (request) => {
+      await app.requireJob(request, request.params.id, Permission.PROJECT_READ);
       const job = await jobService.getJob(app.db, request.params.id);
       const passes = await schedulerService.getSchedulingHistory(app.db, job.id, {
         passes: request.query.passes ?? 5,
@@ -380,6 +401,7 @@ export async function registerJobRoutes(app) {
   app.get(
     '/api/v1/jobs/:id/logs',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['jobs'],
         summary: 'Read a job\'s container logs',
@@ -435,6 +457,7 @@ export async function registerJobRoutes(app) {
       },
     },
     async (request) => {
+      await app.requireJob(request, request.params.id, Permission.PROJECT_READ);
       const job = await jobService.getJob(app.db, request.params.id);
 
       // A job that was never launched has no logs, and that is not an error — it is

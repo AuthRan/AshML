@@ -82,6 +82,58 @@ components:
       required:
         - id
         - name
+        - prefix
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        prefix:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type:
+            - "null"
+            - string
+          format: date-time
+        expires_at:
+          type:
+            - "null"
+            - string
+          format: date-time
+      title: ApiToken
+    def-3:
+      type: object
+      required:
+        - email
+        - role
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        display_name:
+          type: string
+        role:
+          type: string
+          enum:
+            - VIEWER
+            - EDITOR
+            - OWNER
+        created_at:
+          type: string
+          format: date-time
+      title: ProjectMember
+    def-4:
+      type: object
+      required:
+        - id
+        - name
         - created_at
         - quota
       properties:
@@ -112,7 +164,7 @@ components:
             jobs:
               type: integer
       title: Project
-    def-3:
+    def-5:
       type: object
       required:
         - id
@@ -138,7 +190,7 @@ components:
           type: string
           format: date-time
       title: Dataset
-    def-4:
+    def-6:
       type: object
       required:
         - id
@@ -171,7 +223,7 @@ components:
           type: string
           format: date-time
       title: DatasetVersion
-    def-5:
+    def-7:
       type: object
       required:
         - id
@@ -255,7 +307,7 @@ components:
           type: string
           format: date-time
       title: Experiment
-    def-6:
+    def-8:
       type: object
       required:
         - id
@@ -376,7 +428,7 @@ components:
             - string
           format: date-time
       title: TrainingJob
-    def-7:
+    def-9:
       type: object
       required:
         - id
@@ -404,7 +456,7 @@ components:
           type: string
           format: date-time
       title: JobEvent
-    def-8:
+    def-10:
       type: object
       required:
         - id
@@ -488,7 +540,7 @@ components:
             - string
           format: date-time
       title: ComputeNode
-    def-9:
+    def-11:
       type: object
       required:
         - id
@@ -655,7 +707,7 @@ components:
             - string
           format: date-time
       title: Deployment
-    def-10:
+    def-12:
       type: object
       required:
         - name
@@ -688,7 +740,7 @@ components:
                 format: date-time
                 description: When the run observed the value, not when the API received it
       title: MetricSeries
-    def-11:
+    def-13:
       type: object
       required:
         - id
@@ -763,7 +815,7 @@ components:
           type: string
           format: date-time
       title: Artifact
-    def-12:
+    def-14:
       type: object
       required:
         - id
@@ -793,7 +845,7 @@ components:
           type: string
           format: date-time
       title: Model
-    def-13:
+    def-15:
       type: object
       required:
         - id
@@ -940,6 +992,354 @@ paths:
                     type: string
                   gpu_provider:
                     type: string
+  /api/v1/auth/whoami:
+    get:
+      summary: Who this token belongs to, and what it can reach
+      tags:
+        - auth
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - kind
+                properties:
+                  kind:
+                    type: string
+                    enum:
+                      - USER
+                      - RUN
+                      - SERVING
+                  user_id:
+                    type: string
+                  email:
+                    type: string
+                  is_admin:
+                    type: boolean
+                  projects:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        project_id:
+                          type: string
+                        role:
+                          type: string
+                  job_id:
+                    type: string
+                  attempt:
+                    type: integer
+                  deployment_id:
+                    type: string
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/auth/tokens:
+    post:
+      summary: Create an API token
+      tags:
+        - auth
+      description: The plaintext token is returned once, in this response, and is
+        never retrievable again — only its SHA-256 hash is stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                expires_in_days:
+                  type: integer
+                  minimum: 1
+                  maximum: 3650
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - token
+                  - name
+                  - prefix
+                properties:
+                  token:
+                    type: string
+                    description: Shown once. Store it now.
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  prefix:
+                    type: string
+                  created_at:
+                    type: string
+                  expires_at:
+                    type:
+                      - "null"
+                      - string
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    get:
+      summary: List your live API tokens
+      tags:
+        - auth
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - tokens
+                properties:
+                  tokens:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-2"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/auth/tokens/{token}:
+    delete:
+      summary: Revoke one of your API tokens
+      tags:
+        - auth
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: token
+          required: true
+          description: The token's name
+      responses:
+        "204":
+          description: Default Response
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/users:
+    post:
+      summary: Create a user (platform administrators only)
+      tags:
+        - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - display_name
+              additionalProperties: false
+              properties:
+                email:
+                  type: string
+                  minLength: 3
+                  maxLength: 320
+                display_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                is_admin:
+                  type: boolean
+                  default: false
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  email:
+                    type: string
+                  display_name:
+                    type: string
+                  is_admin:
+                    type: boolean
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/members:
+    get:
+      summary: Who can reach this project
+      tags:
+        - auth
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - members
+                properties:
+                  members:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/def-3"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+  /api/v1/projects/{name}/members/{email}:
+    put:
+      summary: Add a member, or change their role
+      tags:
+        - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - role
+              additionalProperties: false
+              properties:
+                role:
+                  type: string
+                  enum:
+                    - VIEWER
+                    - EDITOR
+                    - OWNER
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: email
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-3"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+    delete:
+      summary: Remove a member
+      tags:
+        - auth
+      parameters:
+        - schema:
+            type: string
+          in: path
+          name: name
+          required: true
+        - schema:
+            type: string
+          in: path
+          name: email
+          required: true
+      responses:
+        "204":
+          description: Default Response
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
   /api/v1/gpus:
     get:
       summary: List GPUs visible to the active provider
@@ -1014,7 +1414,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-2"
+                $ref: "#/components/schemas/def-4"
         "409":
           description: Default Response
           content:
@@ -1038,7 +1438,7 @@ paths:
                   projects:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-2"
+                      $ref: "#/components/schemas/def-4"
   /api/v1/projects/{name}:
     get:
       summary: Get a project by name
@@ -1056,7 +1456,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-2"
+                $ref: "#/components/schemas/def-4"
         "404":
           description: Default Response
           content:
@@ -1104,7 +1504,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-2"
+                $ref: "#/components/schemas/def-4"
         "404":
           description: Default Response
           content:
@@ -1143,7 +1543,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-3"
+                $ref: "#/components/schemas/def-5"
         "404":
           description: Default Response
           content:
@@ -1179,7 +1579,7 @@ paths:
                   datasets:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-3"
+                      $ref: "#/components/schemas/def-5"
         "404":
           description: Default Response
           content:
@@ -1208,7 +1608,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-3"
+                $ref: "#/components/schemas/def-5"
         "404":
           description: Default Response
           content:
@@ -1266,7 +1666,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-4"
+                $ref: "#/components/schemas/def-6"
         "404":
           description: Default Response
           content:
@@ -1307,7 +1707,7 @@ paths:
                   versions:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-4"
+                      $ref: "#/components/schemas/def-6"
         "404":
           description: Default Response
           content:
@@ -1341,7 +1741,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-4"
+                $ref: "#/components/schemas/def-6"
         "404":
           description: Default Response
           content:
@@ -1394,7 +1794,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-5"
+                $ref: "#/components/schemas/def-7"
         "400":
           description: Default Response
           content:
@@ -1438,7 +1838,7 @@ paths:
                   experiments:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-5"
+                      $ref: "#/components/schemas/def-7"
   /api/v1/experiments/{id}:
     get:
       summary: Get an experiment
@@ -1457,7 +1857,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-5"
+                $ref: "#/components/schemas/def-7"
         "404":
           description: Default Response
           content:
@@ -1512,7 +1912,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-5"
+                $ref: "#/components/schemas/def-7"
         "400":
           description: Default Response
           content:
@@ -1615,7 +2015,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-6"
+                $ref: "#/components/schemas/def-8"
         "400":
           description: Default Response
           content:
@@ -1675,7 +2075,7 @@ paths:
                   jobs:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-6"
+                      $ref: "#/components/schemas/def-8"
   /api/v1/jobs/{id}:
     get:
       summary: Get a job
@@ -1694,7 +2094,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-6"
+                $ref: "#/components/schemas/def-8"
         "404":
           description: Default Response
           content:
@@ -1728,7 +2128,7 @@ paths:
                   events:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-7"
+                      $ref: "#/components/schemas/def-9"
         "404":
           description: Default Response
           content:
@@ -1766,7 +2166,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-6"
+                $ref: "#/components/schemas/def-8"
         "404":
           description: Default Response
           content:
@@ -2000,7 +2400,7 @@ paths:
                   nodes:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-8"
+                      $ref: "#/components/schemas/def-10"
   /api/v1/projects/{name}/models/{model}/deployments:
     post:
       summary: Deploy a model version
@@ -2060,7 +2460,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-9"
+                $ref: "#/components/schemas/def-11"
         "400":
           description: Default Response
           content:
@@ -2131,7 +2531,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-9"
+                $ref: "#/components/schemas/def-11"
         "400":
           description: Default Response
           content:
@@ -2187,7 +2587,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-9"
+                $ref: "#/components/schemas/def-11"
         "404":
           description: Default Response
           content:
@@ -2230,7 +2630,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-9"
+                $ref: "#/components/schemas/def-11"
         "404":
           description: Default Response
           content:
@@ -2351,7 +2751,7 @@ paths:
                   deployments:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-9"
+                      $ref: "#/components/schemas/def-11"
         "404":
           description: Default Response
           content:
@@ -2380,7 +2780,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-9"
+                $ref: "#/components/schemas/def-11"
         "404":
           description: Default Response
           content:
@@ -2816,7 +3216,7 @@ paths:
                   series:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-10"
+                      $ref: "#/components/schemas/def-12"
         "404":
           description: Default Response
           content:
@@ -2923,7 +3323,7 @@ paths:
                   series:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-10"
+                      $ref: "#/components/schemas/def-12"
         "404":
           description: Default Response
           content:
@@ -2989,7 +3389,7 @@ paths:
                   - artifact
                 properties:
                   artifact:
-                    $ref: "#/components/schemas/def-11"
+                    $ref: "#/components/schemas/def-13"
                   upload:
                     type:
                       - "null"
@@ -3061,7 +3461,7 @@ paths:
                   artifacts:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-11"
+                      $ref: "#/components/schemas/def-13"
         "404":
           description: Default Response
           content:
@@ -3113,7 +3513,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-11"
+                $ref: "#/components/schemas/def-13"
         "400":
           description: Default Response
           content:
@@ -3166,7 +3566,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-11"
+                $ref: "#/components/schemas/def-13"
         "404":
           description: Default Response
           content:
@@ -3251,7 +3651,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-11"
+                $ref: "#/components/schemas/def-13"
         "404":
           description: Default Response
           content:
@@ -3297,7 +3697,7 @@ paths:
                   artifacts:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-11"
+                      $ref: "#/components/schemas/def-13"
         "404":
           description: Default Response
           content:
@@ -3336,7 +3736,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-12"
+                $ref: "#/components/schemas/def-14"
         "404":
           description: Default Response
           content:
@@ -3372,7 +3772,7 @@ paths:
                   models:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-12"
+                      $ref: "#/components/schemas/def-14"
         "404":
           description: Default Response
           content:
@@ -3402,7 +3802,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-12"
+                $ref: "#/components/schemas/def-14"
         "404":
           description: Default Response
           content:
@@ -3459,7 +3859,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-13"
+                $ref: "#/components/schemas/def-15"
         "400":
           description: Default Response
           content:
@@ -3517,7 +3917,7 @@ paths:
                   versions:
                     type: array
                     items:
-                      $ref: "#/components/schemas/def-13"
+                      $ref: "#/components/schemas/def-15"
         "404":
           description: Default Response
           content:
@@ -3553,7 +3953,7 @@ paths:
                 type: object
                 properties:
                   version:
-                    $ref: "#/components/schemas/def-13"
+                    $ref: "#/components/schemas/def-15"
         "404":
           description: Default Response
           content:
@@ -3588,7 +3988,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/def-13"
+                $ref: "#/components/schemas/def-15"
         "404":
           description: Default Response
           content:
@@ -3650,7 +4050,7 @@ paths:
                   - version
                 properties:
                   version:
-                    $ref: "#/components/schemas/def-13"
+                    $ref: "#/components/schemas/def-15"
                   displaced:
                     type:
                       - "null"
@@ -3685,6 +4085,8 @@ servers:
 tags:
   - name: system
     description: Health and version
+  - name: auth
+    description: Tokens, identity, and project membership
   - name: gpus
     description: GPU inventory and telemetry
   - name: projects

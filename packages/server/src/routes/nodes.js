@@ -1,6 +1,7 @@
 /** Compute node and capacity endpoints. */
 
 import * as nodeService from '../services/nodes.js';
+import { Permission } from '../domain/roles.js';
 import { freeCapacity, schedulableGpus } from '../domain/placement.js';
 
 const nodeSchema = {
@@ -76,6 +77,7 @@ export async function registerNodeRoutes(app) {
   app.get(
     '/api/v1/nodes',
     {
+      config: { permission: Permission.PLATFORM_ADMIN },
       schema: {
         tags: ['nodes'],
         summary: 'List compute nodes and their capacity',

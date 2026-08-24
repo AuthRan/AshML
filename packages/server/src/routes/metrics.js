@@ -7,6 +7,7 @@
  */
 
 import * as metricService from '../services/metrics.js';
+import { Permission } from '../domain/roles.js';
 
 /** One metric's points, ordered by step. Reused by the job and experiment reads. */
 const metricSeriesSchema = {
@@ -56,6 +57,7 @@ export async function registerMetricRoutes(app) {
   app.post(
     '/api/v1/jobs/:id/metrics',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['metrics'],
         summary: 'Report training metrics for a job',
@@ -111,6 +113,10 @@ export async function registerMetricRoutes(app) {
       },
     },
     async (request, reply) => {
+      // Only the run itself may report its own numbers — not a person, not another job.
+      // This is the ingest path that had no authentication at all before Phase 10.
+      await app.requireJob(request, request.params.id, Permission.RUN_REPORT);
+
       const result = await metricService.recordMetrics(app.db, request.params.id, request.body.metrics);
       request.log.info(
         { job_id: result.job_id, experiment_id: result.experiment_id, written: result.written },
@@ -123,6 +129,7 @@ export async function registerMetricRoutes(app) {
   app.get(
     '/api/v1/jobs/:id/metrics',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['metrics'],
         summary: 'Read a job’s metric series',
@@ -146,16 +153,20 @@ export async function registerMetricRoutes(app) {
         response: { 200: seriesResponse, 404: { $ref: 'Error#' } },
       },
     },
-    async (request) => metricService.getJobMetrics(app.db, request.params.id, {
-      name: request.query.name ?? null,
-      sinceStep: request.query.since_step ?? null,
-      limit: request.query.limit ?? 2000,
-    }),
+    async (request) => {
+      await app.requireJob(request, request.params.id, Permission.PROJECT_READ);
+      return metricService.getJobMetrics(app.db, request.params.id, {
+        name: request.query.name ?? null,
+        sinceStep: request.query.since_step ?? null,
+        limit: request.query.limit ?? 2000,
+      });
+    },
   );
 
   app.get(
     '/api/v1/jobs/:id/metrics/summary',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['metrics'],
         summary: 'Latest value and point count per metric',
@@ -191,12 +202,16 @@ export async function registerMetricRoutes(app) {
         },
       },
     },
-    async (request) => metricService.getJobMetricSummary(app.db, request.params.id),
+    async (request) => {
+      await app.requireJob(request, request.params.id, Permission.PROJECT_READ);
+      return metricService.getJobMetricSummary(app.db, request.params.id);
+    },
   );
 
   app.get(
     '/api/v1/experiments/:id/metrics',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['metrics'],
         summary: 'Read metrics across every run of an experiment',
@@ -219,9 +234,12 @@ export async function registerMetricRoutes(app) {
         response: { 200: seriesResponse, 404: { $ref: 'Error#' } },
       },
     },
-    async (request) => metricService.getExperimentMetrics(app.db, request.params.id, {
-      name: request.query.name ?? null,
-      limit: request.query.limit ?? 2000,
-    }),
+    async (request) => {
+      await app.requireExperiment(request, request.params.id, Permission.PROJECT_READ);
+      return metricService.getExperimentMetrics(app.db, request.params.id, {
+        name: request.query.name ?? null,
+        limit: request.query.limit ?? 2000,
+      });
+    },
   );
 }

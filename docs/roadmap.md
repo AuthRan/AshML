@@ -268,11 +268,14 @@ whether that version serves traffic.
   where something actually loads the bytes.
 - **Garbage collection.** A PENDING artifact whose run died leaves a row and possibly a
   partial object. Nothing sweeps them yet.
-- **Authentication on the ingest path.** The API takes writes from inside the cluster and
-  is unauthenticated, like the rest of v1 (auth is Phase 10). Two things limit the damage
-  and both are deliberate: the experiment id is copied from the job server-side rather
-  than taken from the request, and metrics are refused for a job that has not launched.
-  Neither substitutes for auth.
+- **Authentication on the ingest path.** ~~The API takes writes from inside the cluster
+  and is unauthenticated, like the rest of v1 (auth is Phase 10).~~ **Closed in Phase 10.**
+  A training attempt now carries a run token scoped to that job and that attempt, so the
+  metric and artifact endpoints accept writes only from the run that produced them — and
+  not from a person at all. The two mitigations recorded here were real and are still in
+  place: the experiment id is copied from the job server-side rather than taken from the
+  request, and metrics are refused for a job that has not launched. Neither substituted
+  for auth, which is why it was written down rather than left implied.
 
 ---
 
@@ -844,7 +847,72 @@ report nothing. `make cluster-dns-check` asks a Pod; `make cluster-dns` restores
 | 7 | Distributed training (DDP across both 2080 Tis) | Needs a reliable scheduler underneath |
 | 8 | AshGPU as a real `GpuProvider` | AshGPU does not exist yet (ADR 0005) |
 | 9 | Ashcode integration | Weekend of work once the API is good; not the hard part |
-| 10 | Auth, RBAC, rate limiting, audit, hardening | Spec milestone 14 |
+| 10 | Rate limiting, audit log, Kubernetes RBAC | Auth and project RBAC are **done** — see below |
+
+---
+
+## Phase 10 — Authentication and authorization *(partly complete)*
+
+Spec §31 and §32. The API was unauthenticated through v1 and the roadmap said so in three
+places; this is the part of Phase 10 that is now built, and the part that is not.
+
+### Built
+
+- **Bearer tokens**, stored as SHA-256 hashes and looked up by hash, never compared. The
+  plaintext is returned once, at creation, and nothing can retrieve it again.
+- **Default deny.** Every `/api/v1` route must declare the permission it needs, and the
+  declaration is checked *when the route is registered* — a route that says nothing makes
+  the server fail to start rather than answering to anybody.
+- **Three project roles** — VIEWER, EDITOR, OWNER — and a platform-administrator flag.
+  The mapping from role to permission is a pure function in `domain/roles.js` with the
+  whole cross-product enumerated in its test, because an authorization bug produces no
+  symptom in a working system.
+- **Project isolation.** Listing is filtered in SQL rather than after the fact, so the
+  `LIMIT` applies to rows the caller may see. A project you are not in answers 404, not
+  403, so names cannot be enumerated.
+- **Workload identity.** A training attempt gets a run token, scoped to that job and that
+  attempt and revoked when either ends; a deployment gets a serving token, scoped to
+  fetching its own weights and following its own routing table. This closes the ingest
+  hole Phase 4 recorded: metrics and artifacts could previously be written for any job by
+  anything that could reach the control plane.
+- **Quotas moved to platform administration.** A quota a project owner can raise is not a
+  quota.
+- `ash login`, `ash whoami`, `ash token create|list|revoke`, `ash member add|remove|list`.
+
+### The one asymmetry worth stating
+
+**A person cannot report a run's results — not even a platform administrator.** The value
+of the record is that the pod reported what it observed (ADR 0009, spec Rule 5), and an
+endpoint a human can post to is an endpoint where the number might have been chosen. It
+is the only permission nobody can grant themselves.
+
+### Not built
+
+- **No identity provider.** No OIDC, no SSO, no passwords. Tokens are issued out of band
+  and `ash login` stores one. Fine for a handful of users; the first thing to replace
+  beyond that.
+- **No Kubernetes RBAC, and no per-project service accounts.** Spec §31 lists both.
+  AshML's own service account creates every workload, so a project's pods are isolated by
+  AshML's admission checks and not by the cluster's. A compromised training image is
+  therefore contained by the namespace, not by the project.
+- **No rate limiting.** Nothing stops a caller with a valid token from making a million
+  requests.
+- **No audit log of authorization decisions.** Job state changes are audited; refusals are
+  not. `api_tokens.last_used_at` is the only trail, and it is deliberately coarse.
+- **The training run token is visible in the Job's pod spec** to anyone who can already
+  read Jobs in that namespace. It is per-attempt and revoked when the attempt ends, which
+  bounds the exposure, but it is not hidden. The serving token is in a Secret, for an
+  unrelated reason recorded in ADR 0013.
+- **No token rotation policy.** Tokens can be given an expiry; nothing requires one.
+
+### The scheduler race this phase also fixed
+
+Not authentication, but found while reading the same code. `ADR 0004` said the queue's
+`SKIP LOCKED` "safely supports multiple scheduler replicas". That was true of claiming a
+job and not of scheduling it: two passes on *different* jobs both read an unlocked
+aggregate of cluster capacity, and under READ COMMITTED neither sees the other's
+uncommitted binding, so both could promise the same GPU. Reproducible, and reproduced in
+`scheduler.integration.test.js`. Fixed with a transaction-scoped advisory lock — ADR 0012.
 
 ---
 

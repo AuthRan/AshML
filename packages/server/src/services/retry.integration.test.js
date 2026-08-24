@@ -22,7 +22,7 @@ import { buildJobManifest } from '../k8s/manifest.js';
 import { reconcileJob, runOnce } from './executor.js';
 import { discoverCluster } from './nodes.js';
 import { considerRetry, getJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE } from '../test-support/db.js';
+import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -34,6 +34,13 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
   let app;
   let backend;
   let project;
+  const runHeaders = new Map();
+
+  /** Producing an artifact is the run's act, not a person's (ADR 0013). */
+  async function asJob(jobId) {
+    if (!runHeaders.has(jobId)) runHeaders.set(jobId, await asRun(pool, jobId));
+    return runHeaders.get(jobId);
+  }
 
   before(async () => {
     const config = loadConfig({
@@ -44,6 +51,7 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
     backend = createSimBackend({ namespace: 'ashml-test', autoAdvance: false });
     app = await buildApp(config, { logger: false, pool, k8s: backend, store: createNoneStore() });
     await app.ready();
+    await authenticateAs(app, pool);
     await discoverCluster(pool, backend, app.gpuProvider);
   });
 
@@ -54,6 +62,7 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
 
   beforeEach(async () => {
     await truncateAll(pool);
+    runHeaders.clear();
     backend._reset();
     const res = await app.inject({
       method: 'POST',
@@ -109,6 +118,7 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
     const created = await app.inject({
       method: 'POST',
       url: `/api/v1/jobs/${job.id}/artifacts`,
+      headers: await asJob(job.id),
       payload: { kind: 'checkpoint', name, uri: `file:///ckpt/${name}`, step },
     });
     assert.equal(created.statusCode, 201, created.payload);
@@ -117,6 +127,7 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
     const done = await app.inject({
       method: 'POST',
       url: `/api/v1/artifacts/${artifact.id}/complete`,
+      headers: await asJob(job.id),
       payload: { digest: 'sha256:abc', size_bytes: 1024 },
     });
     assert.equal(done.statusCode, 200, done.payload);
@@ -283,6 +294,7 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
     const created = await app.inject({
       method: 'POST',
       url: `/api/v1/jobs/${job.id}/artifacts`,
+      headers: await asJob(job.id),
       payload: { kind: 'checkpoint', name: 'half.pt', uri: 'file:///ckpt/half.pt', step: 50 },
     });
     assert.equal(created.statusCode, 201);

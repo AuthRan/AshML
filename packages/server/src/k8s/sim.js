@@ -41,6 +41,8 @@ export function createSimBackend({
 
   /** `${namespace}/${name}` -> record. Deployments outlive jobs, so they are separate. */
   const deployments = new Map();
+  // Secrets are stored so a test can assert what a workload was actually handed.
+  const secrets = new Map();
 
   /**
    * `${namespace}/${name}` -> `{ selector }`.
@@ -154,6 +156,11 @@ export function createSimBackend({
 
     async deleteJob(ns, name) {
       jobs.delete(key(ns, name));
+    },
+
+    async applySecret(manifest) {
+      const ns = manifest.metadata.namespace ?? namespace;
+      secrets.set(key(ns, manifest.metadata.name), manifest);
     },
 
     async applyDeployment(manifest) {
@@ -341,7 +348,13 @@ export function createSimBackend({
     _reset() {
       jobs.clear();
       deployments.clear();
+      secrets.clear();
       responder = null;
+    },
+
+    /** What a workload was actually handed, for tests to assert against. */
+    _secret(ns, name) {
+      return secrets.get(key(ns, name)) ?? null;
     },
   };
 }

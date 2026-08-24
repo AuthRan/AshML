@@ -60,6 +60,8 @@ if (config.executorEnabled) {
     intervalMs: config.executorIntervalMs,
     // What training pods are told to report back to (see config.apiAdvertiseUrl).
     apiUrl: config.apiAdvertiseUrl,
+    runTokenTtlSeconds: config.runTokenTtlSeconds,
+    runTokenGraceSeconds: config.runTokenGraceSeconds,
   });
 
   deploymentSync = startDeploymentSync(app.db, app.k8s, {

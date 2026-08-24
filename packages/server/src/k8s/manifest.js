@@ -83,7 +83,7 @@ function resourceRequirements(resources) {
  * is applied first so it can never overwrite them — a job that shadowed
  * `ASHML_JOB_ID` would report its results onto another job's record.
  */
-function containerEnv(job, { apiUrl = null } = {}) {
+function containerEnv(job, { apiUrl = null, runToken = null } = {}) {
   const env = Object.entries(job.spec.env ?? {}).map(([name, value]) => ({
     name,
     value: String(value),
@@ -112,6 +112,17 @@ function containerEnv(job, { apiUrl = null } = {}) {
   // the command — the platform offers a checkpoint, it does not impose one.
   if (job.retry?.resume_artifact_id) {
     reserved.ASHML_RESUME_FROM = job.retry.resume_artifact_id;
+  }
+  // The credential this attempt reports with (Phase 10). Minted per attempt and revoked
+  // when the attempt ends, so it is worth nothing to anything but this pod, while it
+  // runs. It is inlined rather than mounted from a Secret because it is already
+  // per-attempt and short-lived: a Secret would be a second object to create, to keep in
+  // step with the Job's lifetime, and to garbage-collect when the Job is deleted, for a
+  // value that stops working by itself. What that costs is that the token is visible in
+  // `kubectl describe job` to anyone who can already read Jobs in this namespace — which
+  // is recorded in ADR 0013 rather than left for someone to discover.
+  if (runToken) {
+    reserved.ASHML_RUN_TOKEN = runToken;
   }
 
   const userSupplied = env.filter((entry) => !Object.hasOwn(reserved, entry.name));
@@ -148,7 +159,9 @@ function podPlacement(nodeName) {
  * @param {string} [options.nodeName] the node AshML's scheduler chose, if any
  * @returns {object} a Kubernetes batch/v1 Job
  */
-export function buildJobManifest(job, { namespace = 'ashml-jobs', nodeName = null, apiUrl = null } = {}) {
+export function buildJobManifest(job, {
+  namespace = 'ashml-jobs', nodeName = null, apiUrl = null, runToken = null,
+} = {}) {
   if (!job.spec?.image) {
     throw new Error(`job ${job.id}: spec.image is required to build a Kubernetes Job`);
   }
@@ -181,7 +194,7 @@ export function buildJobManifest(job, { namespace = 'ashml-jobs', nodeName = nul
     name: 'training',
     image: job.spec.image,
     imagePullPolicy: job.spec.image_pull_policy ?? 'IfNotPresent',
-    env: containerEnv(job, { apiUrl }),
+    env: containerEnv(job, { apiUrl, runToken }),
     resources: resourceRequirements(job.resources),
   };
   if (Array.isArray(job.spec.command) && job.spec.command.length > 0) {
@@ -298,7 +311,7 @@ function targetSelector(deployment, target) {
  * expire and the pod would crash-loop on a dead signature long after anyone had stopped
  * associating the two.
  */
-function servingEnv(deployment, target, { apiUrl = null } = {}) {
+function servingEnv(deployment, target, { apiUrl = null, secretName = null } = {}) {
   const env = [
     { name: 'ASHML_MODEL_ARCH', value: String(target.arch) },
     { name: 'ASHML_ARTIFACT_ID', value: String(target.artifact_id) },
@@ -310,7 +323,67 @@ function servingEnv(deployment, target, { apiUrl = null } = {}) {
   // server then says it was never told where to fetch from, instead of failing with a
   // connection error to an invented address.
   if (apiUrl) env.unshift({ name: 'ASHML_ENDPOINT', value: apiUrl });
+  // The model server is handed an artifact id, not a URL, and exchanges it for a signed
+  // download at startup — so since Phase 10 it needs a credential to do that with. It is
+  // scoped to this deployment and may do exactly two things: fetch artifacts belonging to
+  // its own project, and read this deployment's routing table (domain/roles.js).
+  //
+  // A `secretKeyRef`, not the value. This is the difference between a stable pod template
+  // and a rollout on every apply: `applyDesiredState` re-writes every target's manifest
+  // whenever anything about the deployment changes, so an inlined token would make the
+  // template differ each time and Kubernetes would restart every serving pod on, say, a
+  // traffic-weight change — replacing a weighted rollout with an outage. The reference is
+  // the same string every time; rotating what is behind it touches no running pod.
+  if (secretName) {
+    env.unshift({
+      name: 'ASHML_RUN_TOKEN',
+      valueFrom: { secretKeyRef: { name: secretName, key: 'token' } },
+    });
+  }
   return env;
+}
+
+/**
+ * The Secret holding one deployment's workload credential.
+ *
+ * Budgeted from scratch rather than built by appending to `kubeDeploymentName`, which is
+ * itself allowed to reach the full 63 characters — `${name}-token` would then be 69 and
+ * rejected as a DNS-1123 label, for exactly the deployments with the longest names.
+ */
+export function servingSecretName(deployment) {
+  const id8 = String(deployment.id).replaceAll('-', '').slice(0, 8);
+  const suffix = `-${id8}-token`;
+  const prefix = `${MANAGED_BY}-svc-`;
+  const budget = MAX_NAME - prefix.length - suffix.length;
+
+  const stem = String(deployment.name).slice(0, Math.max(1, budget)).replace(/-+$/, '');
+  return `${prefix}${stem}${suffix}`;
+}
+
+/**
+ * The Secret a deployment's pods read their credential from.
+ *
+ * `stringData` rather than `data` so the value is not base64-encoded here — Kubernetes
+ * does that. Worth stating because a token that is base64'd twice fails authentication
+ * with a message about the token being invalid, which sends you looking in the wrong
+ * place entirely.
+ */
+export function buildServingSecretManifest(deployment, token, { namespace = 'ashml-jobs' } = {}) {
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    type: 'Opaque',
+    metadata: {
+      name: servingSecretName(deployment),
+      namespace,
+      labels: {
+        'app.kubernetes.io/managed-by': MANAGED_BY,
+        'app.kubernetes.io/component': 'serving-token',
+        'ashml.io/deployment-id': deployment.id,
+      },
+    },
+    stringData: { token },
+  };
 }
 
 /**
@@ -361,7 +434,9 @@ function servingProbes() {
  * @param {object} target one of its targets, resolved through to the artifact
  * @returns {object} a Kubernetes apps/v1 Deployment
  */
-export function buildTargetManifest(deployment, target, { namespace = 'ashml-jobs', apiUrl = null } = {}) {
+export function buildTargetManifest(deployment, target, {
+  namespace = 'ashml-jobs', apiUrl = null, secretName = null,
+} = {}) {
   if (!deployment.image) {
     throw new Error(`deployment ${deployment.id}: image is required`);
   }
@@ -397,7 +472,7 @@ export function buildTargetManifest(deployment, target, { namespace = 'ashml-job
     image: deployment.image,
     imagePullPolicy: deployment.image_pull_policy ?? 'IfNotPresent',
     ports: [{ name: PORT_NAME, containerPort: SERVING_PORT }],
-    env: servingEnv(deployment, target, { apiUrl }),
+    env: servingEnv(deployment, target, { apiUrl, secretName }),
     resources: resourceRequirements({
       cpu: deployment.cpu,
       memory_bytes: deployment.memory_bytes,
@@ -602,7 +677,9 @@ export function kubeRouterName(deployment) {
  * `ash deployment rollout` take effect without restarting anything. Weights in the
  * environment would mean every step of a canary restarted the thing measuring it.
  */
-export function buildRouterManifest(deployment, { namespace = 'ashml-jobs', apiUrl = null, refreshMs = 5_000 } = {}) {
+export function buildRouterManifest(deployment, {
+  namespace = 'ashml-jobs', apiUrl = null, refreshMs = 5_000, secretName = null,
+} = {}) {
   if (!deployment.router_image) {
     throw new Error(`deployment ${deployment.id}: router_image is required`);
   }
@@ -632,6 +709,13 @@ export function buildRouterManifest(deployment, { namespace = 'ashml-jobs', apiU
     ports: [{ name: PORT_NAME, containerPort: ROUTER_PORT }],
     env: [
       { name: 'ASHML_ENDPOINT', value: apiUrl },
+      // The router polls the deployment's routing table. Same Secret, same reason it is
+      // a reference rather than a value: the router must not restart on a weight change,
+      // because a weight change is precisely when it is carrying the traffic.
+      ...(secretName ? [{
+        name: 'ASHML_RUN_TOKEN',
+        valueFrom: { secretKeyRef: { name: secretName, key: 'token' } },
+      }] : []),
       { name: 'ASHML_DEPLOYMENT_ID', value: String(deployment.id) },
       { name: 'ASHML_DEPLOYMENT_NAME', value: String(deployment.name) },
       { name: 'ASHML_PORT', value: String(ROUTER_PORT) },

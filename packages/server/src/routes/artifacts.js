@@ -9,6 +9,7 @@
  */
 
 import * as artifactService from '../services/artifacts.js';
+import { Permission } from '../domain/roles.js';
 import { ALL_STATUSES } from '../domain/artifact-status.js';
 
 const artifactSchema = {
@@ -80,6 +81,7 @@ export async function registerArtifactRoutes(app) {
   app.post(
     '/api/v1/jobs/:id/artifacts',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['artifacts'],
         summary: 'Register an artifact a run is about to write',
@@ -135,6 +137,10 @@ export async function registerArtifactRoutes(app) {
       },
     },
     async (request, reply) => {
+      // The run declaring what it produced. Same rule as metrics: a person may not
+      // author a run's output record.
+      await app.requireJob(request, request.params.id, Permission.RUN_REPORT);
+
       const body = request.body;
       const result = await artifactService.registerArtifact(
         app.db,
@@ -166,6 +172,7 @@ export async function registerArtifactRoutes(app) {
   app.post(
     '/api/v1/artifacts/:id/complete',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['artifacts'],
         summary: 'Confirm an artifact’s bytes have landed',
@@ -198,6 +205,12 @@ export async function registerArtifactRoutes(app) {
       },
     },
     async (request) => {
+      // Confirming an upload is part of producing it, so it belongs to the run. The
+      // artifact is addressed by its own id, and `requireArtifact` resolves that to the
+      // job that produced it — which is what RUN_REPORT is then checked against, so one
+      // run cannot confirm another's upload.
+      await app.requireArtifact(request, request.params.id, Permission.RUN_REPORT);
+
       const artifact = await artifactService.completeArtifact(
         app.db,
         app.artifactStore,
@@ -219,6 +232,7 @@ export async function registerArtifactRoutes(app) {
   app.post(
     '/api/v1/artifacts/:id/fail',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['artifacts'],
         summary: 'Record that an artifact’s upload was abandoned',
@@ -238,14 +252,18 @@ export async function registerArtifactRoutes(app) {
         },
       },
     },
-    async (request) => artifactService.failArtifact(app.db, request.params.id, {
-      reason: request.body?.reason ?? 'upload abandoned',
-    }),
+    async (request) => {
+      await app.requireArtifact(request, request.params.id, Permission.RUN_REPORT);
+      return artifactService.failArtifact(app.db, request.params.id, {
+        reason: request.body?.reason ?? 'upload abandoned',
+      });
+    },
   );
 
   app.get(
     '/api/v1/artifacts/:id/download',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['artifacts'],
         summary: 'Get a time-limited URL to read an artifact',
@@ -271,12 +289,19 @@ export async function registerArtifactRoutes(app) {
         },
       },
     },
-    async (request) => artifactService.presignDownload(app.db, app.artifactStore, request.params.id),
+    async (request) => {
+      // The one permission three unrelated principals hold: a person browsing, a
+      // training pod resuming from a checkpoint, and a model server fetching its own
+      // weights (domain/roles.js).
+      await app.requireArtifact(request, request.params.id, Permission.ARTIFACT_FETCH);
+      return artifactService.presignDownload(app.db, app.artifactStore, request.params.id);
+    },
   );
 
   app.get(
     '/api/v1/artifacts/:id',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['artifacts'],
         summary: 'Get an artifact',
@@ -284,12 +309,16 @@ export async function registerArtifactRoutes(app) {
         response: { 200: { $ref: 'Artifact#' }, 404: { $ref: 'Error#' } },
       },
     },
-    async (request) => artifactService.getArtifact(app.db, request.params.id),
+    async (request) => {
+      await app.requireArtifact(request, request.params.id, Permission.ARTIFACT_FETCH);
+      return artifactService.getArtifact(app.db, request.params.id);
+    },
   );
 
   app.get(
     '/api/v1/jobs/:id/artifacts',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['artifacts'],
         summary: 'List what a job produced',
@@ -298,17 +327,21 @@ export async function registerArtifactRoutes(app) {
         response: { 200: listResponse, 404: { $ref: 'Error#' } },
       },
     },
-    async (request) => ({
-      artifacts: await artifactService.listJobArtifacts(app.db, request.params.id, {
-        kind: request.query.kind ?? null,
-        status: request.query.status ?? null,
-      }),
-    }),
+    async (request) => {
+      await app.requireJob(request, request.params.id, Permission.PROJECT_READ);
+      return {
+        artifacts: await artifactService.listJobArtifacts(app.db, request.params.id, {
+          kind: request.query.kind ?? null,
+          status: request.query.status ?? null,
+        }),
+      };
+    },
   );
 
   app.get(
     '/api/v1/experiments/:id/artifacts',
     {
+      config: { authorization: 'handler' },
       schema: {
         tags: ['artifacts'],
         summary: 'List what every run of an experiment produced',
@@ -317,11 +350,14 @@ export async function registerArtifactRoutes(app) {
         response: { 200: listResponse, 404: { $ref: 'Error#' } },
       },
     },
-    async (request) => ({
-      artifacts: await artifactService.listExperimentArtifacts(app.db, request.params.id, {
-        kind: request.query.kind ?? null,
-        status: request.query.status ?? null,
-      }),
-    }),
+    async (request) => {
+      await app.requireExperiment(request, request.params.id, Permission.PROJECT_READ);
+      return {
+        artifacts: await artifactService.listExperimentArtifacts(app.db, request.params.id, {
+          kind: request.query.kind ?? null,
+          status: request.query.status ?? null,
+        }),
+      };
+    },
   );
 }

@@ -9,6 +9,7 @@
  */
 
 import * as modelService from '../services/models.js';
+import { Permission } from '../domain/roles.js';
 import { ALL_STATUSES, ModelStatus } from '../domain/model-status.js';
 
 const modelSchema = {
@@ -100,6 +101,7 @@ export async function registerModelRoutes(app) {
   app.post(
     '/api/v1/projects/:name/models',
     {
+      config: { permission: Permission.PROJECT_WRITE },
       schema: {
         tags: ['models'],
         summary: 'Create a model',
@@ -135,6 +137,7 @@ export async function registerModelRoutes(app) {
   app.get(
     '/api/v1/projects/:name/models',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['models'],
         summary: 'List a project’s models',
@@ -159,6 +162,7 @@ export async function registerModelRoutes(app) {
   app.get(
     '/api/v1/projects/:name/models/:model',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['models'],
         summary: 'Get a model',
@@ -172,6 +176,7 @@ export async function registerModelRoutes(app) {
   app.post(
     '/api/v1/projects/:name/models/:model/versions',
     {
+      config: { permission: Permission.PROJECT_WRITE },
       schema: {
         tags: ['models'],
         summary: 'Register a new version from an artifact',
@@ -225,6 +230,7 @@ export async function registerModelRoutes(app) {
   app.get(
     '/api/v1/projects/:name/models/:model/versions',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['models'],
         summary: 'List a model’s versions, newest first',
@@ -253,6 +259,7 @@ export async function registerModelRoutes(app) {
   app.get(
     '/api/v1/projects/:name/models/:model/production',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['models'],
         summary: 'The version this model currently means',
@@ -290,6 +297,7 @@ export async function registerModelRoutes(app) {
   app.get(
     '/api/v1/projects/:name/models/:model/versions/:version',
     {
+      config: { permission: Permission.PROJECT_READ },
       schema: {
         tags: ['models'],
         summary: 'Get one version',
@@ -305,6 +313,7 @@ export async function registerModelRoutes(app) {
   app.post(
     '/api/v1/projects/:name/models/:model/versions/:version/status',
     {
+      config: { permission: Permission.PROJECT_WRITE },
       schema: {
         tags: ['models'],
         summary: 'Move a version through the lifecycle',

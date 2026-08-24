@@ -4,10 +4,10 @@ import { withTransaction } from '../db/pool.js';
 import * as projectsRepo from '../repos/projects.js';
 import { ConflictError, NotFoundError, UNIQUE_VIOLATION } from './errors.js';
 
-export async function createProject(pool, { name, description, quota }) {
+export async function createProject(pool, { name, description, quota, ownerId }) {
   try {
     return await withTransaction(pool, (client) =>
-      projectsRepo.createProject(client, { name, description, quota }));
+      projectsRepo.createProject(client, { name, description, quota, ownerId }));
   } catch (err) {
     if (err.code === UNIQUE_VIOLATION) {
       throw new ConflictError('PROJECT_EXISTS', `project "${name}" already exists`);
@@ -36,8 +36,9 @@ export async function updateQuota(pool, name, quota) {
   });
 }
 
-export async function listProjects(pool) {
-  return projectsRepo.listProjects(pool);
+/** @param {string|null} userId null for a platform administrator, who sees all. */
+export async function listProjects(pool, { userId = null } = {}) {
+  return projectsRepo.listProjects(pool, { userId });
 }
 
 export async function getProject(pool, name) {

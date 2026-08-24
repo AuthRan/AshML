@@ -20,7 +20,7 @@ import { JobState } from '../domain/job-state.js';
 import { runOnce, launchJob, reconcileJob } from './executor.js';
 import { discoverCluster, listNodes } from './nodes.js';
 import { getJob, getJobEvents, cancelJob, claimNextJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE } from '../test-support/db.js';
+import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -44,6 +44,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     backend = createSimBackend({ namespace: 'ashml-test', autoAdvance: false });
     app = await buildApp(config, { logger: false, pool, k8s: backend });
     await app.ready();
+    await authenticateAs(app, pool);
 
     // A job cannot be launched until it has been placed, and it cannot be placed until
     // the scheduler knows a node exists. Registering the fake cluster's node is

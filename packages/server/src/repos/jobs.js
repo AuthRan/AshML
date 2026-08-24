@@ -125,15 +125,29 @@ export async function getJobForUpdate(client, id) {
   return rows.length ? toJob(rows[0]) : null;
 }
 
-export async function listJobs(client, { projectName = null, state = null, limit = 50 } = {}) {
+/**
+ * Jobs, optionally narrowed to a project and a state.
+ *
+ * `visibleToUserId` is the membership filter and is applied in SQL, not afterwards. The
+ * `LIMIT` is why it has to be: filtering 50 rows down to the ones the caller may see
+ * would return fewer than 50 jobs and call it a page, and the jobs it dropped would be
+ * the newest ones. Null means a platform administrator, who sees all.
+ */
+export async function listJobs(client, {
+  projectName = null, state = null, limit = 50, visibleToUserId = null,
+} = {}) {
   const { rows } = await client.query(
     `SELECT ${JOB_COLUMNS}
      ${JOB_FROM}
      WHERE ($1::text IS NULL OR p.name = $1)
        AND ($2::text IS NULL OR j.state = $2)
+       AND ($4::uuid IS NULL OR EXISTS (
+         SELECT 1 FROM project_members m
+         WHERE m.project_id = p.id AND m.user_id = $4
+       ))
      ORDER BY j.created_at DESC
      LIMIT $3`,
-    [projectName, state, limit],
+    [projectName, state, limit, visibleToUserId],
   );
   return rows.map(toJob);
 }

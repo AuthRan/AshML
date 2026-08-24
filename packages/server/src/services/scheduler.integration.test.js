@@ -22,7 +22,7 @@ import { runOnce } from './executor.js';
 import { scheduleJob, getSchedulingHistory, Placement } from './scheduler.js';
 import { discoverCluster, listNodes } from './nodes.js';
 import { getJob, claimNextJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE } from '../test-support/db.js';
+import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 const GIB = 1024 ** 3;
@@ -62,6 +62,7 @@ describe('scheduler (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
     backend = twoGpuCluster();
     app = await buildApp(config, { logger: false, pool, k8s: backend });
     await app.ready();
+    await authenticateAs(app, pool);
   });
 
   after(async () => {
