@@ -146,6 +146,13 @@ export function createMetrics({ collectDefaults = true } = {}) {
       registers: [registry],
     }),
 
+    rateLimited: new Counter({
+      name: `${PREFIX}rate_limited_total`,
+      help: 'Requests refused by the rate limiter, by which limiter refused them',
+      labelNames: ['scope'],
+      registers: [registry],
+    }),
+
     scrapeErrors: new Counter({
       name: `${PREFIX}scrape_errors_total`,
       help: 'Scrapes where a snapshot could not be collected, by source',
@@ -155,6 +162,15 @@ export function createMetrics({ collectDefaults = true } = {}) {
   };
 
   const snapshots = {
+    // The one snapshot `collectSnapshot` does not fill: the limiter is in this process,
+    // so `auth/rate-limit.js` attaches a `collect` callback and the number is read off
+    // the live maps at scrape time rather than copied there on a timer.
+    rateLimitKeys: new Gauge({
+      name: `${PREFIX}rate_limit_keys`,
+      help: 'Callers the rate limiter is currently tracking, by scope. Bounded by ASHML_RATE_LIMIT_MAX_KEYS; at the bound, the oldest is evicted',
+      labelNames: ['scope'],
+      registers: [registry],
+    }),
     jobs: new Gauge({
       name: `${PREFIX}jobs`,
       help: 'Jobs in each state',

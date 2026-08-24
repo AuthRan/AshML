@@ -323,7 +323,16 @@ number might have been chosen instead.
 **Quotas belong to the platform, not the project.** A limit its subject can raise is not a
 limit, so `PLATFORM_ADMIN` — not `OWNER` — changes a quota and reads cluster inventory.
 
+**How often a caller may call is decided before we know who they are.** Two token buckets:
+a generous one keyed by identity for requests that authenticated, and a tight one keyed by
+source address for requests that did not. The second is the one with a reason to exist —
+checking a token means hashing it and querying PostgreSQL, so it is peeked at in a hook
+installed *ahead of* authentication and charged only once a 401 has happened. Probes and
+`/metrics` are exempt, because a limiter that throttles them converts an overload into the
+outage it was there to prevent. ADR 0014 has the numbers and why they are what they are.
+
 **Not built:** no identity provider, no Kubernetes RBAC or per-project service accounts,
-no rate limiting, no audit of refusals. AshML's own service account creates every
-workload, so a project's pods are isolated by AshML's admission checks and not by the
-cluster's. ADR 0013 has the reasoning and the full list.
+no audit of refusals. AshML's own service account creates every workload, so a project's
+pods are isolated by AshML's admission checks and not by the cluster's. Rate limiting
+counts in one process, so two API replicas are two budgets. ADR 0013 has the reasoning and
+the full list.

@@ -14,7 +14,7 @@ verify artifacts, version models, and serve them with real traffic splitting.**
 [**▶ Live demo**](https://authran.github.io/AshML/demo/) ·
 [**Project site**](https://authran.github.io/AshML/) ·
 [**Architecture**](docs/architecture/architecture.md) ·
-[**Decisions (11 ADRs)**](docs/adr/) ·
+[**Decisions (14 ADRs)**](docs/adr/) ·
 [**Quick start**](#quick-start) ·
 [**What is not built**](#known-limitations)
 
@@ -50,9 +50,9 @@ an ingress, and Ashcode — is listed with reasons in
 > artifact an AshML run produced, and every answer carries the model version and artifact
 > id that served it. It is the serving slice of the platform, not the platform: the
 > scheduler, the executor and the control-plane API need a Kubernetes cluster, and the
-> API now authenticates every request (see [Who can do what](#who-can-do-what)), but it
-> still has no rate limiting and no audit of refusals, so it is not something to put on a
-> public URL.
+> API now authenticates every request and limits how often each caller may make one (see
+> [Who can do what](#who-can-do-what)), but it still has no audit of refusals, so it is
+> not something to put on a public URL.
 > What runs where is spelled out on the [project site](https://authran.github.io/AshML/).
 >
 > The demo page is on GitHub Pages rather than the Hugging Face Space, because Hugging
@@ -502,8 +502,57 @@ could report results for any job.
 > `ApiError: authentication required` at its *first artifact upload* — minutes into a run
 > that had otherwise been going fine.
 
-Full reasoning, and an explicit list of what is *not* built — no identity provider, no
-Kubernetes RBAC, no rate limiting, no audit of refusals — is in
+### How often you can call
+
+Two budgets, both per minute. Which one a request is counted against depends on whether
+it authenticated:
+
+| | keyed by | default | setting |
+|---|---|---|---|
+| Authenticated | *who* is calling — a person, a run, a deployment | 1200 | `ASHML_RATE_LIMIT_PER_MINUTE` |
+| Anonymous | the source address | 600 | `ASHML_RATE_LIMIT_ANON_PER_MINUTE` |
+
+The anonymous one is the one with a reason to exist. Checking a bearer token means
+hashing it and asking PostgreSQL, so with nothing in front, a client holding no
+credential at all can make the control plane run a query per packet — a database outage
+produced entirely by requests that were going to be refused anyway. So that budget is
+**peeked at before** authentication runs and **charged after** a 401. The ordering is the
+whole mechanism: it is what makes refusing cheaper than attacking.
+
+It is also the number that took the most thought, and it is higher than it looks like it
+should be. Every pod in a k3d cluster reaches the control plane from one address, so this
+budget is shared by everything behind a NAT or an ingress. A limit low enough to catch "a
+handful of 401s is a misconfiguration" would let one misconfigured workload lock out every
+healthy pod beside it — which is the [upgrade failure above](#who-can-do-what), made
+contagious. Ten a second sits above any real failure loop and three orders of magnitude
+below a flood. The ceiling is the point, not the number.
+
+The authenticated budget is a backstop against a runaway loop rather than a throttle. It
+is keyed by identity and not by credential, so minting a second token does not mint a
+second budget, and it is a token bucket rather than a fixed window, so a caller who has
+been quiet may spend a whole minute at once — `make bench` makes about six hundred calls
+in a few seconds and fits inside it with room to spare.
+
+A refusal is a `429` carrying `Retry-After` and the `RateLimit-*` headers, and is **not
+itself charged**, so a client stuck in a retry loop still recovers on its own rather than
+holding itself out. `/healthz`, `/readyz` and `/metrics` are never limited: a throttled
+liveness probe is a pod Kubernetes restarts, and throttled metrics blind the monitoring at
+the exact moment it is describing the overload.
+
+Two things it does not do, both worth knowing before this is put behind anything:
+
+- **It counts in this process.** Two replicas are two budgets. The fix is a shared counter
+  in PostgreSQL, which v1 does not have.
+- **It believes the socket, not `X-Forwarded-For`**, unless `ASHML_TRUST_PROXY=true`.
+  Behind an ingress that setting is required, or every anonymous caller shares the
+  ingress's one bucket; *without* an ingress it must stay off, or every caller picks their
+  own bucket by sending a header — which is worse than no limit, because it looks like one.
+
+Why it is shaped this way, including why the anonymous number is higher than it looks
+like it should be, is [ADR 0014](docs/adr/0014-two-rate-limits-and-where-each-one-runs.md).
+
+Full reasoning about the credentials themselves, and an explicit list of what is *not*
+built — no identity provider, no Kubernetes RBAC, no audit of refusals — is in
 [ADR 0013](docs/adr/0013-tokens-for-people-and-tokens-for-pods.md) and
 [`docs/roadmap.md`](docs/roadmap.md).
 
@@ -807,6 +856,11 @@ docs/              architecture, roadmap, ADRs
 | `ASHML_RUN_TOKEN_TTL` | `86400` | Seconds a workload's token stays valid |
 | `ASHML_RUN_TOKEN_GRACE` | `300` | Seconds a *finished* run's token keeps working, so the final checkpoint's upload — confirmed after the pod exits — still lands. A retry revokes immediately regardless |
 | `ASHML_TOKEN` | — | Read by `ash` when nothing is stored by `ash login` |
+| `ASHML_RATE_LIMIT_ENABLED` | `true` | Set false to remove both budgets. Logs a warning on every start |
+| `ASHML_RATE_LIMIT_PER_MINUTE` | `1200` | Requests a minute per *authenticated caller* — per person, run or deployment, not per token |
+| `ASHML_RATE_LIMIT_ANON_PER_MINUTE` | `600` | Requests a minute per source address for callers with no valid credential — what keeps a token lookup from being an attack. Not lower, because everything behind one NAT shares it |
+| `ASHML_RATE_LIMIT_MAX_KEYS` | `10000` | Callers remembered at once, about a megabyte. Past it the least recently seen is forgotten |
+| `ASHML_TRUST_PROXY` | `false` | Whether `X-Forwarded-For` decides who is calling. Required behind an ingress, dangerous without one — see [How often you can call](#how-often-you-can-call) |
 | `ASHML_DATABASE_URL` | `postgresql://ashml:ashml@127.0.0.1:5432/ashml` | PostgreSQL connection |
 | `ASHML_DB_POOL_MAX` | `10` | Maximum pooled connections |
 | `ASHML_K8S_BACKEND` | `kubernetes` | `kubernetes` or `sim` |
@@ -969,11 +1023,11 @@ functionality, scheduling, distributed training, or performance numbers.**
    frontier-model project.
 3. **AshGPU is not integrated.** The provider seam exists; the implementation does not.
 4. **Authentication has no identity provider.** Tokens are issued out of band and `ash
-   login` stores one — no OIDC, no SSO, no passwords. There is also no rate limiting, no
-   audit log of refused requests, and no Kubernetes RBAC: AshML's own service account
-   creates every workload, so a project's pods are isolated by AshML's admission checks
-   rather than by the cluster's. [ADR 0013](docs/adr/0013-tokens-for-people-and-tokens-for-pods.md)
-   lists the rest.
+   login` stores one — no OIDC, no SSO, no passwords. There is also no audit log of refused
+   requests, and no Kubernetes RBAC: AshML's own service account creates every workload, so
+   a project's pods are isolated by AshML's admission checks rather than by the cluster's.
+   Rate limiting exists but counts in one process, so two API replicas are two budgets.
+   [ADR 0013](docs/adr/0013-tokens-for-people-and-tokens-for-pods.md) lists the rest.
 
 ## License
 

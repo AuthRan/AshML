@@ -847,7 +847,7 @@ report nothing. `make cluster-dns-check` asks a Pod; `make cluster-dns` restores
 | 7 | Distributed training (DDP across both 2080 Tis) | Needs a reliable scheduler underneath |
 | 8 | AshGPU as a real `GpuProvider` | AshGPU does not exist yet (ADR 0005) |
 | 9 | Ashcode integration | Weekend of work once the API is good; not the hard part |
-| 10 | Rate limiting, audit log, Kubernetes RBAC | Auth and project RBAC are **done** — see below |
+| 10 | Audit log, Kubernetes RBAC, an identity provider | Auth, project RBAC and rate limiting are **done** — see below |
 
 ---
 
@@ -877,6 +877,8 @@ places; this is the part of Phase 10 that is now built, and the part that is not
   anything that could reach the control plane.
 - **Quotas moved to platform administration.** A quota a project owner can raise is not a
   quota.
+- **Rate limiting**, in two budgets. See below; the short version is that the interesting
+  one is the budget for callers who have *not* authenticated.
 - `ash login`, `ash whoami`, `ash token create|list|revoke`, `ash member add|remove|list`.
 
 ### Upgrading an existing cluster
@@ -895,6 +897,59 @@ of the record is that the pod reported what it observed (ADR 0009, spec Rule 5),
 endpoint a human can post to is an endpoint where the number might have been chosen. It
 is the only permission nobody can grant themselves.
 
+### Rate limiting, and the half of it that matters
+
+Two token buckets, both per minute, and the split is not between endpoints but between
+kinds of caller.
+
+The **identified** budget — 1200 a minute, keyed by *who* is calling rather than by which
+credential they used — is a backstop against a runaway loop. Nothing in this repository
+should ever meet it: `make bench` makes about six hundred calls in a few seconds and fits
+inside it, and it is a bucket rather than a fixed window, so a client that has been quiet
+may spend the whole minute at once instead of being throttled to a trickle it never asked
+for.
+
+The **anonymous** budget — 600 a minute, per source address — is the one worth building.
+Verifying a bearer token means hashing it and asking PostgreSQL, so an API that
+authenticates but does not rate limit has *created* a way to make it run a query per
+packet, using no credential at all. Every one of those requests was going to be refused;
+the database load is the entire payload. So the anonymous budget is peeked at in a hook
+installed **before** the authentication hook, and charged in an `onSend` hook after a 401
+has actually happened. Both halves are necessary: charging early would count legitimate
+traffic, and checking late would pay for the lookup before deciding not to want it.
+
+Its *number* was the part that took thinking about, and the first one chosen was wrong.
+Sixty a minute reads as generous for a caller with no credential — one 401 is a typo, a
+hundred is somebody working through a list — and it would have been a bug, because every
+pod in a k3d cluster reaches the control plane from a single address. That budget is
+shared by everything behind a NAT or an ingress, so a limit tuned to "a few failures is
+suspicious" hands one misconfigured workload the ability to starve every healthy pod
+beside it: precisely the pre-Phase-10 image failure this roadmap already documents, turned
+contagious by the thing meant to protect the platform. Ten a second is above any real
+failure loop — a crash-looping pod restarts on backoff, the router polls every five
+seconds — and three orders of magnitude below a flood. The ceiling is what matters here,
+not the number.
+
+Three smaller decisions, each one a place this could have gone quietly wrong:
+
+- **Refusals are not charged.** A blocked caller that keeps knocking would otherwise never
+  refill, and a rate limit that a retry loop converts into a permanent ban is not the
+  thing anybody configured.
+- **`/healthz`, `/readyz` and `/metrics` are exempt.** A throttled liveness probe is a pod
+  Kubernetes restarts; throttled metrics blind the monitoring at the moment it is
+  describing the overload. In both cases the limiter would turn a load problem into an
+  outage — the failure it exists to prevent, arriving by its own hand.
+- **A limit of `0` is an error, not "unlimited".** Zero means unlimited for a quota
+  (`domain/quota.js`), which is exactly why it cannot mean it here; the message names
+  `ASHML_RATE_LIMIT_ENABLED=false` as the way to say what was meant.
+
+What it is not: **the counters live in this process.** Two API replicas are two budgets,
+and a caller who can vary their key faster than the bucket map can hold — a botnet, or a
+`X-Forwarded-For` header this server was told to trust — evicts their own throttled
+entries and escapes with one burst per eviction. The honest fix is a shared counter in
+PostgreSQL, which v1 does not have, and `ASHML_TRUST_PROXY` defaults to off so that the
+second problem stays a deliberate choice rather than a default.
+
 ### Not built
 
 - **No identity provider.** No OIDC, no SSO, no passwords. Tokens are issued out of band
@@ -904,8 +959,6 @@ is the only permission nobody can grant themselves.
   AshML's own service account creates every workload, so a project's pods are isolated by
   AshML's admission checks and not by the cluster's. A compromised training image is
   therefore contained by the namespace, not by the project.
-- **No rate limiting.** Nothing stops a caller with a valid token from making a million
-  requests.
 - **No audit log of authorization decisions.** Job state changes are audited; refusals are
   not. `api_tokens.last_used_at` is the only trail, and it is deliberately coarse.
 - **The training run token is visible in the Job's pod spec** to anyone who can already

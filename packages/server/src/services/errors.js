@@ -34,6 +34,22 @@ export class ValidationError extends Error {
   }
 }
 
+/**
+ * 429: the caller is who they say they are and may do this — just not this often.
+ *
+ * Deliberately not a 403. The difference matters to a client library, which should back
+ * off and retry a 429 and must not retry a 403, and it matters to whoever reads the log:
+ * one says the credential is wrong, the other says the loop is.
+ */
+export class RateLimitedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'RateLimitedError';
+    this.code = 'RATE_LIMITED';
+    this.statusCode = 429;
+  }
+}
+
 /** Postgres unique-violation SQLSTATE, the race-safe way to detect a duplicate. */
 export const UNIQUE_VIOLATION = '23505';
 

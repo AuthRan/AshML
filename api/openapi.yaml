@@ -11,6 +11,15 @@ info:
     token`, which writes it straight to the database because the endpoint that
     mints tokens needs one itself. Training and serving pods are handed their
     own scoped credentials by the platform and do not use these.
+
+
+    Every response except the probe and scrape endpoints carries
+    `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` — those three
+    are exempt, because a throttled health probe is a restart. Over budget is
+    `429` with `Retry-After`, and a refused request is not itself charged, so
+    backing off for that long is enough. An authenticated caller is counted by
+    identity rather than by token; requests with no valid credential are
+    counted, far more tightly, by source address.
   version: 0.1.0-dev
 components:
   securitySchemes:

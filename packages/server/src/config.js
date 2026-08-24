@@ -105,12 +105,71 @@ export function loadConfig(env = process.env) {
     // immediately, and it does so regardless of this.
     runTokenGraceSeconds: parseCount(env.ASHML_RUN_TOKEN_GRACE, 'ASHML_RUN_TOKEN_GRACE') ?? 300,
 
+    // Rate limiting (Phase 10, spec §31). Two budgets — see auth/rate-limit.js for
+    // which request is counted against which, and why the anonymous one is the tight
+    // one.
+    rateLimit: {
+      // On by default, like authentication, and for the same reason: the failure of
+      // being off is silent until the day it is not.
+      enabled: parseBool(env.ASHML_RATE_LIMIT_ENABLED, 'ASHML_RATE_LIMIT_ENABLED', true),
+      // A backstop against a runaway loop, not a throttle. Twenty requests a second,
+      // sustained, with a full minute available as a burst — `make bench` makes about
+      // six hundred calls in a few seconds and fits inside it with room to spare. Raise
+      // it before pointing anything heavier at one token.
+      identifiedPerMinute:
+        parseLimit(env.ASHML_RATE_LIMIT_PER_MINUTE, 'ASHML_RATE_LIMIT_PER_MINUTE') ?? 1200,
+      // Requests that presented no valid credential, per source address.
+      //
+      // Higher than it first looks like it should be, and deliberately. Every pod in a
+      // k3d cluster reaches the control plane from one address, so this budget is shared
+      // by everything behind a NAT or an ingress — which means a single misconfigured
+      // workload 401-looping must not be able to lock out the healthy ones beside it.
+      // Ten a second is far above any real failure loop (a crash-looping pod restarts on
+      // backoff; the router polls every five seconds) and still three orders of magnitude
+      // below the flood this exists to stop. The ceiling is the point, not the number.
+      anonymousPerMinute:
+        parseLimit(env.ASHML_RATE_LIMIT_ANON_PER_MINUTE, 'ASHML_RATE_LIMIT_ANON_PER_MINUTE') ?? 600,
+      // How many callers to remember at once. Ten thousand buckets is about a megabyte;
+      // past the cap the least recently seen is forgotten, which is the honest limit of
+      // an in-process limiter and is stated in auth/rate-limit.js rather than implied.
+      maxKeys: parseLimit(env.ASHML_RATE_LIMIT_MAX_KEYS, 'ASHML_RATE_LIMIT_MAX_KEYS') ?? 10_000,
+    },
+
+    // Whether to believe `X-Forwarded-For` about who is calling.
+    //
+    // Off, because it is only ever safe when something in front of this server rewrites
+    // that header on every request. Turned on without such a proxy, any caller picks
+    // their own rate-limit bucket by sending a header, which is worse than no limit at
+    // all because it looks like one. Turned off *behind* a proxy, every anonymous caller
+    // shares the proxy's address and therefore one budget — so this has to be set when
+    // an ingress is put in front, and its default has to be the safe direction.
+    trustProxy: parseBool(env.ASHML_TRUST_PROXY, 'ASHML_TRUST_PROXY', false),
+
     databaseUrl: env.ASHML_DATABASE_URL
       ?? 'postgresql://ashml:ashml@127.0.0.1:5432/ashml',
     databasePoolMax: parseCount(env.ASHML_DB_POOL_MAX, 'ASHML_DB_POOL_MAX') ?? 10,
 
     version: env.ASHML_VERSION ?? '0.1.0-dev',
   };
+}
+
+/**
+ * A limit of zero is refused rather than read as "unlimited".
+ *
+ * Zero means unlimited for quotas (`domain/quota.js`), which is exactly why it must not
+ * mean it here: the same convention applied to a rate limit turns a typo into an open
+ * door, and the two settings are close enough in kind that someone will assume it. The
+ * way to have no rate limit is to say so.
+ */
+function parseLimit(raw, name) {
+  const value = parseCount(raw, name);
+  if (value === 0) {
+    throw new Error(
+      `${name}="0": a rate limit of zero would refuse every request. `
+      + 'To run without a limit, set ASHML_RATE_LIMIT_ENABLED=false.',
+    );
+  }
+  return value;
 }
 
 function parseBool(raw, name, fallback) {

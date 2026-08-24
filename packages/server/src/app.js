@@ -39,6 +39,7 @@ import { registerObservabilityRoutes } from './routes/observability.js';
 import { registerUiRoutes } from './routes/ui.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { installAuth } from './auth/install.js';
+import { installRateLimit } from './auth/rate-limit.js';
 import { createMetrics } from './observability/metrics.js';
 import { createPool } from './db/pool.js';
 import { IllegalTransitionError } from './domain/job-state.js';
@@ -90,6 +91,10 @@ export async function buildApp(config, {
     // correlation in Phase 1 (spec §24).
     genReqId: () => crypto.randomUUID(),
     requestIdHeader: 'x-request-id',
+    // Whether `request.ip` may come from `X-Forwarded-For`. Off unless a proxy that
+    // rewrites that header is known to be in front — see config.trustProxy, and
+    // auth/rate-limit.js, which is what reads the answer.
+    trustProxy: config.trustProxy === true,
     logController: new LogController({ requestIdLogLabel: 'request_id' }),
   });
 
@@ -172,6 +177,11 @@ export async function buildApp(config, {
   app.addSchema(errorSchema);
   app.addSchema(deviceSchema);
 
+  // Before authentication, and that order is load-bearing rather than tidy: the
+  // anonymous limiter's whole purpose is to refuse a request before the token lookup it
+  // would otherwise pay for, and Fastify runs same-stage hooks in registration order.
+  installRateLimit(app, config.rateLimit);
+
   // Before any route is registered, so that every route inherits the default-deny hook
   // and there is no window in which a route exists unprotected (auth/install.js).
   await installAuth(app, { enabled: config.authEnabled });
@@ -188,7 +198,14 @@ export async function buildApp(config, {
           + 'A person gets one from `ash token create`; the first one comes from '
           + '`make token`, which writes it straight to the database because the endpoint '
           + 'that mints tokens needs one itself. Training and serving pods are handed '
-          + 'their own scoped credentials by the platform and do not use these.',
+          + 'their own scoped credentials by the platform and do not use these.\n\n'
+          + 'Every response except the probe and scrape endpoints carries '
+          + '`RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` — those three '
+          + 'are exempt, because a throttled health probe is a restart. Over budget is '
+          + '`429` with `Retry-After`, and a refused '
+          + 'request is not itself charged, so backing off for that long is enough. An '
+          + 'authenticated caller is counted by identity rather than by token; requests '
+          + 'with no valid credential are counted, far more tightly, by source address.',
         version: config.version,
       },
       // Declared so the /docs page offers an Authorize box. Without it every "Try it
