@@ -224,8 +224,13 @@ export function can(
 
   if (permission === Permission.PLATFORM_ADMIN) return false; // Rule 3, the exception.
 
+  // `Object.hasOwn`, not a truthiness check on the lookup: `REQUIRED_ROLE['constructor']`
+  // and `['toString']` are inherited and truthy, so a plain `if (!required)` would wave
+  // them past the guard. They are denied further down by `isRole`, but by accident of a
+  // later check rather than by this one — and this is the check that is supposed to mean
+  // "an unknown permission is denied, not ignored".
+  if (!Object.hasOwn(REQUIRED_ROLE, permission)) return false;
   const required = REQUIRED_ROLE[permission];
-  if (!required) return false; // An unknown permission is denied, not ignored.
 
   if (projectId === null) return false;
   return atLeast(roleIn(principal, projectId), required);

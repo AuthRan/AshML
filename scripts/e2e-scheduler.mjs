@@ -154,9 +154,17 @@ check('more jobs than fit are admitted only as capacity allows', async () => {
     await submit(`fill-${suffix}-${i}`, { cpu: perJob, steps: 600 });
   }
 
+  // Waits for every job to have *settled*, not just for enough of them to be running.
+  //
+  // `active(js).length >= capacity` alone is satisfiable while one job is still
+  // SCHEDULING — claimed off the queue but not yet placed or returned to it — and a job
+  // in that state is neither active nor QUEUED. The next assertion then finds one fewer
+  // queued job than were submitted and fails, intermittently and for no real reason.
+  // Requiring the two counts to add up to what was submitted closes the window.
   const jobs = await until(
-    (js) => active(js).length >= capacity,
-    `${capacity} jobs to be running at once`,
+    (js) => active(js).length >= capacity
+      && active(js).length + byState(js, JobState.QUEUED).length === total,
+    `${capacity} jobs running and the other ${total - capacity} queued`,
   );
 
   assert.equal(
@@ -242,8 +250,12 @@ check('capacity freed by a finished job is given to the queue', async () => {
   const [victim] = active(before);
   await app.inject({ method: 'POST', url: `/api/v1/jobs/${victim.id}/cancel`, payload: {} });
 
+  // Same settling requirement as above: the admitted job must have reached STARTING or
+  // RUNNING, not merely have left the queue. "No longer QUEUED" is also true of a job
+  // that is mid-pass, and of one that was refused and is about to be queued again.
   const after = await until(
-    (js) => byState(js, JobState.QUEUED).length < queuedBefore,
+    (js) => byState(js, JobState.QUEUED).length < queuedBefore
+      && js.every((j) => j.state !== 'SCHEDULING'),
     'a queued job to be admitted once capacity frees',
   );
 

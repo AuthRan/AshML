@@ -512,6 +512,16 @@ export function createKubernetesBackend({
       }
     },
 
+    /** Deletes a Secret. Absent is success: this is called to make it not exist. */
+    async deleteSecret(ns, name) {
+      const { core } = connect();
+      try {
+        await core.deleteNamespacedSecret({ namespace: ns ?? namespace, name });
+      } catch (err) {
+        if (statusOf(err) !== 404) throw err;
+      }
+    },
+
     /**
      * Creates the Service if it is absent.
      *

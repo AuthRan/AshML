@@ -186,22 +186,44 @@ export async function expireRunTokens(pool, jobId, graceSeconds) {
 }
 
 /**
- * Mints the token a model-server pod uses to fetch its own weights.
+ * Makes sure a deployment has a working credential, minting one only if it does not.
  *
- * Re-minted whenever the deployment's pods are (re)created, and the previous one revoked
- * in the same transaction, so a token scraped from an old pod spec stops working when
- * that pod is replaced.
+ * The "only if" is the whole point, and it is not an optimisation.
+ *
+ * A serving token reaches its pods as an environment variable sourced from a Secret
+ * (`secretKeyRef`), which is what keeps the pod template byte-identical across applies so
+ * that changing a traffic weight does not restart the pods carrying the traffic. But an
+ * env var from a Secret is materialised when the *container starts* and is never updated
+ * afterwards. So rotating the Secret does not reach a running pod — while revoking the
+ * old token immediately breaks the one it is still holding.
+ *
+ * An earlier version of this function rotated on every apply, and the two properties
+ * combined into a silent failure: `ash deployment rollout` rewrote the Secret, restarted
+ * nothing, and revoked the router's credential. The router's next poll 401'd,
+ * `routing-table.js` kept serving the last good table rather than failing loudly, and the
+ * canary never received a single request. The command reported success.
+ *
+ * So a deployment gets one credential for its lifetime, revoked when it is deleted. There
+ * is no plaintext to return when one already exists — only the hash is stored — and none
+ * is needed: the Secret in the cluster already holds it.
+ *
+ * @returns {Promise<{token: string|null, created: boolean}>} `token` only when created,
+ *   in which case the caller must write it to the Secret.
  */
-export async function issueServingToken(pool, deploymentId, { ttlSeconds = null } = {}) {
-  const { token, hash } = mintToken(TokenKind.WORKLOAD);
-  const expiresAt = ttlSeconds ? new Date(Date.now() + ttlSeconds * 1000) : null;
+export async function ensureServingToken(pool, deploymentId, { ttlSeconds = null } = {}) {
+  return withTransaction(pool, async (client) => {
+    if (await authRepo.hasLiveServingToken(client, deploymentId)) {
+      return { token: null, created: false };
+    }
 
-  const row = await withTransaction(pool, async (client) => {
+    const { token, hash } = mintToken(TokenKind.WORKLOAD);
+    const expiresAt = ttlSeconds ? new Date(Date.now() + ttlSeconds * 1000) : null;
+
+    // Clears any expired row, so the partial unique index has room for the new one.
     await authRepo.revokeServingTokens(client, deploymentId);
-    return authRepo.createServingToken(client, { deploymentId, tokenHash: hash, expiresAt });
+    await authRepo.createServingToken(client, { deploymentId, tokenHash: hash, expiresAt });
+    return { token, created: true };
   });
-
-  return { ...row, token };
 }
 
 export async function revokeServingTokens(pool, deploymentId) {
@@ -223,6 +245,13 @@ export async function setMember(pool, projectId, email, role) {
     const user = await authRepo.getUserByEmail(client, email);
     if (!user) throw new NotFoundError(`no user with email "${email}"`);
 
+    // Serialises membership changes for this project. Without it the count below is a
+    // read that another transaction can invalidate before this one writes: two owners
+    // demoting each other at the same moment each see two owners, each proceed, and the
+    // project ends with none — the exact state the check exists to prevent, and one
+    // nobody inside the project can undo.
+    await authRepo.lockProjectMembership(client, projectId);
+
     // Demoting the last owner would leave a project nobody can administer — including
     // nobody who can add an owner back. Refused here rather than left to a platform
     // administrator to unpick.
@@ -243,6 +272,8 @@ export async function removeMember(pool, projectId, email) {
   return withTransaction(pool, async (client) => {
     const user = await authRepo.getUserByEmail(client, email);
     if (!user) throw new NotFoundError(`no user with email "${email}"`);
+
+    await authRepo.lockProjectMembership(client, projectId);
 
     const members = await authRepo.listMembers(client, projectId);
     const existing = members.find((m) => m.user_id === user.id);

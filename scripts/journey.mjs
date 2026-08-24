@@ -35,6 +35,10 @@
  *   a control plane running and reachable *from a pod* — see the README's two addresses:
  *     HOST_IP=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
  *     ASHML_API_ADVERTISE_URL=http://$HOST_IP:8080 ASHML_S3_ENDPOINT=http://$HOST_IP:9000 npm start
+ *   and a token, because the API is default-deny since Phase 10:
+ *     export ASHML_TOKEN=$(make -s token)
+ *   The `ash` invocations below inherit it from the environment. The *pods* are handed
+ *   their own credentials by the control plane and need nothing here.
  *
  * Run: make journey
  */

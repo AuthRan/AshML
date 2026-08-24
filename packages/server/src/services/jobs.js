@@ -97,7 +97,9 @@ export async function submitJob(pool, { projectName, name, spec, resources, prio
       if (experiment.project !== projectName) {
         throw new ValidationError(
           'EXPERIMENT_PROJECT_MISMATCH',
-          `experiment ${experimentId} belongs to project "${experiment.project}", not "${projectName}"`,
+          // Does not name the other project: a 400 is relayed to the caller, and the
+          // name of a project they cannot see is not theirs to learn.
+          `experiment ${experimentId} does not belong to project "${projectName}"`,
         );
       }
     }

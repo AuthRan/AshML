@@ -238,8 +238,9 @@ journey: ## The spec's §50 user journey, all nine steps, start to finish
 	# The Phase 5 exit criterion, and the closest thing here to the demo itself. Drives
 	# the `ash` CLI rather than the API, because §50 is written in `ash` commands and the
 	# question is whether a person can run them. Needs the cluster, all three images,
-	# `make cifar-png`, and a control plane reachable *from a pod* -- see the README's
-	# two addresses. Ten minutes or so; JOURNEY_MANIFEST=... points step 2 at the full
+	# `make cifar-png`, a control plane reachable *from a pod* -- see the README's two
+	# addresses -- and `export ASHML_TOKEN=$$(make -s token)`, because the API is
+	# default-deny since Phase 10. Ten minutes or so; JOURNEY_MANIFEST=... points step 2 at the full
 	# epoch instead of the bounded one.
 	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/journey.mjs
 

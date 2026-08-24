@@ -47,9 +47,17 @@ export async function registerHealthRoutes(app) {
       try {
         await ping(app.db);
       } catch (err) {
+        // The detail goes to the log, not to the response. This endpoint answers before
+        // anyone is known (auth/install.js), and a `pg` connection error routinely
+        // carries the host, port, database name and role — `connect ECONNREFUSED
+        // 10.0.3.14:5432`, `password authentication failed for user "ashml"`. A probe
+        // needs to know the answer is no; it does not need to know why.
         request.log.error({ err }, 'readiness check failed: database unreachable');
         return reply.status(503).send({
-          error: { code: 'DATABASE_UNAVAILABLE', message: err.message },
+          error: {
+            code: 'DATABASE_UNAVAILABLE',
+            message: 'the control plane cannot reach its database',
+          },
         });
       }
       return { status: 'ready', database: 'ok' };

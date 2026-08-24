@@ -12,7 +12,7 @@
  * is revoked, expired, or simply not ours produces no row and is refused by the same
  * path. Distinguishing those cases in the answer would tell a caller which half to fix.
  */
-export async function findUserByTokenHash(client, tokenHash, { now = 'now()' } = {}) {
+export async function findUserByTokenHash(client, tokenHash) {
   const { rows } = await client.query(
     `SELECT
        t.id          AS token_id,
@@ -29,7 +29,7 @@ export async function findUserByTokenHash(client, tokenHash, { now = 'now()' } =
      JOIN users u ON u.id = t.user_id
      WHERE t.token_hash = $1
        AND t.revoked_at IS NULL
-       AND (t.expires_at IS NULL OR t.expires_at > ${now})`,
+       AND (t.expires_at IS NULL OR t.expires_at > now())`,
     [tokenHash],
   );
   return rows.length ? rows[0] : null;
@@ -126,6 +126,26 @@ export async function createRunToken(client, { jobId, attempt, tokenHash, expire
     [jobId, attempt, tokenHash, expiresAt],
   );
   return rows[0];
+}
+
+/**
+ * Is there already a working credential for this deployment?
+ *
+ * Only the hash is stored, so this cannot return the token — only whether one exists.
+ * That is enough, and it is the question that matters: if a live token exists, the
+ * Secret in the cluster already holds its plaintext and the pods already have it, so
+ * there is nothing to do. See `ensureServingToken` for why minting anyway is harmful.
+ */
+export async function hasLiveServingToken(client, deploymentId) {
+  const { rows } = await client.query(
+    `SELECT 1 FROM workload_tokens
+     WHERE deployment_id = $1
+       AND revoked_at IS NULL
+       AND (expires_at IS NULL OR expires_at > now())
+     LIMIT 1`,
+    [deploymentId],
+  );
+  return rows.length > 0;
 }
 
 export async function createServingToken(client, { deploymentId, tokenHash, expiresAt = null }) {
@@ -246,6 +266,19 @@ export async function listMembers(client, projectId) {
   return rows;
 }
 
+/**
+ * Serialises membership changes for one project.
+ *
+ * A row lock on the project, not on `project_members`, because the invariant being
+ * protected — "at least one owner" — is a property of the *set*, and locking the rows
+ * that happen to exist cannot stop a concurrent transaction from reading the same set and
+ * reaching the same conclusion. Same argument as `db/locks.js` makes for the scheduler,
+ * one scope down.
+ */
+export async function lockProjectMembership(client, projectId) {
+  await client.query('SELECT 1 FROM projects WHERE id = $1 FOR UPDATE', [projectId]);
+}
+
 /** How many owners a project has. Used to refuse removing the last one. */
 export async function countOwners(client, projectId) {
   const { rows } = await client.query(
@@ -272,8 +305,10 @@ export async function countOwners(client, projectId) {
  */
 async function scopeBy(client, sql, id) {
   // A malformed uuid is a 404, not a 500: `:id` comes from the URL and Postgres would
-  // otherwise raise invalid_text_representation on the cast.
-  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  // otherwise raise invalid_text_representation (22P02) on the cast, which the error
+  // handler masks as an internal error. The previous pattern was `[0-9a-f-]{36}`, which
+  // let 36 dashes through to the database and rejected the valid undashed form.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
   const { rows } = await client.query(sql, [id]);
   if (!rows.length) return null;
   return {

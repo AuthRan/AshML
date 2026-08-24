@@ -21,7 +21,7 @@ import { loadConfig } from '../config.js';
 import { createSimBackend } from '../k8s/sim.js';
 import { Role } from '../domain/roles.js';
 import { mintToken, TokenKind } from '../auth/tokens.js';
-import { issueRunToken, expireRunTokens } from './auth.js';
+import { issueRunToken, expireRunTokens, ensureServingToken } from './auth.js';
 import {
   connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, LOCAL_USER_ID,
 } from '../test-support/db.js';
@@ -493,6 +493,85 @@ describe('auth (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => {
       );
       const secondsLeft = (rows[0].expires_at - Date.now()) / 1000;
       assert.ok(secondsLeft <= 61, `expected the shorter expiry to stand, got ${secondsLeft}s`);
+    });
+  });
+
+  describe('a serving token', () => {
+    /**
+     * The regression this exists for.
+     *
+     * A serving credential reaches its pods as an env var from a Secret, which Kubernetes
+     * materialises when the container starts and never updates. An earlier version minted
+     * a fresh token on every apply and revoked the previous one — so `ash deployment
+     * rollout` revoked the credential the *running* router was holding, restarted nothing
+     * (by design, so a weight change does not drop traffic), and the router's next poll
+     * 401'd. `routing-table.js` keeps serving its last good table on a failed refresh, so
+     * the canary silently received no traffic and the command reported success.
+     */
+    async function makeDeployment() {
+      const alice = await makeUser();
+      const project = await makeProject(alice.token);
+      // A deployment needs a model to point at. Inserted directly rather than driven
+      // through the API: what is under test is the credential's lifetime, and standing up
+      // a real training run to produce a registerable artifact would make every assertion
+      // here depend on the whole ML lifecycle.
+      const { rows: models } = await pool.query(
+        'INSERT INTO models (project_id, name) VALUES ($1, $2) RETURNING id',
+        [project.id, uniqueName('model')],
+      );
+      const { rows } = await pool.query(
+        `INSERT INTO deployments (project_id, model_id, name, status)
+         VALUES ($1, $2, $3, 'PENDING') RETURNING id`,
+        [project.id, models[0].id, uniqueName('dep')],
+      );
+      return rows[0].id;
+    }
+
+    test('is minted once and survives every later apply', async () => {
+      const deploymentId = await makeDeployment();
+
+      const first = await ensureServingToken(pool, deploymentId);
+      assert.ok(first.created, 'the first apply must mint one');
+      assert.ok(first.token);
+
+      // Every subsequent apply — a rollout, a promote, a retire — comes through here.
+      for (let i = 0; i < 3; i += 1) {
+        const again = await ensureServingToken(pool, deploymentId);
+        assert.equal(again.created, false, 'a later apply must not rotate the credential');
+        assert.equal(again.token, null, 'and has no plaintext to write to the Secret');
+      }
+
+      // The one that matters: the credential the running pods hold still works.
+      const who = await call(first.token, { method: 'GET', url: '/api/v1/auth/whoami' });
+      assert.equal(who.statusCode, 200, 'the running pods must not be locked out');
+      assert.equal(who.json().kind, 'SERVING');
+      assert.equal(who.json().deployment_id, deploymentId);
+    });
+
+    test('may read its own routing table and nothing else', async () => {
+      const deploymentId = await makeDeployment();
+      const other = await makeDeployment();
+      const { token } = await ensureServingToken(pool, deploymentId);
+
+      assert.equal(
+        (await call(token, { method: 'GET', url: `/api/v1/deployments/${deploymentId}/routing` })).statusCode,
+        200,
+      );
+      assert.equal(
+        (await call(token, { method: 'GET', url: `/api/v1/deployments/${other}/routing` })).statusCode,
+        404,
+      );
+      assert.equal((await call(token, { method: 'GET', url: '/api/v1/projects' })).statusCode, 403);
+    });
+
+    test('dies with the deployment it belongs to', async () => {
+      const deploymentId = await makeDeployment();
+      const { token } = await ensureServingToken(pool, deploymentId);
+      assert.equal((await call(token, { method: 'GET', url: '/api/v1/auth/whoami' })).statusCode, 200);
+
+      await pool.query('DELETE FROM deployments WHERE id = $1', [deploymentId]);
+
+      assert.equal((await call(token, { method: 'GET', url: '/api/v1/auth/whoami' })).statusCode, 401);
     });
   });
 

@@ -16,7 +16,7 @@
  * cannot accidentally send a production token to a host that would then have seen it.
  */
 
-import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, chmod, rename } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
@@ -53,12 +53,19 @@ export async function storeToken(endpoint, token) {
   store[keyFor(endpoint)] = { token };
 
   await mkdir(dirname(CONFIG_PATH), { recursive: true });
-  // Written 0600 *before* anything is in it. Creating the file at the default umask and
-  // tightening it afterwards leaves a window in which a world-readable file contains a
-  // working credential, which is the whole thing this is trying to avoid.
-  await writeFile(CONFIG_PATH, '', { mode: 0o600 });
-  await chmod(CONFIG_PATH, 0o600);
-  await writeFile(CONFIG_PATH, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+
+  // Written to a temporary file and renamed over the target, rather than truncating the
+  // target and filling it in. Truncate-then-write has a window in which the file is
+  // empty, and a crash or a Ctrl-C inside it loses the token for *every* endpoint, not
+  // just the one being set. `rename` within a directory is atomic: a reader sees either
+  // the old file or the new one.
+  //
+  // Created 0600 rather than tightened afterwards, because the default umask would leave
+  // a moment where a world-readable file holds a working credential.
+  const temporary = `${CONFIG_PATH}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  await chmod(temporary, 0o600);
+  await rename(temporary, CONFIG_PATH);
 
   return CONFIG_PATH;
 }
@@ -68,7 +75,9 @@ export async function forgetToken(endpoint) {
   const key = keyFor(endpoint);
   if (!(key in store)) return false;
   delete store[key];
-  await writeFile(CONFIG_PATH, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  const temporary = `${CONFIG_PATH}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, CONFIG_PATH);
   return true;
 }
 

@@ -68,6 +68,19 @@ is added. Here, forgetting produces `npm start` failing with the path in the mes
 how an outsider enumerates projects. A caller who *can* read the project but not write it
 gets a truthful 403, because hiding it from them would be the confusing answer.
 
+**A deployment's credential is minted once, not rotated.** This is the correction to the
+first version of this decision and it is worth recording as a mistake rather than quietly
+fixing. Rotating on every apply looked obviously safer. It was not, because the two
+properties combine badly: an env var sourced from a Secret is materialised when the
+*container* starts and never updated, and the pod template is deliberately identical
+across applies so a weight change does not restart anything. Rotating therefore revoked
+the credential the running router was still holding, restarted nothing to pick up the
+replacement, and the router's next poll 401'd — at which point `routing-table.js` does the
+right thing for a transient failure and keeps serving its last good table. So
+`ash deployment rollout` would have written the new weights, reported success, and sent
+the canary no traffic at all. A deployment now holds one credential for its lifetime,
+which ends when the deployment row does (`ON DELETE CASCADE`).
+
 **The serving credential lives in a Kubernetes Secret; the run credential does not.**
 Both were inline at first and one of them had to move. `applyDesiredState` rewrites every
 target's manifest whenever anything about a deployment changes, so an inlined serving
@@ -96,6 +109,29 @@ not a row.
 - **The training token is readable via `kubectl describe job`** by anyone who can already
   read Jobs in that namespace. It is per-attempt and revoked when the attempt ends, which
   bounds it, but it is not hidden.
+
+## Found by review, after the fact
+
+Recorded because the list is more useful than the impression that none of this needed a
+second pass:
+
+- The rotation bug above — the only one that would have broken a working feature.
+- **The last-owner check was advisory.** It read `countOwners` and then wrote, with no
+  lock, so two owners demoting each other concurrently both saw two owners and both
+  proceeded, leaving a project with none. Now serialised on the project row.
+- **Two error messages named a project the caller could not see** (`ARTIFACT_PROJECT_MISMATCH`,
+  `EXPERIMENT_PROJECT_MISMATCH`). Both are 400s, and a 400's message is relayed to the
+  caller, so an id seen in a log was enough to read back a project name — the disclosure
+  the 404 rule above exists to prevent.
+- **`/readyz` returned the driver's own error**, unauthenticated. `pg` puts hosts, ports
+  and role names in those.
+- **`REQUIRED_ROLE[permission]` was an unguarded property read**, so inherited keys like
+  `constructor` skipped the "unknown permission is denied" guard. They were still denied,
+  by a later `isRole` check — correct by accident is not the same as correct.
+- The uuid guard accepted 36 dashes (a 500 rather than the intended 404) and rejected the
+  valid undashed form.
+- The CLI truncated its credential file before rewriting it, so a crash mid-write lost
+  every endpoint's token rather than one. Now written to a temporary file and renamed.
 
 ## Consequences
 - Every integration suite now authenticates, so they exercise the default-deny path that

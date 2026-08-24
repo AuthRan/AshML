@@ -158,6 +158,10 @@ export function createSimBackend({
       jobs.delete(key(ns, name));
     },
 
+    async deleteSecret(ns, name) {
+      secrets.delete(key(ns ?? namespace, name));
+    },
+
     async applySecret(manifest) {
       const ns = manifest.metadata.namespace ?? namespace;
       secrets.set(key(ns, manifest.metadata.name), manifest);

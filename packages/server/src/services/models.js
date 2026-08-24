@@ -104,10 +104,18 @@ export async function registerVersion(pool, { projectName, modelName, artifactId
 
     // An artifact belongs to a job, which belongs to a project. Registering another
     // project's artifact would let one project's registry depend on another's retention.
-    if (artifact.project !== null && artifact.project !== projectName) {
+    // Not `!== null &&`: an artifact with no project cannot be shown to belong to this
+    // one, and letting it through would make a job-less artifact registrable into *any*
+    // project. `artifacts.job_id` is nullable, so that is a reachable shape.
+    //
+    // The message deliberately does not name the other project. It used to, and a 400 is
+    // exposed to the caller — so an EDITOR anywhere plus an artifact id seen in a log
+    // could read back the name of a project they have no access to, which is the exact
+    // disclosure `resolveProject`'s 404 rule exists to prevent.
+    if (artifact.project !== projectName) {
       throw new ValidationError(
         'ARTIFACT_PROJECT_MISMATCH',
-        `artifact ${artifactId} belongs to project "${artifact.project}", not "${projectName}"`,
+        `artifact ${artifactId} does not belong to project "${projectName}"`,
       );
     }
 

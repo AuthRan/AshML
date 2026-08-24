@@ -33,7 +33,7 @@
  */
 
 import { withTransaction } from '../db/pool.js';
-import { issueServingToken } from './auth.js';
+import { ensureServingToken } from './auth.js';
 import { ArtifactStatus } from '../domain/artifact-status.js';
 import { ModelStatus } from '../domain/model-status.js';
 import {
@@ -339,16 +339,24 @@ export async function applyDesiredState(pool, backend, deploymentId, {
   // alike. They are one workload with one set of rights: fetch this project's artifacts,
   // and follow this deployment's routing table (domain/roles.js).
   //
-  // It goes into a Secret, and the pod templates reference that Secret by name. Putting
-  // the value in the template instead would make the template differ on every apply, and
-  // since this function re-writes every target whenever anything changes, a traffic-weight
-  // change would restart every serving pod — an outage in the middle of the rollout the
-  // weights exist to avoid.
-  const { token: servingToken } = await issueServingToken(pool, deployment.id, {
+  // It goes into a Secret and the pod templates reference it by name, so the template is
+  // byte-identical across applies and a traffic-weight change does not restart the pods
+  // carrying the traffic.
+  //
+  // `ensure`, not `issue`: the token is minted once per deployment and left alone
+  // afterwards. Rotating it here would revoke the credential the *running* router is
+  // holding, and because a Secret-sourced env var is fixed at container start, nothing
+  // would restart to pick up the replacement — the router would 401 on its next poll and
+  // go on serving the last table it had. See `ensureServingToken`.
+  const secretName = servingSecretName(deployment);
+  const serving = await ensureServingToken(pool, deployment.id, {
     ttlSeconds: servingTokenTtlSeconds,
   });
-  const secretName = servingSecretName(deployment);
-  await backend.applySecret(buildServingSecretManifest(deployment, servingToken, { namespace }));
+  if (serving.created) {
+    await backend.applySecret(
+      buildServingSecretManifest(deployment, serving.token, { namespace }),
+    );
+  }
 
   for (const target of deployment.targets) {
     // `arch` overrides only what the artifact failed to record; it is per-deployment, so
@@ -906,6 +914,11 @@ export async function undeploy(pool, backend, projectName, name) {
   if (deployment.k8s_name) {
     await backend.deleteDeployment(namespace, deployment.k8s_name);
   }
+  // The token row goes with the deployment row (ON DELETE CASCADE), which is what makes
+  // the credential stop working. The Secret holding its plaintext is inert once that
+  // happens, but leaving it would accumulate one dead object per deployment ever made.
+  await backend.deleteSecret(namespace, servingSecretName(deployment));
+
   await deploymentsRepo.deleteDeployment(pool, deployment.id);
 
   return { id: deployment.id, name: deployment.name, project: deployment.project };
