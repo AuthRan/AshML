@@ -25,7 +25,7 @@ import { runOnce } from './executor.js';
 import { discoverCluster } from './nodes.js';
 import { getJob } from './jobs.js';
 import {
-  connectOrNull, connectStoreOrNull, truncateAll, uniqueName,
+  connectOrNull, connectStoreOrNull, wipeAll, uniqueName,
   SKIP_MESSAGE, STORE_SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
@@ -69,7 +69,7 @@ describe('artifacts against a real store (integration)', { skip }, () => {
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     runHeaders.clear();
     artifactJob.clear();
     backend._reset();

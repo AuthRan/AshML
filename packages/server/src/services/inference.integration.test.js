@@ -25,7 +25,7 @@ import { JobState } from '../domain/job-state.js';
 import { runOnce } from './executor.js';
 import { discoverCluster } from './nodes.js';
 import { getJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
+import { connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -69,7 +69,7 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     runHeaders.clear();
     backend._reset();
     const res = await app.inject({

@@ -23,7 +23,7 @@ import { JobState } from '../domain/job-state.js';
 import { ArtifactStatus } from '../domain/artifact-status.js';
 import { ModelStatus } from '../domain/model-status.js';
 import { discoverCluster } from '../services/nodes.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
+import { connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -59,7 +59,7 @@ describe('/metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     backend._reset();
     const res = await app.inject({
       method: 'POST',

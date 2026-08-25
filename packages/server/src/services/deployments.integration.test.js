@@ -24,7 +24,7 @@ import { runOnce } from './executor.js';
 import { discoverCluster } from './nodes.js';
 import { getJob } from './jobs.js';
 import { DeploymentStatus, statusFromObservation, syncDeployments } from './deployments.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
+import { connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -153,7 +153,7 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     runHeaders.clear();
     backend._reset();
     const res = await app.inject({

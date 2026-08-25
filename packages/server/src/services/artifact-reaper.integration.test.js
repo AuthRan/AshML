@@ -29,7 +29,7 @@ import {
   reapAbandonedArtifacts, startArtifactReaper, completeArtifact, getArtifact,
 } from './artifacts.js';
 import {
-  connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun,
+  connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun,
 } from '../test-support/db.js';
 
 const pool = await connectOrNull();
@@ -80,7 +80,7 @@ describe('artifact reaper (integration)', { skip: pool ? false : SKIP_MESSAGE },
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     backend._reset();
     const res = await app.inject({
       method: 'POST',

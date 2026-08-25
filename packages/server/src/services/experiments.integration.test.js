@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 
 import { buildApp } from '../app.js';
 import { loadConfig } from '../config.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
+import { connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -44,7 +44,7 @@ describe('experiments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
   }
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     project = await createProject();
   });
 

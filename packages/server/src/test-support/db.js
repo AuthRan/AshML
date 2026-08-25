@@ -49,12 +49,15 @@ export async function connectOrNull() {
 export const SKIP_MESSAGE =
   `PostgreSQL not reachable or not migrated at ${TEST_DATABASE_URL} — `
   + 'run `make db-test` to create and migrate a dedicated test database, or set '
-  + 'ASHML_TEST_DATABASE_URL, to include these tests. These tests TRUNCATE every table, '
+  + 'ASHML_TEST_DATABASE_URL, to include these tests. These tests delete every row, '
   + 'so they will not run against your development database.';
 
 /**
  * Deletes all rows created by tests, leaving the schema and the seeded local user.
- * Cascades handle datasets, experiments, jobs, events and quotas.
+ *
+ * Named for what it does rather than for how it did it: this was `truncateAll` until
+ * `TRUNCATE`'s per-relation file rewrite turned out to be the bulk of a seventeen-minute
+ * suite (see `WIPE_ORDER`).
  *
  * This wipes the whole database, so the integration files must not run at the same
  * time as each other — `npm test` passes `--test-concurrency=1` for exactly that reason.
@@ -63,22 +66,71 @@ export const SKIP_MESSAGE =
  * project, and narrowing that query to keep tests parallel would be distorting the
  * production path for the convenience of the tests.
  */
-export async function truncateAll(pool) {
+export async function wipeAll(pool) {
   assertDestroyable(TEST_DATABASE_URL);
-  // `authz_denials` has to be named, because it deliberately has no foreign keys: an
-  // audit row that a DELETE elsewhere can erase is not an audit row (see its migration).
-  // The property that makes it survive a deleted user is the same one that makes it
-  // survive a cascade, so a test suite has to say it means this one too.
-  await pool.query('TRUNCATE projects, authz_denials CASCADE');
+  await pool.query(`DELETE FROM ${WIPE_ORDER.join('; DELETE FROM ')}`);
 }
+
+/**
+ * Every table an integration test may leave a row in, children before parents.
+ *
+ * This used to be `TRUNCATE projects, authz_denials CASCADE`, which is one line and says
+ * what it means. It was replaced because of what it costs: `TRUNCATE` rewrites a relation
+ * file per table, and on a Docker volume that is **~170 ms each** — about 3.7 s for the
+ * twenty-odd relations the cascade reaches, paid in the `beforeEach` of every integration
+ * test. It turned a suite that CI finishes in a hundred seconds into a seventeen-minute
+ * wait on the machine the code is actually written on. The same wipe as `DELETE` is 2 ms,
+ * because nothing on disk is recreated.
+ *
+ * The cost of that is this list: `DELETE` respects foreign keys, so the order matters and
+ * a new table has to be added here. That would be a bad trade if getting it wrong were
+ * silent — a forgotten table leaks rows into the next test, which is the most confusing
+ * kind of test failure there is. It is not silent: `db.test.js` derives the same set from
+ * the catalogue and fails if this list has drifted from it.
+ *
+ * `users`, `api_tokens`, `compute_nodes` and `gpu_devices` are deliberately absent, and
+ * were absent from the `TRUNCATE` too — the seeded local administrator has to survive, and
+ * node inventory is discovered once in a suite's `before` rather than per test. Suites
+ * that want tokens gone say so themselves.
+ *
+ * `authz_denials` is here for the reason it has no foreign keys at all: an audit row that
+ * a DELETE elsewhere can erase is not an audit row (see its migration), so the property
+ * that makes it outlive a deleted user is the one that makes it outlive a cascade.
+ */
+export const WIPE_ORDER = Object.freeze([
+  // The leaves: rows that reference two parents each and are referenced by nothing.
+  'deployment_targets',
+  'workload_tokens',
+  'training_metrics',
+  'scheduling_decisions',
+  'job_events',
+  // Before `artifacts` and `experiments`: it references both with ON DELETE NO ACTION,
+  // which would refuse the delete rather than cascade it.
+  'model_versions',
+  'deployments',
+  // Before `training_jobs`, whose reference to it is ON DELETE SET NULL — so this is the
+  // one pair in the graph that points both ways, and this order is what resolves it.
+  'artifacts',
+  'training_jobs',
+  // After `training_jobs` and `model_versions`, both of which reference it NO ACTION.
+  'experiments',
+  'dataset_versions',
+  'datasets',
+  'models',
+  'resource_quotas',
+  'project_members',
+  'projects',
+  // No foreign keys in either direction, so its position is free.
+  'authz_denials',
+]);
 
 /**
  * Refuses to wipe a database that is not obviously a test database.
  *
  * Defence in depth behind the default above: pointing `ASHML_TEST_DATABASE_URL` at a
  * database with real data in it is a single mistyped variable away, and the failure is
- * silent and total — `TRUNCATE projects CASCADE` takes experiments, jobs, artifacts and
- * model versions with it, and nothing about a green test run hints that it happened.
+ * silent and total — the wipe takes experiments, jobs, artifacts and model versions with
+ * it, and nothing about a green test run hints that it happened.
  *
  * A name ending in `test` is the signal, which covers `ashml_test`, `ashml-test` and
  * plain `test`. Anything else needs the override, which exists so that a CI environment
@@ -92,12 +144,12 @@ export function assertDestroyable(url) {
   try {
     name = decodeURIComponent(new URL(url).pathname.replace(/^\//, ''));
   } catch {
-    throw new Error(`refusing to TRUNCATE: ${url} is not a parsable database URL`);
+    throw new Error(`refusing to wipe: ${url} is not a parsable database URL`);
   }
 
   if (!/(^|[-_])test$/i.test(name)) {
     throw new Error(
-      `refusing to TRUNCATE database "${name}": these tests delete every row, and the `
+      `refusing to wipe database "${name}": these tests delete every row, and the `
       + 'name does not end in "test" so it may not be a test database. Point '
       + 'ASHML_TEST_DATABASE_URL at a dedicated database (see README), or set '
       + 'ASHML_TEST_DATABASE_ALLOW_DESTRUCTIVE=true if you really mean this one.',
@@ -164,7 +216,7 @@ export const LOCAL_USER_ID = '00000000-0000-0000-0000-000000000001';
  * across every file.
  *
  * The token is minted for the seeded administrator, so tests keep the cross-project
- * visibility they were written against. `truncateAll` does not remove it: `api_tokens`
+ * visibility they were written against. `wipeAll` does not remove it: `api_tokens`
  * hangs off `users`, not `projects`.
  */
 export async function authenticateAs(app, pool, {

@@ -20,7 +20,7 @@ import { JobState } from '../domain/job-state.js';
 import { runOnce, launchJob, reconcileJob } from './executor.js';
 import { discoverCluster, listNodes } from './nodes.js';
 import { getJob, getJobEvents, cancelJob, claimNextJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs } from '../test-support/db.js';
+import { connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, authenticateAs } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -59,11 +59,11 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     // The fake cluster is wiped alongside the database. Leaving workloads behind for
     // jobs that no longer exist is not a state a real cluster and database ever share.
     backend._reset();
-    // Nodes are not project-scoped, so `truncateAll` leaves them in place. Asserted
+    // Nodes are not project-scoped, so `wipeAll` leaves them in place. Asserted
     // rather than assumed: if that ever changes, every test here fails confusingly.
     assert.ok((await listNodes(pool)).length > 0, 'the test cluster must still have a node');
     const res = await app.inject({

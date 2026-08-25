@@ -12,7 +12,7 @@ import { buildApp } from '../app.js';
 import { loadConfig } from '../config.js';
 import { lockNextQueuedJob, queueDepth } from '../repos/jobs.js';
 import { claimNextJob, getJobEvents } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs } from '../test-support/db.js';
+import { connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, authenticateAs } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -39,7 +39,7 @@ describe('job lifecycle (integration)', { skip: pool ? false : SKIP_MESSAGE }, (
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/projects',
@@ -200,7 +200,7 @@ describe('job queue (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     const res = await app.inject({
       method: 'POST',
       url: '/api/v1/projects',

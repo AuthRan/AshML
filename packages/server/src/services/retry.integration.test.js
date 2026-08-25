@@ -22,7 +22,7 @@ import { buildJobManifest } from '../k8s/manifest.js';
 import { reconcileJob, runOnce } from './executor.js';
 import { discoverCluster } from './nodes.js';
 import { considerRetry, getJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
+import { connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -61,7 +61,7 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     runHeaders.clear();
     backend._reset();
     const res = await app.inject({

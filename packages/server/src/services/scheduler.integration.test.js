@@ -22,7 +22,7 @@ import { runOnce } from './executor.js';
 import { scheduleJob, getSchedulingHistory, Placement } from './scheduler.js';
 import { discoverCluster, listNodes } from './nodes.js';
 import { getJob, claimNextJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs } from '../test-support/db.js';
+import { connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, authenticateAs } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 const GIB = 1024 ** 3;
@@ -71,7 +71,7 @@ describe('scheduler (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     await pool.query('TRUNCATE compute_nodes CASCADE');
     backend._reset();
     await discoverCluster(pool, backend, app.gpuProvider);

@@ -21,7 +21,7 @@ import { Role, Permission } from '../domain/roles.js';
 import { mintToken, TokenKind } from '../auth/tokens.js';
 import { AuditLog } from './audit.js';
 import {
-  connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, LOCAL_USER_ID,
+  connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, LOCAL_USER_ID,
 } from '../test-support/db.js';
 
 const pool = await connectOrNull();
@@ -93,7 +93,7 @@ describe('authorization audit (integration)', { skip: pool ? false : SKIP_MESSAG
     // lands in the next one's table and reads as a row that test produced. That is not a
     // contrived failure; it is how this suite first went wrong.
     await app?.audit.flush();
-    await truncateAll(pool);
+    await wipeAll(pool);
     await pool.query('TRUNCATE api_tokens CASCADE');
     await pool.query('DELETE FROM users WHERE id <> $1', [LOCAL_USER_ID]);
 

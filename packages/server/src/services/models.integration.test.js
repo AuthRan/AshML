@@ -25,7 +25,7 @@ import { ModelStatus } from '../domain/model-status.js';
 import { runOnce } from './executor.js';
 import { discoverCluster } from './nodes.js';
 import { getJob } from './jobs.js';
-import { connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
+import { connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, authenticateAs, asRun } from '../test-support/db.js';
 
 const pool = await connectOrNull();
 
@@ -64,7 +64,7 @@ describe('model registry (integration)', { skip: pool ? false : SKIP_MESSAGE }, 
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     runHeaders.clear();
     artifactJob.clear();
     backend._reset();

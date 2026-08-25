@@ -23,7 +23,7 @@ import { Role } from '../domain/roles.js';
 import { mintToken, TokenKind } from '../auth/tokens.js';
 import { issueRunToken, expireRunTokens, ensureServingToken } from './auth.js';
 import {
-  connectOrNull, truncateAll, uniqueName, SKIP_MESSAGE, LOCAL_USER_ID,
+  connectOrNull, wipeAll, uniqueName, SKIP_MESSAGE, LOCAL_USER_ID,
 } from '../test-support/db.js';
 
 const pool = await connectOrNull();
@@ -115,7 +115,7 @@ describe('auth (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => {
   });
 
   beforeEach(async () => {
-    await truncateAll(pool);
+    await wipeAll(pool);
     await pool.query('TRUNCATE api_tokens CASCADE');
     await pool.query("DELETE FROM users WHERE id <> $1", [LOCAL_USER_ID]);
 
