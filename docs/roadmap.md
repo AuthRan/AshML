@@ -268,8 +268,27 @@ whether that version serves traffic.
   30 GB checkpoint costs more than it proves — S3's ETag is kept alongside as the store's
   own answer. A `--verify-digest` path belongs with the checkpoint-resume work in Phase 5,
   where something actually loads the bytes.
-- **Garbage collection.** A PENDING artifact whose run died leaves a row and possibly a
-  partial object. Nothing sweeps them yet.
+- ~~**Garbage collection.** A PENDING artifact whose run died leaves a row and possibly a
+  partial object. Nothing sweeps them yet.~~ **Half-closed.** A reaper now settles the
+  *record*: an artifact still PENDING once its job has been terminal for longer than the
+  reap window, or PENDING past a hard maximum, becomes FAILED with a reason naming which
+  rule fired. It asks the store first and says which of the two things happened, because
+  they are not the same fact — "nothing was ever stored" is a run that failed to write,
+  and "bytes are stored that no run ever confirmed" is a file that might be a perfectly
+  good checkpoint whose confirming call was lost.
+
+  The window is the part worth stating. It has to be **longer than
+  `ASHML_RUN_TOKEN_GRACE`**, because a successful run confirms its final checkpoint after
+  the pod has exited — that grace window exists for exactly that — so a reaper that swept
+  first would mark the final model of every run that worked FAILED. The two settings look
+  unrelated; the server refuses to start with them the wrong way round rather than leaving
+  it to be discovered days later.
+
+  **The object is still not deleted**, which is the half that stays open. Reaping a record
+  is safe and inspectable; deleting bytes on a timer is neither, and the bytes it would
+  delete are the ones nobody has been able to look at yet.
+  `ashml_artifacts_reaped_total{outcome="orphaned_bytes"}` counts them so a person can
+  decide.
 - **Authentication on the ingest path.** ~~The API takes writes from inside the cluster
   and is unauthenticated, like the rest of v1 (auth is Phase 10).~~ **Closed in Phase 10.**
   A training attempt now carries a run token scoped to that job and that attempt, so the

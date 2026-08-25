@@ -105,6 +105,67 @@ export async function settleArtifact(client, id, status, { digest = '', sizeByte
   );
 }
 
+/**
+ * Artifacts that were registered and never confirmed, and are not going to be.
+ *
+ * Two ways in, because there are two ways a confirmation goes missing and only one of
+ * them involves a job that ended:
+ *
+ *   - **the job reached a terminal state and stayed there.** The usual case: a pod was
+ *     killed between registering a checkpoint and confirming it. The window has to be
+ *     wider than `ASHML_RUN_TOKEN_GRACE`, because a *successful* run's final upload is
+ *     confirmed after the pod has exited — reaping inside that window would mark the one
+ *     artifact anybody cares about FAILED (see `reapAbandonedArtifacts`).
+ *   - **it has simply been PENDING too long.** Covers the job whose terminal state was
+ *     never observed at all, which is exactly the case where nothing else will ever come
+ *     along to settle the artifact, and an artifact with no job row at all.
+ *
+ * `FOR UPDATE ... SKIP LOCKED` narrows the window in which two control-plane replicas
+ * sweeping at once pick the same rows — it does not close it, because the selecting
+ * transaction commits before the store is asked about the bytes, and holding the locks
+ * across that call is the thing `reapAbandonedArtifacts` explains it must not do. What
+ * makes a collision harmless is the settle itself: it re-locks the row and re-checks the
+ * status, so the second replica's transition is refused rather than applied twice.
+ *
+ * @param {object} client
+ * @param {object} options
+ * @param {string[]} options.terminalStates
+ * @param {number} options.afterTerminalSeconds how long after the job ended to wait
+ * @param {number} options.maxPendingSeconds the backstop, measured from registration
+ * @param {number} [options.limit] how many to take in one pass
+ */
+export async function lockAbandonedArtifacts(client, {
+  terminalStates, afterTerminalSeconds, maxPendingSeconds, limit = 50,
+}) {
+  const { rows } = await client.query(
+    `SELECT a.id, a.uri, a.name, a.job_id, a.created_at, j.state AS job_state,
+            COALESCE(j.finished_at, j.updated_at) AS job_finished_at
+     FROM artifacts a
+     LEFT JOIN training_jobs j ON j.id = a.job_id
+     WHERE a.status = 'PENDING'
+       AND (
+         (j.state = ANY($1)
+          AND COALESCE(j.finished_at, j.updated_at) < now() - ($2 * INTERVAL '1 second'))
+         OR a.created_at < now() - ($3 * INTERVAL '1 second')
+       )
+     ORDER BY a.created_at
+     LIMIT $4
+     FOR UPDATE OF a SKIP LOCKED`,
+    [terminalStates, afterTerminalSeconds, maxPendingSeconds, limit],
+  );
+  return rows;
+}
+
+/** How many artifacts are still PENDING, and how old the oldest is. For the reaper's log. */
+export async function pendingArtifactAge(client) {
+  const { rows } = await client.query(
+    `SELECT count(*)::int AS pending,
+            COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)::int AS oldest_seconds
+     FROM artifacts WHERE status = 'PENDING'`,
+  );
+  return rows[0];
+}
+
 export async function listArtifactsForJob(client, jobId, { kind = null, status = null } = {}) {
   const { rows } = await client.query(
     `SELECT ${ARTIFACT_COLUMNS} ${ARTIFACT_FROM}

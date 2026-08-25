@@ -9,6 +9,7 @@ import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { startExecutor } from './services/executor.js';
 import { startDeploymentSync } from './services/deployments.js';
+import { startArtifactReaper } from './services/artifacts.js';
 import { startDiscovery, discoverCluster } from './services/nodes.js';
 
 const config = loadConfig();
@@ -24,6 +25,7 @@ try {
 let executor = null;
 let discovery = null;
 let deploymentSync = null;
+let artifactReaper = null;
 if (config.executorEnabled) {
   try {
     // Done before the loop starts, and before the port is bound, so a broken
@@ -69,6 +71,28 @@ if (config.executorEnabled) {
     metrics: app.metrics,
     intervalMs: config.deploymentSyncIntervalMs,
   });
+
+  // Started with the executor rather than with the API, because it settles records that
+  // only the executor's half of the system creates. A read-only replica has no business
+  // deciding that somebody else's upload was abandoned.
+  if (config.artifactReaperEnabled) {
+    try {
+      artifactReaper = startArtifactReaper(app.db, app.artifactStore, {
+        logger: app.log,
+        metrics: app.metrics,
+        intervalMs: config.artifactReapIntervalMs,
+        afterTerminalSeconds: config.artifactReapAfterSeconds,
+        runTokenGraceSeconds: config.runTokenGraceSeconds,
+        maxPendingSeconds: config.artifactMaxPendingSeconds,
+      });
+    } catch (err) {
+      // The window check. A misconfiguration here does not misbehave visibly — it marks
+      // successful runs' final models FAILED, days later — so it is a startup failure
+      // with the arithmetic in the message rather than a warning nobody reads.
+      console.error(`ashml-server failed to start: ${err.message}`);
+      process.exit(1);
+    }
+  }
 }
 
 // Terminate cleanly so Kubernetes rollouts and Ctrl-C are not violent.
@@ -81,6 +105,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
       // already happened in the cluster.
       await executor?.stop();
       await deploymentSync?.stop();
+      await artifactReaper?.stop();
       await discovery?.stop();
       await app.close();
       process.exit(0);

@@ -22,7 +22,7 @@
  */
 
 import { withTransaction } from '../db/pool.js';
-import { hasLaunched } from '../domain/job-state.js';
+import { hasLaunched, OUTCOME_STATES } from '../domain/job-state.js';
 import { ArtifactStatus, transition } from '../domain/artifact-status.js';
 import * as artifactsRepo from '../repos/artifacts.js';
 import * as jobsRepo from '../repos/jobs.js';
@@ -225,6 +225,183 @@ async function settle(pool, id, toStatus, { digest, sizeBytes, metadata }) {
 
     return artifactsRepo.getArtifactById(client, id);
   });
+}
+
+// ---- reaping abandoned uploads ---------------------------------------------------
+
+/**
+ * How long after a job ends before its unconfirmed artifacts are given up on.
+ *
+ * Not a round number picked for looking sensible. It has to be **longer than
+ * `ASHML_RUN_TOKEN_GRACE`**, because a successful run's final checkpoint is confirmed
+ * after the pod has already exited — that grace window exists precisely so the last
+ * upload can land. A reaper that swept inside it would mark the one artifact anybody
+ * cares about FAILED, on the runs that worked. `startArtifactReaper` refuses to start
+ * with the two set the wrong way round rather than leaving that to be discovered.
+ */
+export const DEFAULT_REAP_AFTER_TERMINAL_SECONDS = 900;
+
+/** The backstop, for a job whose ending was never observed at all. */
+export const DEFAULT_MAX_PENDING_SECONDS = 86_400;
+
+/**
+ * Settles artifacts that were registered and never confirmed.
+ *
+ * PENDING means "a run said it was about to write this". Left alone, a pod killed
+ * between registering a checkpoint and confirming it leaves that sentence hanging for
+ * ever, and a reader cannot tell an upload still in flight from one abandoned three
+ * weeks ago. This turns the second kind into FAILED, which the lifecycle already means
+ * exactly this by (`domain/artifact-status.js`).
+ *
+ * **It asks the store first, and records the answer, because the two cases are not the
+ * same fact.** Nothing stored means the upload never landed. Bytes stored but never
+ * confirmed means something was written that no record points at — which might be a
+ * perfectly good checkpoint whose confirming call was lost, and might be a half-written
+ * file. Both become FAILED, and the reason says which, because "your checkpoint is not
+ * there" and "your checkpoint is there and AshML will not vouch for it" send a person
+ * to different places.
+ *
+ * **Nothing is deleted.** Reaping the record is safe and reversible-by-inspection;
+ * deleting bytes on a timer is neither, and the bytes it would delete are exactly the
+ * ones nobody has been able to look at yet. The count is reported instead
+ * (`ashml_artifacts_reaped_total{outcome="orphaned_bytes"}`), so an operator can decide.
+ *
+ * @returns {Promise<{reaped: number, orphanedBytes: number, missing: number, errors: number}>}
+ */
+export async function reapAbandonedArtifacts(pool, store, {
+  afterTerminalSeconds = DEFAULT_REAP_AFTER_TERMINAL_SECONDS,
+  maxPendingSeconds = DEFAULT_MAX_PENDING_SECONDS,
+  limit = 50,
+  logger = null,
+  metrics = null,
+} = {}) {
+  const summary = { reaped: 0, orphanedBytes: 0, missing: 0, errors: 0 };
+
+  // Selected in its own short transaction and released. Holding the row locks across the
+  // store lookups below would mean a slow bucket blocks a confirmation that is trying to
+  // arrive — and a confirmation arriving late is the outcome this whole function is
+  // built to avoid destroying.
+  const candidates = await withTransaction(pool, (client) =>
+    artifactsRepo.lockAbandonedArtifacts(client, {
+      terminalStates: OUTCOME_STATES,
+      afterTerminalSeconds,
+      maxPendingSeconds,
+      limit,
+    }));
+
+  for (const candidate of candidates) {
+    try {
+      const stored = await storedBytes(store, candidate.uri);
+      const reason = stored === null
+        ? reasonFor(candidate, 'nothing was ever stored at its location')
+        : reasonFor(candidate, `${stored.size_bytes} bytes are stored at its location, `
+          + 'but no run ever confirmed them');
+
+      // `failArtifact` re-locks and re-checks the status, so a confirmation that arrived
+      // between the select above and here wins: the transition PENDING -> FAILED is
+      // refused for an artifact that is already READY, and this is counted as an error
+      // rather than being allowed to overwrite it.
+      await failArtifact(pool, candidate.id, { reason });
+
+      summary.reaped += 1;
+      if (stored === null) summary.missing += 1;
+      else summary.orphanedBytes += 1;
+      metrics?.artifactsReaped?.inc({ outcome: stored === null ? 'missing' : 'orphaned_bytes' });
+
+      logger?.info(
+        { artifact_id: candidate.id, job_id: candidate.job_id, orphaned: stored !== null },
+        'reaped an artifact that was never confirmed',
+      );
+    } catch (err) {
+      summary.errors += 1;
+      logger?.warn({ err, artifact_id: candidate.id }, 'could not reap an artifact');
+    }
+  }
+
+  return summary;
+}
+
+/**
+ * Why this artifact was given up on, in a sentence that names the rule that fired.
+ *
+ * The rule is worked out from the job's *state*, not from whether there is a job row.
+ * An earlier version asked only the second question and produced "job … ended RUNNING"
+ * for every artifact caught by the backstop — a reason that contradicts itself, on
+ * precisely the case where the reader most needs to be told the job never finished.
+ */
+function reasonFor(candidate, detail) {
+  const ended = candidate.job_state !== null && OUTCOME_STATES.includes(candidate.job_state);
+  const because = ended
+    ? `job ${candidate.job_id} ended ${candidate.job_state}`
+    : 'it stayed PENDING past the maximum with its job still unfinished';
+  return `upload abandoned: ${because} and this artifact was never confirmed; ${detail}`;
+}
+
+/** What the store holds at a URI, or null. A store that cannot be asked answers null. */
+async function storedBytes(store, uri) {
+  const key = store.managed ? store.keyFromUri(uri) : null;
+  if (key === null) return null;
+  return store.head(key);
+}
+
+/**
+ * Runs the reaper on a timer.
+ *
+ * Slow, because it is looking for something that takes minutes to become true and would
+ * otherwise stay untrue for ever. One pass an hour would also work; the default is five
+ * minutes so that a killed pod's record settles inside the time somebody is still
+ * looking at it.
+ */
+export function startArtifactReaper(pool, store, {
+  intervalMs = 300_000,
+  afterTerminalSeconds = DEFAULT_REAP_AFTER_TERMINAL_SECONDS,
+  runTokenGraceSeconds = 300,
+  maxPendingSeconds = DEFAULT_MAX_PENDING_SECONDS,
+  logger = null,
+  metrics = null,
+} = {}) {
+  if (afterTerminalSeconds <= runTokenGraceSeconds) {
+    throw new Error(
+      `ASHML_ARTIFACT_REAP_AFTER=${afterTerminalSeconds}s is not longer than `
+      + `ASHML_RUN_TOKEN_GRACE=${runTokenGraceSeconds}s. A finished run confirms its last `
+      + 'checkpoint inside that grace window, so a reaper that sweeps first would mark '
+      + 'successful runs\' final models FAILED.',
+    );
+  }
+
+  let stopped = false;
+  let timer = null;
+  let settled = Promise.resolve();
+
+  async function tick() {
+    if (stopped) return;
+    try {
+      const summary = await reapAbandonedArtifacts(pool, store, {
+        afterTerminalSeconds, maxPendingSeconds, logger, metrics,
+      });
+      if (summary.reaped > 0 || summary.errors > 0) {
+        logger?.info(summary, 'artifact reaper pass');
+      }
+    } catch (err) {
+      // As with the executor: reaching here means the database is unreachable, not that
+      // one artifact was awkward. Keep looping rather than needing an operator to notice.
+      logger?.error({ err }, 'artifact reaper pass failed');
+    }
+    if (!stopped) {
+      timer = setTimeout(() => { settled = tick(); }, intervalMs);
+      timer.unref?.();
+    }
+  }
+
+  settled = tick();
+
+  return {
+    async stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      await settled.catch(() => {});
+    },
+  };
 }
 
 /**

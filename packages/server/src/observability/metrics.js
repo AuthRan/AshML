@@ -175,6 +175,13 @@ export function createMetrics({ collectDefaults = true } = {}) {
       registers: [registry],
     }),
 
+    artifactsReaped: new Counter({
+      name: `${PREFIX}artifacts_reaped_total`,
+      help: 'Artifacts registered and never confirmed, settled as FAILED. `orphaned_bytes` means something *is* stored that no record vouches for — nothing is deleted, so this is a number for a person to act on',
+      labelNames: ['outcome'],
+      registers: [registry],
+    }),
+
     scrapeErrors: new Counter({
       name: `${PREFIX}scrape_errors_total`,
       help: 'Scrapes where a snapshot could not be collected, by source',

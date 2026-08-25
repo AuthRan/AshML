@@ -237,6 +237,23 @@ ash model promote fraud-detector 1
 ash model production fraud-detector                          # what is serving, and is it verified
 ```
 
+**A run that died mid-upload does not leave PENDING behind for ever.** PENDING means "a
+run said it was about to write this", and a pod killed between registering a checkpoint
+and confirming it leaves that sentence hanging with nothing in the system able to finish
+it. A reaper settles those: once the job has been terminal for longer than
+`ASHML_ARTIFACT_REAP_AFTER`, or the artifact has been PENDING past a hard maximum, it
+becomes `FAILED` with a reason that names the rule and says which of two things happened
+— *nothing was ever stored*, or *bytes are stored that no run ever confirmed*. They are
+different facts and they send you to different places.
+
+The window has to be longer than `ASHML_RUN_TOKEN_GRACE`, because a successful run
+confirms its final checkpoint after the pod has already exited — that grace window exists
+for exactly that. A reaper that swept first would mark the final model of every run that
+worked `FAILED`, days later, quietly. The server refuses to start with the two set the
+wrong way round. The orphaned *bytes* are counted and not deleted: reaping a record is
+inspectable, deleting a file on a timer is not, and the file in question is the one nobody
+has been able to look at yet.
+
 ## The workload this was built for
 
 ResNet-18 on CIFAR-10 has now run through all of it — scheduled by AshML, executed in
@@ -907,6 +924,10 @@ docs/              architecture, roadmap, ADRs
 | `ASHML_TRUST_PROXY` | `false` | Whether `X-Forwarded-For` decides who is calling. Required behind an ingress, dangerous without one — see [How often you can call](#how-often-you-can-call) |
 | `ASHML_AUDIT_BUFFER` | `1000` | Denials held in memory before overflow is dropped. Dropped, not queued: `ashml_audit_dropped_total` counts the gap |
 | `ASHML_AUDIT_FLUSH_MS` | `2000` | How often the buffer is written |
+| `ASHML_ARTIFACT_REAP_ENABLED` | `true` | Settle artifacts that were registered and never confirmed |
+| `ASHML_ARTIFACT_REAP_AFTER` | `900` | Seconds after a job ends before its unconfirmed artifacts are given up on. **Must exceed `ASHML_RUN_TOKEN_GRACE`** — a successful run confirms its last checkpoint after the pod exits, so a shorter window would fail the final model of every run that worked. The server refuses to start otherwise |
+| `ASHML_ARTIFACT_MAX_PENDING` | `86400` | The backstop, measured from registration, for a job whose ending was never observed |
+| `ASHML_ARTIFACT_REAP_INTERVAL_MS` | `300000` | How often the reaper sweeps |
 | `ASHML_DATABASE_URL` | `postgresql://ashml:ashml@127.0.0.1:5432/ashml` | PostgreSQL connection |
 | `ASHML_DB_POOL_MAX` | `10` | Maximum pooled connections |
 | `ASHML_K8S_BACKEND` | `kubernetes` | `kubernetes` or `sim` |

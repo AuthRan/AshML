@@ -105,6 +105,24 @@ export function loadConfig(env = process.env) {
     // immediately, and it does so regardless of this.
     runTokenGraceSeconds: parseCount(env.ASHML_RUN_TOKEN_GRACE, 'ASHML_RUN_TOKEN_GRACE') ?? 300,
 
+    // Reaping artifacts that were registered and never confirmed.
+    //
+    // `reapAfterSeconds` must be **longer than `runTokenGraceSeconds` above**, and the
+    // reaper refuses to start otherwise. A successful run confirms its final checkpoint
+    // after the pod has exited — that is what the grace window is for — so a sweep that
+    // ran first would mark the final model of every run that worked FAILED. The two
+    // settings look unrelated and are not.
+    artifactReaperEnabled:
+      parseBool(env.ASHML_ARTIFACT_REAP_ENABLED, 'ASHML_ARTIFACT_REAP_ENABLED', true),
+    artifactReapIntervalMs:
+      parseLimit(env.ASHML_ARTIFACT_REAP_INTERVAL_MS, 'ASHML_ARTIFACT_REAP_INTERVAL_MS') ?? 300_000,
+    artifactReapAfterSeconds:
+      parseLimit(env.ASHML_ARTIFACT_REAP_AFTER, 'ASHML_ARTIFACT_REAP_AFTER') ?? 900,
+    // The backstop, measured from registration, for a job whose ending was never
+    // observed — the one case where nothing else will ever come along to settle it.
+    artifactMaxPendingSeconds:
+      parseLimit(env.ASHML_ARTIFACT_MAX_PENDING, 'ASHML_ARTIFACT_MAX_PENDING') ?? 86_400,
+
     // Rate limiting (Phase 10, spec §31). Two budgets — see auth/rate-limit.js for
     // which request is counted against which, and why the anonymous one is the tight
     // one.

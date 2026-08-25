@@ -262,6 +262,14 @@ nothing may resume from, register, or serve an artifact in any other status. An
 abandoned upload is marked `FAILED` and kept, so the gap stays visible rather than
 looking like it was never attempted.
 
+Marking it is the SDK's job when an upload *errors*, and a background reaper's when the
+pod does not survive to say so. The reaper's window has to be longer than the run-token
+grace, because a successful run confirms its final checkpoint after the pod has exited —
+so the two settings that look unrelated are coupled, and the server refuses to start with
+them the wrong way round. It settles the record and never deletes the object: a reaped
+row is inspectable, a file deleted on a timer is not, and the file in question is the one
+nobody has managed to look at yet.
+
 Uploads are **presigned**: registration returns a PUT URL and the pod writes straight to
 the bucket. Blobs never traverse the control plane, so the API's memory limit is not in
 the path of every model size.
