@@ -133,6 +133,67 @@ function containerEnv(job, { apiUrl = null, runToken = null } = {}) {
 }
 
 /**
+ * What every AshML-created Pod is allowed to be.
+ *
+ * A user submits an image. That image runs on the platform's cluster, so the question of
+ * what it may do once it is running is the platform's to answer, not the image's — spec
+ * §31's "do not allow arbitrary users to submit unrestricted Kubernetes resources".
+ *
+ * Most of that answer is already in the shape of this module: the container is assembled
+ * field by field from an allowlist — image, pull policy, command, args, env, resources —
+ * so there is no path by which a job spec can reach `hostNetwork`, `hostPath`, or
+ * `privileged` at all. What was missing is everything a Pod gets *by default*, which is
+ * where the interesting one lives:
+ *
+ * **`automountServiceAccountToken: false`.** Kubernetes mounts a credential for its own
+ * API into every Pod unless told not to. AshML's training pods had one at
+ * `/var/run/secrets/kubernetes.io/serviceaccount` — checked on the development cluster,
+ * not assumed — and no line of the training path has ever used it. In a default k3s
+ * install the `default` service account is granted nothing, so what that credential could
+ * do was small; what makes it worth removing is the second half of that sentence, because
+ * "granted nothing" is a property of the cluster today and a single future RoleBinding to
+ * `default` silently hands it to every training pod in the namespace.
+ *
+ * The rest are the standard three, and none of them can break a workload that was not
+ * already doing something a training job has no reason to do:
+ *
+ *   - `allowPrivilegeEscalation: false` — a setuid binary in the image cannot gain more
+ *     than the container started with.
+ *   - `capabilities: { drop: ['ALL'] }` — training needs none of them.
+ *   - `seccompProfile: RuntimeDefault` — the syscall filter the container runtime already
+ *     ships, applied rather than left at `Unconfined`.
+ *
+ * **`runAsNonRoot` is deliberately not here**, and that is the one gap this leaves. It
+ * would refuse any image that does not declare a `USER`, which includes `busybox` — the
+ * image the platform's own end-to-end test runs — so switching it on would turn a
+ * security default into "your job does not start", for images their authors have every
+ * right to have built that way. Everything else `restricted` asks for is satisfied above,
+ * so it is a one-line change the day every image in use declares a user, and the
+ * namespace is labelled to say so (`ensureNamespace`).
+ */
+export function podHardening() {
+  return {
+    // Nothing AshML runs talks to the Kubernetes API. A credential nothing uses is a
+    // credential that can only ever be taken.
+    automountServiceAccountToken: false,
+    securityContext: {
+      seccompProfile: { type: 'RuntimeDefault' },
+    },
+  };
+}
+
+/** The container half of the same answer. See `podHardening`. */
+export function containerHardening() {
+  return {
+    securityContext: {
+      allowPrivilegeEscalation: false,
+      privileged: false,
+      capabilities: { drop: ['ALL'] },
+    },
+  };
+}
+
+/**
  * Pins the Pod to the node AshML's scheduler chose.
  *
  * A `nodeSelector` on the hostname label, not `spec.nodeName`. Setting `nodeName`
@@ -196,6 +257,7 @@ export function buildJobManifest(job, {
     imagePullPolicy: job.spec.image_pull_policy ?? 'IfNotPresent',
     env: containerEnv(job, { apiUrl, runToken }),
     resources: resourceRequirements(job.resources),
+    ...containerHardening(),
   };
   if (Array.isArray(job.spec.command) && job.spec.command.length > 0) {
     container.command = job.spec.command;
@@ -221,6 +283,7 @@ export function buildJobManifest(job, {
         spec: {
           restartPolicy: 'Never',
           containers: [container],
+          ...podHardening(),
           ...podPlacement(nodeName),
         },
       },
@@ -479,6 +542,7 @@ export function buildTargetManifest(deployment, target, {
       gpu: deployment.gpu,
     }),
     ...servingProbes(),
+    ...containerHardening(),
   };
 
   return {
@@ -502,7 +566,9 @@ export function buildTargetManifest(deployment, target, {
       selector: { matchLabels: selector },
       template: {
         metadata: { labels, annotations },
-        spec: { containers: [container] },
+        // A model server answers HTTP and fetches its own weights through the AshML
+        // API. It has no more use for a Kubernetes credential than a training pod does.
+        spec: { containers: [container], ...podHardening() },
       },
     },
   };
@@ -744,6 +810,7 @@ export function buildRouterManifest(deployment, {
     // No startup probe, unlike the model server. There is no slow first load to protect:
     // the router's startup is one HTTP request, and a startup probe would only delay the
     // first liveness check in exchange for nothing.
+    ...containerHardening(),
   };
 
   return {
@@ -765,7 +832,12 @@ export function buildRouterManifest(deployment, {
     spec: {
       replicas: ROUTER_REPLICAS,
       selector: { matchLabels: selector },
-      template: { metadata: { labels }, spec: { containers: [container] } },
+      template: {
+        metadata: { labels },
+        // A router forwards HTTP and polls one AshML endpoint. Same reasoning as the
+        // model server: no Kubernetes credential, no capabilities, no escalation.
+        spec: { containers: [container], ...podHardening() },
+      },
     },
   };
 }

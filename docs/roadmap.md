@@ -1014,6 +1014,57 @@ is not. Every other id in this database cascades or nulls when its subject is de
 audit row that a DELETE can erase or anonymise is not an audit row. The subject is copied
 in as text at the time, so the record still reads after the account it names has gone.
 
+### What a pod may do in the cluster
+
+A user submits an image. That image then runs on the platform's cluster, so what it may
+do once it is running is the platform's question to answer — spec §31's "do not allow
+arbitrary users to submit unrestricted Kubernetes resources".
+
+Most of that answer turned out to be already true, by construction rather than by a
+filter. `k8s/manifest.js` assembles a container field by field from an allowlist — image,
+pull policy, command, args, env, resources — so a job spec has no path to `privileged`,
+`hostNetwork` or a `hostPath` mount at all. There is nothing to strip, because nothing is
+copied. There is now a test asserting that, so changing the builder to a merge fails
+loudly rather than quietly opening it.
+
+What was missing was everything a Pod gets *by default*, and one of those was worth
+finding. **Kubernetes mounts a credential for its own API into every Pod unless told not
+to**, and every AshML training pod had one at
+`/var/run/secrets/kubernetes.io/serviceaccount` — checked on the development cluster, not
+assumed — which no line of the training path has ever read. In a default k3s install the
+`default` service account is granted nothing, so what that credential could do was small.
+What makes it worth removing is the other half of that sentence: "granted nothing" is a
+property of the cluster *today*, and one future RoleBinding to `default` hands whatever it
+gains to every training pod in the namespace at once. Training pods, model servers and
+routers now all set `automountServiceAccountToken: false`, along with
+`allowPrivilegeEscalation: false`, `capabilities: drop: [ALL]` and the runtime's own
+seccomp profile.
+
+The half that AshML cannot provide itself is the namespace label. `ensureNamespace` now
+applies `pod-security.kubernetes.io/enforce=baseline`, so the cluster refuses a privileged
+or host-networked pod in that namespace whoever submits it — verified by asking the
+cluster to admit one:
+
+    Error from server (Forbidden): pods "psa-probe" is forbidden: violates PodSecurity
+    "baseline:latest": host namespaces (hostNetwork=true), privileged (container
+    "psa-probe" must not set securityContext.privileged=true)
+
+`enforce=baseline` and not `restricted`, and the gap between them is exactly one
+requirement: `restricted` demands `runAsNonRoot`, which refuses any image that does not
+declare a `USER` — including `busybox`, the image this platform's own end-to-end test
+runs. Turning it on would convert a security default into "your job does not start", for
+images their authors had every right to build that way. Everything *else* `restricted`
+asks for is already satisfied by the manifests above, so this is a one-word change the day
+every image in use declares a user; the namespace carries `audit=restricted` in the
+meantime so a cluster with audit logging records what it would have refused.
+
+Reasoning in [ADR 0016](adr/0016-the-clusters-own-admission-not-only-ashmls.md).
+
+`ensureNamespace` also had to start patching rather than returning early when the
+namespace exists. Applying admission labels only on *creation* would mean every cluster
+that had already run AshML — which is every cluster that matters — was the one cluster
+that never got them.
+
 ### Not built
 
 - **No identity provider.** No OIDC, no SSO, no passwords. Tokens are issued out of band
@@ -1023,6 +1074,19 @@ in as text at the time, so the record still reads after the account it names has
   AshML's own service account creates every workload, so a project's pods are isolated by
   AshML's admission checks and not by the cluster's. A compromised training image is
   therefore contained by the namespace, not by the project.
+
+  **Two parts of this closed; the per-project part did not.** See *What a pod may do in
+  the cluster*, below. The workload namespace now carries Kubernetes' own Pod Security
+  Admission labels, so `privileged`, `hostNetwork`, `hostPath` and the rest are refused by
+  the *cluster* rather than merely never emitted by AshML — which is the difference
+  between "AshML checks AshML" and a rule that also binds anything else with write access
+  to that namespace. And no AshML pod mounts a Kubernetes API credential any more; they
+  all did, and none of them ever read it.
+
+  What is still true is the sentence above it: every project's pods share one namespace
+  and one service account, so nothing stops a training pod in one project from reaching a
+  model server in another. That needs a namespace or a NetworkPolicy per project, and it
+  is the next real step here.
 - **The training run token is visible in the Job's pod spec** to anyone who can already
   read Jobs in that namespace. It is per-attempt and revoked when the attempt ends, which
   bounds the exposure, but it is not hidden. The serving token is in a Secret, for an

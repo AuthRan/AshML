@@ -197,7 +197,44 @@ export function createKubernetesBackend({
     return clients;
   }
 
-  /** Finds the Pod belonging to a Job, or null. */
+  /**
+ * The labels on the namespace AshML runs workloads in.
+ *
+ * The interesting ones are Kubernetes' built-in **Pod Security Admission**, and they are
+ * here because they are the half of spec §31 that AshML cannot provide itself. The
+ * manifest builder already refuses to put anything dangerous in a Pod — the container is
+ * assembled from an allowlist, so a job spec has no path to `privileged`, `hostNetwork`
+ * or a `hostPath` mount. But that is *AshML* checking AshML. Anything else with write
+ * access to this namespace is unconstrained, and the roadmap has said since Phase 10 that
+ * a project's pods are isolated by AshML's admission checks and not by the cluster's.
+ * A namespace label moves one of those checks to the cluster, where it applies to
+ * everything, including AshML.
+ *
+ * **`enforce: baseline`** and not `restricted`, and the difference is one requirement:
+ * `restricted` demands `runAsNonRoot`, which refuses any image that does not declare a
+ * `USER` — including `busybox`, the image this platform's own end-to-end test runs. Every
+ * *other* thing `restricted` asks for is already satisfied by `podHardening` and
+ * `containerHardening`, so this is a one-word change the day every image in use declares
+ * a user, rather than a distant ambition.
+ *
+ * `warn` is deliberately unset. It would attach a warning to every Job this server
+ * creates, saying the same sentence each time; a warning that appears on every successful
+ * operation is one an operator stops reading, which costs more than the two lines of
+ * documentation it replaces.
+ */
+function namespaceLabels() {
+  return {
+    'app.kubernetes.io/managed-by': MANAGED_BY,
+    'pod-security.kubernetes.io/enforce': 'baseline',
+    // Pinned to `latest` rather than a version: the point is to track what the cluster
+    // currently considers baseline, not to freeze a 2026 definition of it.
+    'pod-security.kubernetes.io/enforce-version': 'latest',
+    'pod-security.kubernetes.io/audit': 'restricted',
+    'pod-security.kubernetes.io/audit-version': 'latest',
+  };
+}
+
+/** Finds the Pod belonging to a Job, or null. */
   async function podFor(ns, jobName) {
     const { core } = connect();
     const pods = await core.listNamespacedPod({
@@ -289,24 +326,38 @@ export function createKubernetesBackend({
       };
     },
 
-    /** Creates the namespace if it is absent. Safe to call on every startup. */
+    /**
+     * Creates the namespace if it is absent, and keeps its labels current either way.
+     *
+     * Safe to call on every startup, and it has to be: the labels below are Kubernetes'
+     * own admission control, and a namespace created by an older version of this server —
+     * or by hand — would otherwise never acquire them. An earlier version returned as soon
+     * as the namespace existed, which meant every cluster that had ever run AshML was the
+     * one cluster that would not get them.
+     */
     async ensureNamespace() {
       const { core } = connect();
+      let exists = true;
       try {
         await core.readNamespace({ name: namespace });
-        return;
       } catch (err) {
         if (statusOf(err) !== 404) throw err;
+        exists = false;
+      }
+
+      if (exists) {
+        // Merge-patch: it sets the labels below and leaves anything else on the
+        // namespace alone, so a label somebody else put there is not collateral.
+        await core.patchNamespace(
+          { name: namespace, body: { metadata: { labels: namespaceLabels() } } },
+          k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
+        );
+        return;
       }
 
       try {
         await core.createNamespace({
-          body: {
-            metadata: {
-              name: namespace,
-              labels: { 'app.kubernetes.io/managed-by': MANAGED_BY },
-            },
-          },
+          body: { metadata: { name: namespace, labels: namespaceLabels() } },
         });
       } catch (err) {
         // Another server replica won the race; that is the outcome we wanted.

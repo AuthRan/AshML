@@ -349,7 +349,19 @@ buffered and batched — an INSERT on a path whose rate the caller chooses is th
 hazard the rate limiter above addresses — and overflow is dropped with a counter rather
 than queued. ADR 0015.
 
-**Not built:** no identity provider, no Kubernetes RBAC or per-project service accounts.
+**What a pod is allowed to be is the cluster's answer, not only AshML's.** The manifest
+builder assembles a container from an allowlist, so a job spec has no path to
+`privileged`, `hostNetwork` or a `hostPath` mount — but that is AshML checking AshML. The
+workload namespace therefore carries `pod-security.kubernetes.io/enforce=baseline`, which
+binds anything with write access to it. Every AshML pod also runs with
+`automountServiceAccountToken: false`: Kubernetes mounts an API credential into every Pod
+by default, AshML's pods all had one, and none of them has ever read it. `restricted`
+rather than `baseline` needs only `runAsNonRoot`, which would refuse any image without a
+declared `USER` — including the one the end-to-end test runs.
+
+**Not built:** no identity provider, no per-project service accounts or network isolation
+— every project's pods share one namespace, so what constrains them is what they *are*,
+not who they can reach.
 AshML's own service account creates every workload, so a project's pods are isolated by
 AshML's admission checks and not by the cluster's. Rate limiting counts in one process, so
 two API replicas are two budgets, and the audit trail records refusals rather than

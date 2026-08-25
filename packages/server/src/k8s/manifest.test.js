@@ -203,4 +203,63 @@ describe('buildJobManifest', () => {
       /spec\.image is required/,
     );
   });
+
+  describe('what the Pod is allowed to be', () => {
+    test('no Kubernetes credential is mounted into a training pod', () => {
+      // The one that was actually there. Kubernetes mounts a token for its own API into
+      // every Pod unless told not to, and AshML's training pods had one at
+      // /var/run/secrets/kubernetes.io/serviceaccount that no line of the training path
+      // has ever read. What makes it worth removing is not what the default service
+      // account can do today — nothing — but that a single future RoleBinding to
+      // `default` would hand whatever it gains to every training pod in the namespace.
+      const pod = buildJobManifest(makeJob()).spec.template.spec;
+      assert.equal(pod.automountServiceAccountToken, false);
+    });
+
+    test('the container starts with no capabilities and cannot gain any', () => {
+      const container = buildJobManifest(makeJob()).spec.template.spec.containers[0];
+      assert.equal(container.securityContext.allowPrivilegeEscalation, false);
+      assert.equal(container.securityContext.privileged, false);
+      assert.deepEqual(container.securityContext.capabilities.drop, ['ALL']);
+    });
+
+    test('the runtime\'s own syscall filter is applied rather than left off', () => {
+      const pod = buildJobManifest(makeJob()).spec.template.spec;
+      assert.deepEqual(pod.securityContext.seccompProfile, { type: 'RuntimeDefault' });
+    });
+
+    test('runAsNonRoot is deliberately absent, and this is the note saying so', () => {
+      // Not an oversight and not a preference. Setting it would refuse every image that
+      // does not declare a USER — including `busybox`, which `make e2e` runs — turning a
+      // security default into "your job does not start" for images their authors had
+      // every right to build that way. Everything else `restricted` asks for is above, so
+      // the day every image in use declares a user this is a one-line change. If someone
+      // adds it, this test should be deleted with an eye on the e2e suite, not quietly
+      // updated.
+      const pod = buildJobManifest(makeJob()).spec.template.spec;
+      assert.equal(pod.securityContext.runAsNonRoot, undefined);
+    });
+
+    test('a job spec cannot reach a dangerous Pod field, because it is never copied', () => {
+      // The container is assembled from an allowlist rather than merged from the spec, so
+      // this is a property of the shape of the builder rather than of a filter that could
+      // be forgotten. The assertion is here so that changing it to a merge fails loudly.
+      const manifest = buildJobManifest(makeJob({
+        spec: {
+          image: 'busybox',
+          hostNetwork: true,
+          hostPID: true,
+          privileged: true,
+          volumes: [{ name: 'root', hostPath: { path: '/' } }],
+          securityContext: { runAsUser: 0 },
+        },
+      }));
+      const pod = manifest.spec.template.spec;
+      assert.equal(pod.hostNetwork, undefined);
+      assert.equal(pod.hostPID, undefined);
+      assert.equal(pod.volumes, undefined);
+      assert.equal(pod.securityContext.runAsUser, undefined);
+      assert.equal(pod.containers[0].securityContext.privileged, false);
+    });
+  });
 });

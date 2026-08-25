@@ -14,7 +14,7 @@ verify artifacts, version models, and serve them with real traffic splitting.**
 [**▶ Live demo**](https://authran.github.io/AshML/demo/) ·
 [**Project site**](https://authran.github.io/AshML/) ·
 [**Architecture**](docs/architecture/architecture.md) ·
-[**Decisions (15 ADRs)**](docs/adr/) ·
+[**Decisions (16 ADRs)**](docs/adr/) ·
 [**Quick start**](#quick-start) ·
 [**What is not built**](#known-limitations)
 
@@ -569,6 +569,53 @@ Two things it does not do, both worth knowing before this is put behind anything
 Why it is shaped this way, including why the anonymous number is higher than it looks
 like it should be, is [ADR 0014](docs/adr/0014-two-rate-limits-and-where-each-one-runs.md).
 
+### What a pod may do in the cluster
+
+The section above is about what credentials a pod carries. This one is about what it may
+do once it is running — because you submit an image, and it then runs on the platform's
+cluster.
+
+Most of that answer is the shape of the code rather than a filter: `k8s/manifest.js`
+assembles a container field by field from an allowlist — image, pull policy, command,
+args, env, resources — so a job spec has no path to `privileged`, `hostNetwork` or a
+`hostPath` mount at all. Nothing is stripped because nothing is copied, and there is a
+test asserting exactly that, so changing it to a merge fails loudly.
+
+What *was* missing is what a Pod gets by default. **Kubernetes mounts a credential for
+its own API into every Pod unless told not to**, and every AshML pod had one at
+`/var/run/secrets/kubernetes.io/serviceaccount` that nothing in AshML has ever read. The
+default service account is granted nothing today — which is a fact about the cluster
+today, and one future RoleBinding away from being handed to every training pod at once.
+Training pods, model servers and routers now all run with
+`automountServiceAccountToken: false`, `allowPrivilegeEscalation: false`,
+`capabilities: drop: [ALL]` and the runtime's own seccomp profile. On the development
+cluster they now mount no volumes at all.
+
+The half AshML cannot do for itself is the namespace label. The workload namespace carries
+`pod-security.kubernetes.io/enforce=baseline`, so the **cluster** refuses a privileged or
+host-networked pod there whoever submits it — the difference between AshML checking AshML
+and a rule that binds anything with write access to that namespace:
+
+```console
+$ kubectl -n ashml-jobs run psa-probe --image=busybox:1.36 --dry-run=server     --overrides='{"spec":{"hostNetwork":true,…,"privileged":true}}'
+Error from server (Forbidden): pods "psa-probe" is forbidden: violates PodSecurity
+"baseline:latest": host namespaces (hostNetwork=true), privileged (container
+"psa-probe" must not set securityContext.privileged=true)
+```
+
+`baseline` and not `restricted`, and the gap is one requirement: `restricted` demands
+`runAsNonRoot`, which refuses any image that does not declare a `USER` — including
+`busybox`, which `make e2e` runs. That would turn a security default into "your job does
+not start" for images their authors had every right to build that way. Everything else
+`restricted` asks for is already satisfied, so it is a one-word change the day every image
+in use declares a user.
+
+**Still true, and the next real step:** every project's pods share one namespace and one
+service account, so nothing stops a training pod in one project reaching a model server in
+another. That needs a namespace or a NetworkPolicy per project.
+[ADR 0016](docs/adr/0016-the-clusters-own-admission-not-only-ashmls.md) has the reasoning,
+including why `baseline` and not `restricted`.
+
 ### What it refused, and who it refused
 
 ```bash
@@ -1103,11 +1150,14 @@ functionality, scheduling, distributed training, or performance numbers.**
    frontier-model project.
 3. **AshGPU is not integrated.** The provider seam exists; the implementation does not.
 4. **Authentication has no identity provider.** Tokens are issued out of band and `ash
-   login` stores one — no OIDC, no SSO, no passwords. There is also no Kubernetes RBAC:
-   AshML's own service account creates every workload, so a project's pods are isolated by
-   AshML's admission checks rather than by the cluster's. Rate limiting exists but counts
-   in one process, so two API replicas are two budgets; the audit trail records refusals
-   and not successful privileged actions, and nothing prunes it.
+   login` stores one — no OIDC, no SSO, no passwords. **Projects are not isolated from each
+   other inside the cluster:** every project's pods share one namespace and one service
+   account, so a pod in one project can reach a model server in another. Pods are hardened
+   and the namespace enforces Kubernetes' `baseline` policy (see
+   [What a pod may do in the cluster](#what-a-pod-may-do-in-the-cluster)), but that
+   constrains what a pod *is*, not who it can talk to. Rate limiting counts in one process,
+   so two API replicas are two budgets; the audit trail records refusals and not successful
+   privileged actions, and nothing prunes it.
    [ADR 0013](docs/adr/0013-tokens-for-people-and-tokens-for-pods.md) lists the rest.
 
 ## License

@@ -119,6 +119,19 @@ describe("one version's Deployment", () => {
     assert.equal(build({}, { replicas: 3 }).spec.replicas, 3);
   });
 
+  test('a model server carries no Kubernetes credential and no capabilities', () => {
+    // It fetches its own weights through the AshML API with the deployment's serving
+    // token. The Kubernetes credential Pods get by default is one more thing that could
+    // be taken from a pod exposed to inference traffic, in exchange for nothing.
+    const pod = build().spec.template.spec;
+    assert.equal(pod.automountServiceAccountToken, false);
+    assert.deepEqual(pod.securityContext.seccompProfile, { type: 'RuntimeDefault' });
+
+    const container = pod.containers[0];
+    assert.equal(container.securityContext.allowPrivilegeEscalation, false);
+    assert.deepEqual(container.securityContext.capabilities.drop, ['ALL']);
+  });
+
   test('a version at weight 0 runs no pods', () => {
     // Out of rotation is not the same as deleted: the objects and the row stay, so
     // putting the version back is a weight change rather than a redeploy. Running pods
@@ -421,5 +434,19 @@ describe('the router', () => {
     // So a pod that ended up running the wrong image fails to bind rather than answering
     // as the wrong thing.
     assert.notEqual(ROUTER_PORT, SERVING_PORT);
+  });
+
+  test('carries no Kubernetes credential and no capabilities', () => {
+    // A router forwards HTTP and polls one AshML endpoint. It has no more use for a
+    // Kubernetes API token than a training pod does, and it is the pod carrying every
+    // production request — so it is the last one that should be holding a credential
+    // nothing reads.
+    const pod = router().spec.template.spec;
+    assert.equal(pod.automountServiceAccountToken, false);
+    assert.deepEqual(pod.securityContext.seccompProfile, { type: 'RuntimeDefault' });
+
+    const container = pod.containers[0];
+    assert.equal(container.securityContext.allowPrivilegeEscalation, false);
+    assert.deepEqual(container.securityContext.capabilities.drop, ['ALL']);
   });
 });
