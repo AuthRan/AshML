@@ -17,7 +17,7 @@
 # and the cost of being too broad is that the project's *headline* claim, the Phase 2 exit
 # criterion, was verified only when its author remembered to run it.
 #
-# So `make e2e` runs here, in the `e2e` job below. What it asserts does not depend on the
+# So `make e2e` runs here, in the `e2e` job below, and `make e2e-isolation` beside it. What it asserts does not depend on the
 # runner resembling a real cluster: a job submitted through the API becomes a Kubernetes
 # Job, runs a real container, and reaches SUCCEEDED through *observed Pod status* — with
 # every claim cross-checked against `kubectl`, so a pass cannot be produced by the control
@@ -239,6 +239,19 @@ jobs:
       - name: End-to-end against k3d
         run: make e2e
 
+      # Here for the same reason, and it passes the same test: what it asserts does not
+      # depend on the runner resembling a real cluster. It asks whether a pod in one
+      # project can open a socket to a pod in another, by running `wget` inside a real
+      # container — a question about the CNI, which a two-core runner has as much of as a
+      # workstation does. It needs no built image: busybox serves the page and fetches it.
+      #
+      # And it is worth CI's minutes precisely because it cannot be checked any other way.
+      # A NetworkPolicy is an object every cluster accepts and only some enforce, so a
+      # unit test on the manifest would stay green through a regression that removed the
+      # isolation entirely.
+      - name: Per-project network isolation against k3d
+        run: make e2e-isolation
+
       # Only on failure, and worth the lines: a red tick that says "timed out waiting for
       # SUCCEEDED" and nothing else costs a full re-run to learn anything from.
       - name: What the cluster thought
@@ -246,5 +259,6 @@ jobs:
         run: |
           kubectl --context k3d-ashml get nodes -o wide || true
           kubectl --context k3d-ashml get jobs,pods -n ashml-jobs -o wide || true
+          kubectl --context k3d-ashml get networkpolicy -n ashml-jobs -o yaml || true
           kubectl --context k3d-ashml describe pods -n ashml-jobs || true
           kubectl --context k3d-ashml logs -n ashml-jobs --all-containers --tail=100 -l app=ashml || true

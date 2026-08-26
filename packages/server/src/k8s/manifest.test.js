@@ -9,7 +9,14 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildJobManifest, kubeJobName, MANAGED_BY } from './manifest.js';
+import {
+  buildJobManifest,
+  kubeJobName,
+  MANAGED_BY,
+  DEFAULT_CLUSTER_POD_CIDR,
+  buildProjectNetworkPolicyManifest,
+  projectNetworkPolicyName,
+} from './manifest.js';
 
 /** A job shaped exactly as the repo returns one. */
 function makeJob(overrides = {}) {
@@ -261,5 +268,97 @@ describe('buildJobManifest', () => {
       assert.equal(pod.securityContext.runAsUser, undefined);
       assert.equal(pod.containers[0].securityContext.privileged, false);
     });
+  });
+});
+
+describe('the per-project network policy', () => {
+  const policy = (project = 'vision', options = {}) =>
+    buildProjectNetworkPolicyManifest(project, options);
+
+  /** The rule that allows a project to reach the world but not the cluster's pods. */
+  const worldRule = (manifest) =>
+    manifest.spec.egress.find((rule) => rule.to.some((peer) => peer.ipBlock));
+
+  test('is named for the project and selects exactly that project\'s pods', () => {
+    const manifest = policy('vision');
+    assert.equal(manifest.metadata.name, 'ashml-project-vision');
+    assert.equal(manifest.metadata.name, projectNetworkPolicyName('vision'));
+    assert.deepEqual(manifest.spec.podSelector, {
+      matchLabels: { 'ashml.io/project': 'vision' },
+    });
+    assert.equal(manifest.metadata.labels['app.kubernetes.io/managed-by'], MANAGED_BY);
+  });
+
+  test('two projects produce two policies that cannot collide', () => {
+    assert.notEqual(policy('vision').metadata.name, policy('speech').metadata.name);
+  });
+
+  test('constrains egress and says nothing about ingress', () => {
+    // Naming Ingress here — even with no rules under it — would deny every inbound
+    // connection to the project, including the kubelet's readiness probes and the API
+    // server's /proxy, which is how `callService` reaches a model server. That failure
+    // is invisible on a one-node cluster and intermittent on two, so the assertion is
+    // on the absence rather than on the presence of what replaced it.
+    const manifest = policy();
+    assert.deepEqual(manifest.spec.policyTypes, ['Egress']);
+    assert.equal(manifest.spec.ingress, undefined);
+  });
+
+  test('allows the project to reach its own pods, on any port', () => {
+    const rule = policy('vision').spec.egress.find((r) => r.to.some((peer) => peer.podSelector));
+    assert.deepEqual(rule.to[0].podSelector, {
+      matchLabels: { 'ashml.io/project': 'vision' },
+    });
+    // No `ports`: a router talks to model servers on 8081, a training pod might talk to
+    // anything, and enumerating that is a list this file would get wrong.
+    assert.equal(rule.ports, undefined);
+  });
+
+  test('allows DNS, on TCP as well as UDP', () => {
+    const rule = policy().spec.egress.find((r) => (
+      r.to.some((peer) => peer.namespaceSelector)
+    ));
+    assert.deepEqual(rule.to[0].namespaceSelector, {
+      matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' },
+    });
+    // TCP because a large answer falls back to it, and a resolver that works until a
+    // response crosses 512 bytes is worse than one that does not work at all.
+    assert.deepEqual(rule.ports, [
+      { protocol: 'UDP', port: 53 },
+      { protocol: 'TCP', port: 53 },
+    ]);
+  });
+
+  test('allows everything that is not a pod in this cluster', () => {
+    // The control plane on the host, the artifact store, a dataset on the internet. This
+    // is a boundary between projects, not a firewall around user code.
+    const rule = worldRule(policy());
+    assert.equal(rule.to[0].ipBlock.cidr, '0.0.0.0/0');
+    assert.deepEqual(rule.to[0].ipBlock.except, [DEFAULT_CLUSTER_POD_CIDR]);
+  });
+
+  test('excludes the cluster it is actually given, not the default one', () => {
+    const rule = worldRule(policy('vision', { clusterPodCidr: '10.244.0.0/16' }));
+    assert.deepEqual(rule.to[0].ipBlock.except, ['10.244.0.0/16']);
+  });
+
+  test('no rule reaches another project, which is the whole point', () => {
+    const manifest = policy('vision');
+    const selectors = manifest.spec.egress.flatMap((rule) => (
+      rule.to.map((peer) => peer.podSelector?.matchLabels?.['ashml.io/project'] ?? null)
+    ));
+    assert.ok(selectors.every((project) => project === null || project === 'vision'));
+  });
+
+  test('lands in the namespace it is told to', () => {
+    assert.equal(policy('vision').metadata.namespace, 'ashml-jobs');
+    assert.equal(policy('vision', { namespace: 'other' }).metadata.namespace, 'other');
+  });
+
+  test('refuses to build a policy that selects nothing', () => {
+    // An empty podSelector matches every pod in the namespace, so a missing project would
+    // not produce a useless object — it would produce one that governs all of them.
+    assert.throws(() => buildProjectNetworkPolicyManifest(''), /needs a project/);
+    assert.throws(() => buildProjectNetworkPolicyManifest(null), /needs a project/);
   });
 });

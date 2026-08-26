@@ -78,6 +78,11 @@ who it can reach. The next real step is a namespace per project or a default-den
 NetworkPolicy, and the second is cheaper — k3s ships a NetworkPolicy controller, so it
 would be enforced rather than declarative.
 
+> **Done, by the second route.** [ADR 0017](0017-egress-is-the-side-that-can-be-enforced.md)
+> gives each project a NetworkPolicy — written as egress, for a reason the ingress version
+> only reveals on a two-node cluster. What remains of the paragraph above is the namespace
+> and the service account, which are still shared.
+
 ## Consequences
 - Training pods on the development cluster now mount no volumes at all.
 - No image needs rebuilding: this is in the manifests, not in the containers. Running

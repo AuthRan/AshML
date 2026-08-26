@@ -11,7 +11,12 @@ import https from 'node:https';
 import * as k8s from '@kubernetes/client-node';
 
 import { Phase, registerBackend, observationFromJobStatus } from './backend.js';
-import { MANAGED_BY } from './manifest.js';
+import {
+  MANAGED_BY,
+  DEFAULT_CLUSTER_POD_CIDR,
+  buildProjectNetworkPolicyManifest,
+} from './manifest.js';
+import { cidrContains, isIpv4Cidr, podCidrsOf } from './cidr.js';
 
 /** @returns {number|null} the HTTP status of a client error, or null if it is not one. */
 function statusOf(err) {
@@ -149,9 +154,13 @@ function parseMemory(quantity) {
  *   resolution order, which also picks up in-cluster credentials
  * @param {string} [options.kubeconfigContext] which context in that file to use;
  *   defaults to whatever `current-context` says
+ * @param {boolean} [options.networkPolicyEnabled] apply the per-project NetworkPolicy
+ * @param {string} [options.clusterPodCidr] the addresses this cluster gives to pods;
+ *   the policy's "everything that is not a pod here" rule is written against it
  */
 export function createKubernetesBackend({
   namespace = 'ashml-jobs', kubeconfig = null, kubeconfigContext = null,
+  networkPolicyEnabled = true, clusterPodCidr = DEFAULT_CLUSTER_POD_CIDR,
 } = {}) {
   // Credentials are resolved on first use, not here. Constructing a backend is
   // therefore pure, which is what lets `buildApp` decorate one unconditionally —
@@ -189,6 +198,7 @@ export function createKubernetesBackend({
       core: kc.makeApiClient(k8s.CoreV1Api),
       batch: kc.makeApiClient(k8s.BatchV1Api),
       apps: kc.makeApiClient(k8s.AppsV1Api),
+      networking: kc.makeApiClient(k8s.NetworkingV1Api),
       // Kept alongside the generated clients because `callService` needs the config
       // itself, not an API client: the generated proxy method cannot carry a request
       // body, so that one request is built by hand against the same credentials.
@@ -363,6 +373,100 @@ function namespaceLabels() {
         // Another server replica won the race; that is the outcome we wanted.
         if (statusOf(err) !== 409) throw err;
       }
+    },
+
+    /**
+     * Puts the project's network boundary in place, before anything of that project's
+     * runs.
+     *
+     * Called on every launch and every deployment apply rather than once, and it is one
+     * API call either way: a policy created at startup and deleted by hand at noon would
+     * otherwise stay deleted until the next restart, which is a security control whose
+     * absence nothing reports. Applying it on the path that needs it means the boundary
+     * is re-asserted by the same action that creates the thing it protects.
+     *
+     * **Before** the workload, not after. The gap between a pod starting and its policy
+     * arriving is a real window, small and entirely avoidable by ordering. A failure here
+     * therefore fails the launch: a training pod that runs without its boundary is a
+     * quieter outcome than one that does not run, and the quieter outcome is the wrong
+     * one.
+     *
+     * Replaced rather than left alone when it already exists, like a Secret and unlike a
+     * Service — the whole point of the object is its contents, and this server's idea of
+     * what the rules should be is newer than a policy written by an older version of it.
+     */
+    async ensureProjectIsolation(project) {
+      if (!networkPolicyEnabled) return;
+
+      const manifest = buildProjectNetworkPolicyManifest(project, {
+        namespace, clusterPodCidr,
+      });
+      const { networking } = connect();
+      try {
+        await networking.createNamespacedNetworkPolicy({ namespace, body: manifest });
+      } catch (err) {
+        if (statusOf(err) !== 409) throw err;
+        await networking.replaceNamespacedNetworkPolicy({
+          namespace,
+          name: manifest.metadata.name,
+          body: manifest,
+        });
+      }
+    },
+
+    /**
+     * Checks the configured pod CIDR against what the cluster's nodes actually report.
+     *
+     * The one setting in the isolation policy that can be wrong without anything
+     * failing. `ASHML_CLUSTER_POD_CIDR` decides which addresses the policy treats as
+     * "outside this cluster and therefore allowed"; set too narrow, the pods it misses
+     * are exactly the pods it was meant to exclude, and a project's egress to another
+     * project's model server is permitted by the rule written to forbid it. Nothing
+     * errors. Nothing logs. The boundary is simply not there for those nodes.
+     *
+     * So it is compared with `spec.podCIDR` on every node, at startup, and the answer is
+     * a list of sentences for the log rather than a thrown error: a cluster whose node
+     * ranges do not match is a cluster that needs the operator to look, not one this
+     * server should refuse to run against — the policy is still enforced for every node
+     * that *is* covered, and exiting would take that away too.
+     *
+     * @returns {Promise<string[]>} what an operator needs to be told; empty when it agrees
+     */
+    async verifyClusterPodCidr() {
+      if (!networkPolicyEnabled) return [];
+
+      const warnings = [];
+      if (!isIpv4Cidr(clusterPodCidr)) {
+        return [
+          `ASHML_CLUSTER_POD_CIDR="${clusterPodCidr}" is not an IPv4 CIDR block; `
+          + 'per-project network isolation cannot be trusted until it is one',
+        ];
+      }
+
+      const { core } = connect();
+      const nodes = (await core.listNode()).items ?? [];
+      for (const node of nodes) {
+        const name = node.metadata?.name ?? '(unnamed node)';
+        for (const cidr of podCidrsOf(node)) {
+          if (!isIpv4Cidr(cidr)) {
+            warnings.push(
+              `node ${name} gives pods ${cidr}, which is not IPv4: the per-project `
+              + 'network policy excludes IPv4 pod addresses only, so traffic between '
+              + 'projects over IPv6 is not refused',
+            );
+            continue;
+          }
+          if (!cidrContains(clusterPodCidr, cidr)) {
+            warnings.push(
+              `node ${name} gives pods ${cidr}, which is outside `
+              + `ASHML_CLUSTER_POD_CIDR=${clusterPodCidr}: pods on that node are treated `
+              + 'as outside the cluster, so other projects may reach them. Widen the '
+              + 'setting to cover every node.',
+            );
+          }
+        }
+      }
+      return warnings;
     },
 
     /**

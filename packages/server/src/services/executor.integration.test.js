@@ -110,6 +110,33 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     assert.match(job.k8s_job_name, /^ashml-/);
   });
 
+  test('the project is isolated before its pod exists, not after', async () => {
+    // Order, not occurrence. A pod that starts before its NetworkPolicy arrives spends
+    // that window able to reach every other project, and nothing observes the window or
+    // reports it afterwards — so the assertion is that the launch *fails* when the
+    // boundary cannot be drawn, rather than proceeding without it.
+    const submitted = await submit();
+    const job = await claimNextJob(pool);
+    assert.equal(job.id, submitted.id);
+
+    const refuses = {
+      ...backend,
+      isolatedProjects: new Set(),
+      async ensureProjectIsolation() { throw new Error('no NetworkPolicy for you'); },
+      async createJob() { assert.fail('the Job must not be created without the policy'); },
+    };
+    await assert.rejects(
+      launchJob(pool, refuses, job, {}),
+      /no NetworkPolicy for you/,
+    );
+
+    // And on the ordinary path the policy is asked for by name. Cleared first, because
+    // the sim backend outlives one test and a stale entry would prove nothing.
+    backend.isolatedProjects.clear();
+    await runOnce(pool, backend);
+    assert.ok(backend.isolatedProjects.has(project.name));
+  });
+
   test('a pending pod does not move the job off STARTING', async () => {
     const submitted = await submit();
     await runOnce(pool, backend);

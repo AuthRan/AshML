@@ -5,6 +5,8 @@
  * dev and in Kubernetes (12-factor). Defaults are chosen for the development host.
  */
 
+import { DEFAULT_CLUSTER_POD_CIDR } from './k8s/manifest.js';
+
 export function loadConfig(env = process.env) {
   const port = Number.parseInt(env.ASHML_PORT ?? '8080', 10);
   if (Number.isNaN(port) || port < 1 || port > 65535) {
@@ -39,6 +41,23 @@ export function loadConfig(env = process.env) {
     // so on a workstation with more than one cluster, leaving this unset means a
     // control plane that comes back from a restart pointed somewhere else.
     kubeconfigContext: env.ASHML_KUBECONFIG_CONTEXT ?? null,
+
+    // Per-project network isolation (Phase 10, spec §31).
+    //
+    // On by default, like authentication and the rate limiter, and off only by saying so.
+    // A boundary that appears when a variable happens to be set is one nobody can state
+    // the presence of.
+    //
+    // The CIDR is the addresses this cluster hands to pods, and it is what the policy's
+    // "everything that is not a pod here" rule is written against (`manifest.js`). The
+    // default is k3s's, which is what `make cluster` brings up; a cluster configured with
+    // a different pod network needs this set, and the control plane compares it against
+    // every node's `spec.podCIDR` at startup and says so if they disagree, because too
+    // narrow a value does not fail — it quietly permits the traffic it was written to
+    // refuse.
+    networkPolicyEnabled:
+      parseBool(env.ASHML_NETWORK_POLICY_ENABLED, 'ASHML_NETWORK_POLICY_ENABLED', true),
+    clusterPodCidr: env.ASHML_CLUSTER_POD_CIDR ?? DEFAULT_CLUSTER_POD_CIDR,
 
     // The executor is what makes jobs actually run. It is disabled only for a server
     // deliberately brought up as a read-only API replica.

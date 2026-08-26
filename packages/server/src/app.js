@@ -122,6 +122,8 @@ export async function buildApp(config, {
       namespace: config.k8sNamespace,
       kubeconfig: config.kubeconfig,
       kubeconfigContext: config.kubeconfigContext,
+      networkPolicyEnabled: config.networkPolicyEnabled,
+      clusterPodCidr: config.clusterPodCidr,
     });
   } catch (err) {
     throw new Error(

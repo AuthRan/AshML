@@ -297,6 +297,17 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     assert.ok(deployment.endpoint_url, 'an endpoint should be recorded once the Service exists');
   });
 
+  test('a model server is not created before its project has a network boundary', async () => {
+    // The pod another project would most like to reach: it holds a model, it answers
+    // HTTP, and it sits in the namespace every project shares. Its NetworkPolicy has to
+    // exist by the time it does.
+    const { model } = await seedModel();
+    backend.isolatedProjects.clear();
+
+    assert.equal((await deploy(model)).statusCode, 200);
+    assert.ok(backend.isolatedProjects.has(project.name));
+  });
+
   test('the architecture comes from what the run recorded, not from the operator', async () => {
     const { model } = await seedModel({ arch: 'resnet18-cifar' });
     const deployment = (await deploy(model)).json();

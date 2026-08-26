@@ -43,6 +43,29 @@ if (config.executorEnabled) {
     process.exit(1);
   }
 
+  // Said out loud at startup, because a NetworkPolicy is an object every cluster accepts
+  // and only some clusters enforce. The line names the pod CIDR the rules are written
+  // against; the warnings that follow are the cluster disagreeing with it, which is the
+  // one way this control can be absent while looking present (`k8s/cidr.js`).
+  // Only for a real cluster. The `sim` backend has no network, so announcing a boundary
+  // it does not have would be the one thing this project's logs must never do (spec
+  // Rule 5) — the backend it is running is already in the "ready" line below.
+  if (config.networkPolicyEnabled && app.k8s.simulated !== true) {
+    app.log.info(
+      { cluster_pod_cidr: config.clusterPodCidr },
+      'per-project network isolation is on: each project may reach its own pods, DNS and '
+      + 'everything outside the cluster pod network, and no other project',
+    );
+    for (const warning of await app.k8s.verifyClusterPodCidr()) {
+      app.log.warn({ warning }, 'per-project network isolation');
+    }
+  } else if (!config.networkPolicyEnabled) {
+    app.log.warn(
+      'ASHML_NETWORK_POLICY_ENABLED=false: nothing stops one project\'s pods from '
+      + "reaching another project's",
+    );
+  }
+
   // One discovery pass before the executor starts. Without it the first scheduling
   // pass runs against an empty node table and every job is refused for "no compute
   // nodes are registered" — technically true, and completely misleading.

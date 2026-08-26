@@ -11,6 +11,8 @@
  *   {
  *     name: string,
  *     ensureNamespace(): Promise<void>,
+ *     ensureProjectIsolation(project): Promise<void>,
+ *     verifyClusterPodCidr(): Promise<string[]>,
  *     listNodes(): Promise<NodeInfo[]>,
  *     createJob(manifest): Promise<void>,
  *     observeJob(namespace, name): Promise<Observation|null>,

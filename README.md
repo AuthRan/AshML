@@ -610,11 +610,58 @@ not start" for images their authors had every right to build that way. Everythin
 `restricted` asks for is already satisfied, so it is a one-word change the day every image
 in use declares a user.
 
-**Still true, and the next real step:** every project's pods share one namespace and one
-service account, so nothing stops a training pod in one project reaching a model server in
-another. That needs a namespace or a NetworkPolicy per project.
 [ADR 0016](docs/adr/0016-the-clusters-own-admission-not-only-ashmls.md) has the reasoning,
 including why `baseline` and not `restricted`.
+
+### One project cannot reach another's pods
+
+Everything above governs what a pod *is*. It says nothing about who a pod can reach, and
+until recently the answer was everyone: all projects' workloads share one namespace, so a
+training pod in one project could open a socket to a model server in another and nothing
+in the platform had an opinion about it. AshML's own authorization cannot close that,
+because the traffic never goes near the control plane — it is pod to pod, and only the
+cluster can refuse it.
+
+Each project now gets a NetworkPolicy, applied before the first workload that needs it:
+
+```console
+$ kubectl -n ashml-jobs get networkpolicy
+NAME                   POD-SELECTOR                AGE
+ashml-project-vision   ashml.io/project=vision     2m
+ashml-project-fraud    ashml.io/project=fraud      2m
+```
+
+A project's pods may reach **their own project on any port**, **DNS**, and **everything
+that is not a pod in this cluster** — the control plane, the artifact store, a dataset on
+the internet. A training job is user code that is meant to be able to fetch things; this
+is a boundary between projects, not a firewall around user code.
+
+It is written as **egress** rather than ingress, and that is the decision worth knowing
+about, because ingress is the version that comes to mind first and it breaks serving. A
+policy that says "accept connections only from my own project" also refuses the sources
+that are not pods — the kubelet's probes, and the API server's `/proxy`, which is how
+`ash predict` reaches a model server. Allowing everything outside the pod network looks
+like the fix and works on one node; on two, the API server's traffic to a pod on the
+*other* node arrives from that node's flannel address, which is inside the pod network and
+therefore inside the exception. The result is serving that fails depending on where a pod
+landed. [ADR 0017](docs/adr/0017-egress-is-the-side-that-can-be-enforced.md) has the 502
+that made the point.
+
+A NetworkPolicy is also an object every cluster *accepts* and only some clusters
+*enforce*, so the check for it does not look at the manifest:
+
+```bash
+make e2e-isolation    # two projects, four real pods, and wget run inside them
+```
+
+Every refusal it asserts is paired with the same address answering a pod in the project
+that owns it, at the same moment — "alpha cannot reach beta" proves nothing without "beta
+can, right now". It needs only `busybox`, so it runs in CI beside `make e2e`.
+
+**Still true, and the next real step:** the isolation is between projects, not between a
+project and the platform. Every project's pods still share one namespace and one service
+account, so a compromised training image is contained by the namespace and by this policy,
+not by Kubernetes RBAC. That needs a namespace per project.
 
 ### What it refused, and who it refused
 
@@ -850,7 +897,9 @@ ash whoami
 cancel — and cross-checks every assertion with `kubectl`. `make e2e-scheduler` overfills
 the cluster and asserts that jobs queue, run only as capacity allows, and land on the
 node AshML actually chose. `make e2e-rollout` trains two versions of one model and puts
-live traffic through a canary, measuring the split from the responses. `make journey` runs
+live traffic through a canary, measuring the split from the responses.
+`make e2e-isolation` runs two projects' pods side by side and proves, with `wget` inside
+them, that neither can reach the other. `make journey` runs
 the spec's whole §50 user journey, all nine steps in order — the closest thing here to the
 demo itself.
 
@@ -979,6 +1028,8 @@ docs/              architecture, roadmap, ADRs
 | `ASHML_DB_POOL_MAX` | `10` | Maximum pooled connections |
 | `ASHML_K8S_BACKEND` | `kubernetes` | `kubernetes` or `sim` |
 | `ASHML_K8S_NAMESPACE` | `ashml-jobs` | Namespace training Jobs are created in |
+| `ASHML_NETWORK_POLICY_ENABLED` | `true` | A NetworkPolicy per project, so one project's pods cannot reach another's. Logs a warning on every start when off |
+| `ASHML_CLUSTER_POD_CIDR` | `10.42.0.0/16` | The addresses this cluster gives to pods — k3s's by default. The policy's "everything that is not a pod here" rule is written against it, and too narrow a value permits the traffic it was meant to refuse, so the control plane checks it against every node at startup |
 | `ASHML_KUBECONFIG` | — | Kubeconfig path; unset uses `$KUBECONFIG`, `~/.kube/config`, then in-cluster credentials |
 | `ASHML_KUBECONFIG_CONTEXT` | — | Which context in that file. Unset follows `current-context` — see below |
 | `ASHML_EXECUTOR_ENABLED` | `true` | Set false for a read-only API replica that runs nothing |
@@ -1075,15 +1126,18 @@ suite on every push, with Postgres and MinIO as service containers — so the in
 tests actually *run* there rather than skipping, and the job fails if they skip, because a
 skip and a pass look identical in a summary line.
 
-A second job stands up a **real k3d cluster** and runs `make e2e` on it: the Phase 2 exit
-criterion, checked against `kubectl` as well as against AshML's own view, so a pass cannot
+A second job stands up a **real k3d cluster** and runs `make e2e` and
+`make e2e-isolation` on it: the Phase 2 exit criterion, checked against `kubectl` as well as against AshML's own view, so a pass cannot
 be produced by the control plane merely believing itself. This file used to say CI could
 run nothing that needed Kubernetes, on the grounds that a shared runner is not a realistic
 cluster. That is true of some of these scripts and was applied to all of them — and the
 cost was that the project's headline claim was verified only when its author remembered
 to. What `make e2e` asserts does not depend on the runner resembling anything: a job
 submitted through the API becomes a Kubernetes Job, runs a real container, and reaches
-SUCCEEDED through observed Pod status.
+SUCCEEDED through observed Pod status. The same is true of `make e2e-isolation`, which
+asks the cluster whether one project's pod can open a socket to another's — a question a
+two-core runner answers exactly as well as a workstation, and one that needs no image
+beyond `busybox`.
 
 The rest stay a thing a person runs, now for reasons specific to each rather than one
 blanket one. `make e2e-scheduler` is written against the capacity of the development

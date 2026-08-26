@@ -44,6 +44,9 @@ export function createSimBackend({
   // Secrets are stored so a test can assert what a workload was actually handed.
   const secrets = new Map();
 
+  /** Projects `ensureProjectIsolation` was called for, in the order they were asked. */
+  const isolatedProjects = new Set();
+
   /**
    * `${namespace}/${name}` -> `{ selector }`.
    *
@@ -106,6 +109,25 @@ export function createSimBackend({
     },
 
     async ensureNamespace() {},
+
+    /**
+     * Nothing here is on a network, so there is no boundary to draw.
+     *
+     * Recorded rather than ignored: a test can assert the executor asked for a project's
+     * isolation before launching its job, which is the ordering that matters and the one
+     * a no-op would let regress unnoticed.
+     */
+    async ensureProjectIsolation(project) {
+      isolatedProjects.add(project);
+    },
+
+    /** The projects this backend was asked to isolate, in insertion order. */
+    isolatedProjects,
+
+    /** No cluster, so no node ranges to disagree with. */
+    async verifyClusterPodCidr() {
+      return [];
+    },
 
     async listNodes() {
       return simNodes.map((node) => ({ ...node, simulated: true }));

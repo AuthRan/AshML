@@ -226,6 +226,14 @@ e2e: ## End-to-end: submit a job, run it on k3d, assert it SUCCEEDED
 e2e-scheduler: ## End-to-end: overfill the cluster, assert queueing and placement
 	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/e2e-scheduler.mjs
 
+.PHONY: e2e-isolation
+e2e-isolation: ## End-to-end: two projects, and prove neither can reach the other's pods
+	# Asks the cluster rather than AshML: `wget` inside a real pod, at a real address a
+	# pod in the other project answered on seconds earlier. A NetworkPolicy is an object
+	# every cluster accepts and only some enforce, so asserting on the manifest would
+	# prove nothing. Needs only busybox -- no built images, no dataset.
+	ASHML_KUBECONFIG_CONTEXT=$${ASHML_KUBECONFIG_CONTEXT:-k3d-$(CLUSTER)} node scripts/e2e-isolation.mjs
+
 .PHONY: e2e-rollout
 e2e-rollout: ## End-to-end: a 10% canary against real pods, and measure the split
 	# Needs a control plane already running with its deployment sync loop, and the three

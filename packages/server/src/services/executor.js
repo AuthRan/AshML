@@ -47,6 +47,14 @@ export async function launchJob(pool, backend, job, {
   // comment above makes about the database: a crash between the two leaves an unused
   // token, which expires; the reverse order would leave a running pod with no credential
   // and no way to obtain one.
+  // The project's network boundary, before the pod that will sit inside it. Ordered
+  // this way for the same reason the token is minted first: the failure of doing it
+  // afterwards is a running pod that is briefly unconstrained, and nothing observes that
+  // window or reports it later. A failure here fails the launch, and the job stays in
+  // SCHEDULING for the next tick to retry (see the header) — an unisolated training pod
+  // is not the more conservative outcome.
+  await backend.ensureProjectIsolation(job.project);
+
   const { token: runToken } = await issueRunToken(pool, job.id, job.attempt ?? 0, {
     ttlSeconds: runTokenTtlSeconds,
   });

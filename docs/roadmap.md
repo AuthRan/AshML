@@ -868,7 +868,7 @@ report nothing. `make cluster-dns-check` asks a Pod; `make cluster-dns` restores
 | 7 | Distributed training (DDP across both 2080 Tis) | Needs a reliable scheduler underneath |
 | 8 | AshGPU as a real `GpuProvider` | AshGPU does not exist yet (ADR 0005) |
 | 9 | Ashcode integration | Weekend of work once the API is good; not the hard part |
-| 10 | Kubernetes RBAC, an identity provider | Auth, project RBAC, rate limiting and the audit trail are **done** — see below |
+| 10 | Kubernetes RBAC, an identity provider | Auth, project RBAC, rate limiting, the audit trail and per-project network isolation are **done** — see below |
 
 ---
 
@@ -904,6 +904,11 @@ places; this is the part of Phase 10 that is now built, and the part that is not
   because the API answers 404 to "you may not see this project" on purpose, so its own
   status codes are an unreliable narrator about authorization. Readable through
   `ash audit denials` and `ash audit summary`.
+- **A network boundary per project**, because authorization cannot reach pod-to-pod
+  traffic: it never touches the control plane. One NetworkPolicy per project, applied
+  before the workload it protects, allowing a project's pods to reach their own project,
+  DNS, and everything that is not a pod in this cluster. See below for why it is written
+  as egress, which is the half that was not obvious.
 - `ash login`, `ash whoami`, `ash token create|list|revoke`, `ash member add|remove|list`.
 
 ### Upgrading an existing cluster
@@ -1065,6 +1070,70 @@ namespace exists. Applying admission labels only on *creation* would mean every 
 that had already run AshML — which is every cluster that matters — was the one cluster
 that never got them.
 
+### One project cannot reach another's
+
+Everything above governs what a pod *is*. It says nothing about who a pod may reach, and
+the answer used to be everyone. Projects share a namespace, so a training pod in one
+project could open a socket to a model server in another — measured on the development
+cluster before it was fixed, first try, no obstacle. Authorization cannot close that,
+because none of the traffic touches the control plane: it is one pod dialling another pod's
+address, and the cluster is the only thing in the system able to refuse it.
+
+Each project now gets one NetworkPolicy, applied before the first workload that needs it
+and re-applied on every launch and every deployment apply. A project's pods may reach
+their own project on any port, DNS, and everything that is not a pod in this cluster —
+the control plane on the host, the artifact store, a dataset on the internet. A training
+job is user code that is *meant* to be able to fetch things; this is a boundary between
+projects, not a firewall around user code.
+
+**It is written as egress, and the reason is the most useful thing in this section.**
+"Accept connections only from my own project" is the same rule read from the other end,
+and it is what comes to mind first. It also refuses every source that is not a pod — the
+kubelet's readiness probes, and the API server's `/proxy`, which is how `callService`
+reaches a model server for `ash predict`. Allowing "everything outside the pod network"
+back in looks like the fix, and on a one-node cluster it behaves like it. On two nodes it
+does not: with k3s and flannel, the API server's traffic to a pod on the *other* node
+arrives from that node's flannel address, which is inside the pod CIDR and therefore
+inside the very exception that keeps other projects out. Asked of the cluster:
+
+    Error from server (ServiceUnavailable): error trying to reach service:
+    proxy error from 127.0.0.1:6443 while dialing 10.42.1.78:8080, code 502
+
+with the identical call to a pod on the API server's own node returning its page. That is
+a policy which passes on the development cluster and breaks serving in production
+depending on where a pod landed. Egress has none of it: it constrains the pod the platform
+is least sure about at the point where it *initiates*, and leaves every inbound platform
+path alone. Because every AshML pod carries `ashml.io/project` and every project gets a
+policy, denying each project's egress to the others denies the traffic in both directions
+— there is no pod left that is allowed to start the conversation.
+
+Three smaller things, each a place this could have been quietly wrong:
+
+- **A ClusterIP is not in the allow list, and does not need to be.** Traffic to a Service
+  is translated to a pod address before the policy is evaluated, so another project's
+  Service is refused exactly as its pod address is. Verified rather than assumed, because
+  it depends on the CNI evaluating after DNAT and would be a hole if it did not.
+- **The pod CIDR is the one setting that can be wrong in silence.** Too narrow a value
+  does not fail; the pods it misses are read as "outside the cluster", which is the branch
+  that *permits*, so isolation is simply absent for those nodes and nothing says so. The
+  control plane compares `ASHML_CLUSTER_POD_CIDR` with every node's `spec.podCIDR` at
+  startup and names the node when they disagree — a warning and not a refusal to start,
+  since the policy still binds every node that is covered.
+- **A failure to apply the policy fails the launch.** The alternative is a pod that runs
+  for a few seconds with no boundary, and nothing observes that window or reports it
+  afterwards. The quieter outcome is the wrong one.
+
+What this cannot do is enforce itself. A NetworkPolicy is an object every cluster accepts
+and only some clusters implement; k3s ships kube-router's controller and enforces it, and
+a cluster whose CNI ignores policies will store this one, list it back, and route the
+traffic anyway. So `make e2e-isolation` asserts nothing about the manifest: it stands up
+two projects' pods on the real cluster and runs `wget` inside them, and every refusal is
+paired with the same address answering a pod in the project that owns it — "alpha cannot
+reach beta" proves nothing without "beta can, right now". It needs only `busybox`, so it
+runs in CI beside `make e2e`.
+
+Reasoning in [ADR 0017](adr/0017-egress-is-the-side-that-can-be-enforced.md).
+
 ### Not built
 
 - **No identity provider.** No OIDC, no SSO, no passwords. Tokens are issued out of band
@@ -1083,10 +1152,15 @@ that never got them.
   to that namespace. And no AshML pod mounts a Kubernetes API credential any more; they
   all did, and none of them ever read it.
 
-  What is still true is the sentence above it: every project's pods share one namespace
-  and one service account, so nothing stops a training pod in one project from reaching a
-  model server in another. That needs a namespace or a NetworkPolicy per project, and it
-  is the next real step here.
+  **The third part closed too, and by the cheaper of the two routes.** A training pod in
+  one project could open a socket to a model server in another; it now cannot, and the
+  cluster is what refuses it (*One project cannot reach another's*, below).
+
+  What is still true is the narrower sentence: every project's pods share one namespace
+  and one service account, so the isolation is between projects and not between a project
+  and the platform. A compromised training image is contained by the namespace and by that
+  policy, not by Kubernetes RBAC. That needs a namespace per project, and it is the next
+  real step here.
 - **The training run token is visible in the Job's pod spec** to anyone who can already
   read Jobs in that namespace. It is per-attempt and revoked when the attempt ends, which
   bounds the exposure, but it is not hidden. The serving token is in a Secret, for an

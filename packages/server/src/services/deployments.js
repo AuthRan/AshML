@@ -348,6 +348,11 @@ export async function applyDesiredState(pool, backend, deploymentId, {
   // holding, and because a Secret-sourced env var is fixed at container start, nothing
   // would restart to pick up the replacement — the router would 401 on its next poll and
   // go on serving the last table it had. See `ensureServingToken`.
+  // Before any of this deployment's objects, and on every apply rather than on the
+  // first: a model server is the pod another project would most like to reach, and the
+  // boundary that refuses it has to already exist when the pod does (`k8s/manifest.js`).
+  await backend.ensureProjectIsolation(deployment.project);
+
   const secretName = servingSecretName(deployment);
   const serving = await ensureServingToken(pool, deployment.id, {
     ttlSeconds: servingTokenTtlSeconds,

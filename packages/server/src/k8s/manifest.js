@@ -193,6 +193,133 @@ export function containerHardening() {
   };
 }
 
+// ------------------------------------------------------------------- isolation
+
+/** The default pod network for k3s, which is what `make cluster` brings up. */
+export const DEFAULT_CLUSTER_POD_CIDR = '10.42.0.0/16';
+
+/** The NetworkPolicy that isolates one project's pods. One per project, per namespace. */
+export function projectNetworkPolicyName(project) {
+  return `${MANAGED_BY}-project-${project}`;
+}
+
+/**
+ * The per-project network boundary: a project's pods may talk to their own project, to
+ * DNS, and to everything outside the cluster — and to no other project.
+ *
+ * This is the gap Phase 10 left open and named: every project's workloads share one
+ * namespace and one service account, so a training pod in one project could open a
+ * connection to a model server in another and the cluster had no opinion about it.
+ * Pod Security Admission does not help here — it governs what a Pod *is*, not who it may
+ * reach — and neither does AshML's own authorization, because this traffic never goes
+ * near the control plane. It is pod to pod, inside one namespace, and only the cluster
+ * can refuse it.
+ *
+ * **Egress, and not ingress**, which is the decision worth recording because ingress is
+ * the obvious way to write it. "A project's pods accept connections only from their own
+ * project" reads as the same rule from the other end, and on a single-node cluster it
+ * even behaves like it. It breaks on the second node. An ingress policy denies every
+ * source it does not name, and the sources it cannot name are the ones that are not pods:
+ * the kubelet's readiness probes, and the API server's `/proxy` endpoint — which is how
+ * `callService` reaches a model server for `ash predict`. On a cluster running k3s with
+ * flannel, traffic from the API server to a pod on *another* node arrives from that
+ * node's flannel address, which sits inside the pod CIDR and is therefore excluded by
+ * the same `except` that keeps other projects out. Measured, not reasoned about: with an
+ * ingress policy in place, a proxy call to a pod on the second node returns
+ *
+ *     Error from server (ServiceUnavailable): error trying to reach service:
+ *     proxy error from 127.0.0.1:6443 while dialing 10.42.1.78:8080, code 502
+ *
+ * while the identical call to a pod on the API server's own node succeeds — a policy that
+ * would have looked correct on the development cluster and broken serving in production,
+ * intermittently, depending on where a pod landed.
+ *
+ * Egress has none of that problem: it constrains the pod AshML is least sure about — the
+ * user-submitted image — at the point where it *initiates*, and leaves every inbound
+ * platform path untouched. And because every AshML pod carries `ashml.io/project` and
+ * every project gets this policy, denying each project's egress to the others denies the
+ * traffic in both directions: there is no pod left that is allowed to start the
+ * conversation.
+ *
+ * The three rules, and what each one is for:
+ *
+ *   1. **Its own project**, on any port. A router reaching its model servers, a model
+ *      server reaching a sidecar, one training pod reaching another.
+ *   2. **DNS**, port 53 in `kube-system`, TCP as well as UDP because a large answer
+ *      falls back to TCP. Selected by namespace rather than by the `k8s-app: kube-dns`
+ *      label, so a cluster that runs something other than CoreDNS still resolves.
+ *   3. **Everything that is not a pod in this cluster** — the control plane on the host,
+ *      the artifact store, a dataset on the public internet, a package index. Training
+ *      jobs are user code and are meant to be able to fetch things; this is a boundary
+ *      between projects, not a firewall.
+ *
+ * Rule 3 is where `clusterPodCidr` matters, and a wrong value fails in the direction that
+ * does not announce itself: too narrow and cross-project traffic is quietly permitted,
+ * because the addresses it excludes are not the addresses the pods actually have. It is
+ * checked against what the cluster reports rather than trusted — see
+ * `verifyClusterPodCidr` in `kubernetes.js`, which compares it with every node's
+ * `spec.podCIDR` at startup and says so if they disagree.
+ *
+ * A ClusterIP is deliberately not in the list. Traffic to a Service is translated to a
+ * pod address before the policy is evaluated, so `beta-svc.ashml-jobs.svc` from another
+ * project is refused by rule 1 exactly as the pod address is — verified on the cluster,
+ * because it depends on the CNI evaluating after DNAT and it would be a hole if it did
+ * not.
+ *
+ * **What this cannot do is enforce itself.** A NetworkPolicy is an object any cluster
+ * accepts and only some clusters implement; k3s ships kube-router's policy controller and
+ * enforces it, but a cluster whose CNI ignores policies will store this one, report it,
+ * and route the traffic anyway. That is why the control plane logs what it applied at
+ * startup rather than leaving it to be assumed, and why `make e2e-isolation` asks the
+ * cluster the question directly instead of asserting on the manifest.
+ *
+ * @param {string} project the project name, already a DNS-1123 label (routes/projects.js)
+ * @param {object} [options]
+ * @param {string} [options.namespace]
+ * @param {string} [options.clusterPodCidr] the addresses this cluster gives to pods
+ * @returns {object} a networking.k8s.io/v1 NetworkPolicy
+ */
+export function buildProjectNetworkPolicyManifest(project, {
+  namespace = 'ashml-jobs', clusterPodCidr = DEFAULT_CLUSTER_POD_CIDR,
+} = {}) {
+  if (!project) {
+    throw new Error('a network policy needs a project to isolate');
+  }
+
+  return {
+    apiVersion: 'networking.k8s.io/v1',
+    kind: 'NetworkPolicy',
+    metadata: {
+      name: projectNetworkPolicyName(project),
+      namespace,
+      labels: {
+        'app.kubernetes.io/managed-by': MANAGED_BY,
+        'app.kubernetes.io/component': 'project-isolation',
+        'ashml.io/project': project,
+      },
+    },
+    spec: {
+      podSelector: { matchLabels: { 'ashml.io/project': project } },
+      // Egress only. Naming Ingress here — even with no ingress rules — would deny every
+      // inbound connection to the project, including the kubelet's probes.
+      policyTypes: ['Egress'],
+      egress: [
+        { to: [{ podSelector: { matchLabels: { 'ashml.io/project': project } } }] },
+        {
+          to: [{
+            namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
+          }],
+          ports: [
+            { protocol: 'UDP', port: 53 },
+            { protocol: 'TCP', port: 53 },
+          ],
+        },
+        { to: [{ ipBlock: { cidr: '0.0.0.0/0', except: [clusterPodCidr] } }] },
+      ],
+    },
+  };
+}
+
 /**
  * Pins the Pod to the node AshML's scheduler chose.
  *
