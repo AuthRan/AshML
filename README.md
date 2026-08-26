@@ -818,8 +818,8 @@ cluster advertises `nvidia.com/gpu: 0`. AshML handles this the honest way: such 
 ## Watching it work
 
 ```bash
-make observability-images   # pull Prometheus and Grafana, import them into k3d
-make observability          # apply the stack, wait for both rollouts
+make observability-images   # pull Prometheus, Grafana, Loki and Alloy into k3d
+make observability          # apply the stack, wait for every rollout
 make grafana                # port-forward -> http://127.0.0.1:3000
 ```
 
@@ -827,13 +827,57 @@ Four dashboards, provisioned from [`deploy/observability/`](deploy/observability
 kept in git as JSON: **Cluster & GPU**, **Job pipeline**, **Training curves**, and
 **Inference**.
 
-Grafana has **two datasources**, and that is the whole design rather than an
+Grafana has **three datasources**, and that is the whole design rather than an
 inconvenience. Prometheus scrapes the control plane's `/metrics` — queue depth, replica
 counts, pass durations, GPU telemetry, things whose value at a moment is the whole truth
 about them. The **training curves come from PostgreSQL**, plotted against the `step`
 column the run itself reported, because a loss belongs to a step and a scraper sampling on
 a timer would record it against a clock and drop every step in between (ADR 0009,
 [ADR 0010](docs/adr/0010-two-datasources-one-story.md)).
+
+The third is not a number.
+
+### The logs, which used to last exactly as long as the pod
+
+`ash job logs` reads a Pod through the Kubernetes API. That is right for a running job, and
+it carries a property that is easy not to notice: it answers for exactly as long as the Pod
+object exists. A cancellation deletes it, an eviction replaces it, a node reclaim takes it.
+So AshML kept a job's *state* forever — every transition with its reason — and its *output*
+for as long as Kubernetes happened to feel like it. For the runs worth explaining
+afterwards that is backwards: the failed attempt whose last twenty lines would say why is
+the one most likely to have had its pod removed.
+
+Loki and Grafana Alloy now sit beside Prometheus, applied by the same `make observability`.
+Every AshML pod has carried `ashml.io/job-id` since Phase 2, so the archive is queried by
+the identifier you already have:
+
+```logql
+{job_id="6993051b-a577-47cf-ad92-3eaf083b68a6"}    # one attempt, whatever became of it
+{project="vision", component="training-job"}       # every run in a project
+{component="model-server"} |= "HTTP 401"           # what the serving pods complained about
+```
+
+Demonstrated rather than asserted — a job that exits 3, read through the API, then its
+Kubernetes Job deleted:
+
+```console
+$ ash job logs 6993051b…            # while the pod exists
+[demo] step 5 of 5
+[demo] failing on purpose, and this is the line somebody will want
+
+$ kubectl -n ashml-jobs delete job ashml-logdemo-run-6993051b-0
+$ ash job logs 6993051b…
+no logs: the Pod for this job no longer exists in the cluster
+
+$ # and in Grafana, {job_id="6993051b…"} still returns all six lines
+```
+
+`ash job logs` is deliberately unchanged: it asks the cluster, and says plainly when the
+cluster no longer knows. Wiring it to fall back to Loki would give the control plane a
+required dependency on a log store for a fallback path.
+[ADR 0018](docs/adr/0018-logs-that-outlive-the-pod.md) has the rest — including why the
+collector reads through the API rather than mounting `/var/log` from every node, and why
+restarting it does not duplicate a single line.
 
 Two numbers sit next to each other on the cluster dashboard: `ashml_gpu_visible` (2) and
 `ashml_gpu_schedulable` (0). Both are true on this host, and either one alone is a lie

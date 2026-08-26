@@ -320,8 +320,11 @@ OBS_DIR       := deploy/observability
 OBS_NS        ?= ashml-observability
 PROM_IMAGE    ?= prom/prometheus:v3.14.0
 GRAFANA_IMAGE ?= grafana/grafana:13.1.4
+LOKI_IMAGE    ?= grafana/loki:3.5.7
+ALLOY_IMAGE   ?= grafana/alloy:v1.12.1
 GRAFANA_PORT  ?= 3000
 PROM_PORT     ?= 9090
+LOKI_PORT     ?= 3100
 
 # Where Grafana's PostgreSQL datasource should look, *from inside the cluster*. The
 # committed default matches deploy/local/docker-compose.yml; override it for a database
@@ -336,6 +339,11 @@ GRAFANA_PG_PASSWORD ?=
 # a change with no visible effect -- the worst kind to debug. These go into a pod
 # annotation, so changing a scrape config or a dashboard rolls the pod that reads it.
 OBS_CONFIG_HASH = $(shell cat $(OBS_DIR)/10-prometheus-config.yaml $(OBS_DIR)/11-prometheus-rules.yaml | sha256sum | cut -c1-16)
+# The log side has two config files and two pods, and each has to roll when its own
+# changes: an Alloy holding a stale relabel list ships logs with the wrong labels, which is
+# worse than shipping none, because the query that finds nothing looks like an empty run.
+OBS_LOKI_HASH  = $(shell sha256sum $(OBS_DIR)/30-loki.yaml  | cut -c1-16)
+OBS_ALLOY_HASH = $(shell sha256sum $(OBS_DIR)/31-alloy.yaml | cut -c1-16)
 # The Grafana hash covers the datasource overrides as well as the files, because an
 # address supplied on the command line is read once at process start exactly like a file
 # would be -- and a changed address that does not roll the pod is a change with no effect.
@@ -343,13 +351,15 @@ OBS_GRAFANA_HASH = $(shell { cat $(OBS_DIR)/dashboards/*.json $(OBS_DIR)/20-graf
                              echo '$(GRAFANA_PG_ADDR)|$(GRAFANA_PG_DATABASE)|$(GRAFANA_PG_USER)|$(GRAFANA_PG_PASSWORD)'; } | sha256sum | cut -c1-16)
 
 .PHONY: observability-images
-observability-images: ## Pull Prometheus and Grafana and load them into the cluster
+observability-images: ## Pull Prometheus, Grafana, Loki and Alloy and load them into the cluster
 	docker pull $(PROM_IMAGE)
 	docker pull $(GRAFANA_IMAGE)
-	k3d image import $(PROM_IMAGE) $(GRAFANA_IMAGE) -c $(CLUSTER)
+	docker pull $(LOKI_IMAGE)
+	docker pull $(ALLOY_IMAGE)
+	k3d image import $(PROM_IMAGE) $(GRAFANA_IMAGE) $(LOKI_IMAGE) $(ALLOY_IMAGE) -c $(CLUSTER)
 
 .PHONY: observability
-observability: ## Deploy Prometheus + Grafana with the dashboards in deploy/observability
+observability: ## Deploy Prometheus, Loki and Grafana with the dashboards in deploy/observability
 	$(KCTL) apply -f $(OBS_DIR)/00-namespace.yaml
 	$(KCTL) apply -f $(OBS_DIR)/10-prometheus-config.yaml -f $(OBS_DIR)/11-prometheus-rules.yaml
 	$(KCTL) apply -f $(OBS_DIR)/20-grafana-provisioning.yaml
@@ -375,11 +385,19 @@ observability: ## Deploy Prometheus + Grafana with the dashboards in deploy/obse
 		--dry-run=client -o yaml | $(KCTL) apply -f -
 	sed 's/replaced-by-make/$(OBS_CONFIG_HASH)/' $(OBS_DIR)/12-prometheus.yaml | $(KCTL) apply -f -
 	sed 's/replaced-by-make/$(OBS_GRAFANA_HASH)/' $(OBS_DIR)/22-grafana.yaml   | $(KCTL) apply -f -
+	# Loki before Alloy: Alloy pushes seconds after it starts, and pushing to an address
+	# with nothing behind it is a retry loop in the logs of the thing that collects logs.
+	# Ordering costs nothing and removes a confusing first minute.
+	sed 's/replaced-by-make/$(OBS_LOKI_HASH)/'  $(OBS_DIR)/30-loki.yaml  | $(KCTL) apply -f -
+	$(KCTL) rollout status deployment/loki -n $(OBS_NS) --timeout=300s
+	sed 's/replaced-by-make/$(OBS_ALLOY_HASH)/' $(OBS_DIR)/31-alloy.yaml | $(KCTL) apply -f -
 	$(KCTL) rollout status deployment/prometheus -n $(OBS_NS) --timeout=300s
+	$(KCTL) rollout status deployment/alloy      -n $(OBS_NS) --timeout=300s
 	$(KCTL) rollout status deployment/grafana    -n $(OBS_NS) --timeout=300s
 	@echo
 	@echo "Grafana:    make grafana     -> http://127.0.0.1:$(GRAFANA_PORT)"
 	@echo "Prometheus: make prometheus  -> http://127.0.0.1:$(PROM_PORT)"
+	@echo "Loki:       make loki        -> http://127.0.0.1:$(LOKI_PORT)"
 
 .PHONY: observability-status
 observability-status: ## Pods, and whether Prometheus can actually reach its targets
@@ -389,15 +407,26 @@ observability-status: ## Pods, and whether Prometheus can actually reach its tar
 	@$(KCTL) exec -n $(OBS_NS) deploy/prometheus -- \
 		wget -qO- 'http://localhost:9090/api/v1/targets?state=any' \
 		| tr ',' '\n' | grep -E '"(job|health|lastError|scrapeUrl)"' || true
+	@echo
+	@echo "labels Loki has seen (an empty list means nothing has shipped yet):"
+	@$(KCTL) exec -n $(OBS_NS) deploy/loki -- \
+		wget -qO- 'http://localhost:3100/loki/api/v1/labels' || true
+	@echo
 
 .PHONY: observability-down
-observability-down: ## Remove Prometheus and Grafana (this deletes the metric history)
+observability-down: ## Remove Prometheus, Loki and Grafana (this deletes every sample and every log)
 	# The namespace takes the PersistentVolumeClaim with it, and with it every sample
 	# Prometheus has taken. Said out loud because `-down` on every other target here is
 	# cheap and this one is not.
 	$(KCTL) delete namespace $(OBS_NS) --ignore-not-found
 	$(KCTL) delete clusterrole ashml-prometheus --ignore-not-found
 	$(KCTL) delete clusterrolebinding ashml-prometheus --ignore-not-found
+	# Alloy's grant lives in the *workload* namespace, so deleting the observability
+	# namespace does not take it with it. Left behind it is a RoleBinding to a
+	# ServiceAccount that no longer exists -- harmless, and exactly the kind of leftover
+	# nobody ever finds again.
+	$(KCTL) delete role ashml-alloy-logs -n $(NAMESPACE) --ignore-not-found
+	$(KCTL) delete rolebinding ashml-alloy-logs -n $(NAMESPACE) --ignore-not-found
 
 .PHONY: grafana
 grafana: ## Port-forward Grafana to http://127.0.0.1:$(GRAFANA_PORT)
@@ -405,6 +434,13 @@ grafana: ## Port-forward Grafana to http://127.0.0.1:$(GRAFANA_PORT)
 	# on, and a NodePort would put every graph on the network for anyone who can reach
 	# the node. Ctrl-C to stop.
 	$(KCTL) port-forward -n $(OBS_NS) svc/grafana $(GRAFANA_PORT):3000
+
+.PHONY: loki
+loki: ## Port-forward Loki to http://127.0.0.1:$(LOKI_PORT)
+	# Loki has no UI of its own -- Grafana is the UI. This is for asking it directly:
+	#   curl -sG http://127.0.0.1:$(LOKI_PORT)/loki/api/v1/query_range \
+	#     --data-urlencode 'query={job_id="<a job id>"}'
+	$(KCTL) port-forward -n $(OBS_NS) svc/loki $(LOKI_PORT):3100
 
 .PHONY: prometheus
 prometheus: ## Port-forward Prometheus to http://127.0.0.1:$(PROM_PORT)

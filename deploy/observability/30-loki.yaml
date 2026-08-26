@@ -1,0 +1,197 @@
+# Loki: the logs a run leaves behind, after the pod that wrote them is gone.
+#
+# `ash job logs` reads a Pod through the Kubernetes API, so it answers for exactly as long
+# as the Pod object exists — which is until a cancellation deletes it, an eviction replaces
+# it, or a node reclaims it. AshML keeps a job's *state* forever in `job_events` and its
+# *output* only until Kubernetes garbage-collects the container. For the runs worth
+# explaining afterwards, that is backwards: the failed attempt whose logs would say why is
+# exactly the one most likely to have had its pod removed.
+#
+# So this is not a second way to read a running pod. It is the only way to read a finished
+# one, and `ash job logs` is unchanged: it still asks the cluster, and still says plainly
+# when the cluster no longer knows.
+#
+# Single binary (`-target=all`), filesystem storage, one replica. The distributed topology
+# — a read path, a write path, a backend, and object storage — is the right shape for a
+# cluster with more than one node and the wrong shape for this one, where every component
+# would land on the same machine and fail together anyway.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/part-of: ashml
+data:
+  loki.yaml: |
+    # No multi-tenancy. Every stream here belongs to one platform, and turning tenancy on
+    # would mean every query and every push carrying an `X-Scope-OrgID` header that would
+    # always hold the same value — a header nobody sets correctly the first time, bought
+    # for a separation this deployment does not have.
+    auth_enabled: false
+
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9096
+      log_level: info
+
+    common:
+      instance_addr: 127.0.0.1
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+
+    schema_config:
+      configs:
+        # v13 with the TSDB index, which is what Loki 3 wants. Pinned with a `from` date
+        # in the past rather than left to a default, because a schema is versioned by the
+        # day it starts applying: changing it later adds a second entry rather than
+        # editing this one, or every chunk written before the change becomes unreadable.
+        - from: 2024-04-01
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+
+    limits_config:
+      # Thirty days. On this cluster's volume that is not a constraint — it is here so
+      # retention is a decision on the record rather than whatever the default is in the
+      # next version, exactly as `--storage.tsdb.retention.time` is for Prometheus.
+      retention_period: 720h
+      # A pod that has been down and comes back must not be able to backfill a week of
+      # lines at whatever timestamps it likes; a week is far beyond any real catch-up.
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+      allow_structured_metadata: true
+      volume_enabled: true
+
+    compactor:
+      working_directory: /loki/compactor
+      # Retention is not applied at all unless the compactor is told to apply it, which is
+      # the trap in the paragraph above: `retention_period` alone reads like a setting that
+      # works and silently keeps everything forever.
+      retention_enabled: true
+      delete_request_store: filesystem
+
+    # Loki reports usage statistics to Grafana Labs by default. Off, because a development
+    # cluster phoning home is not something to discover from a firewall log.
+    analytics:
+      reporting_enabled: false
+---
+# A PersistentVolumeClaim, for the same reason Prometheus has one and Grafana does not:
+# this holds the only copy of what it holds. A Loki that loses its chunks on a pod restart
+# can answer "what is this pod printing now", which is the one question `kubectl logs`
+# already answers.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-data
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/part-of: ashml
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 8Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/part-of: ashml
+spec:
+  replicas: 1
+  # Recreate rather than RollingUpdate, like Prometheus: the volume is ReadWriteOnce, so a
+  # second pod would sit Pending waiting for a disk the first one still holds and the
+  # rollout would never finish.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loki
+        app.kubernetes.io/part-of: ashml
+      annotations:
+        ashml.io/config-hash: replaced-by-make
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        # Without this the volume comes up owned by root and Loki cannot create its chunk
+        # directory — which surfaces as a crash loop with a permissions error one level
+        # deeper than anybody looks first.
+        fsGroup: 10001
+      containers:
+        - name: loki
+          image: grafana/loki:3.5.7
+          args:
+            - -config.file=/etc/loki/loki.yaml
+            - -target=all
+          ports:
+            - name: http
+              containerPort: 3100
+          # The same split Prometheus makes: /ready goes false while Loki replays its
+          # write-ahead log after an unclean shutdown, so a liveness probe pointed at it
+          # would kill the replay and start it again. Liveness therefore asks only whether
+          # the process is answering at all.
+          startupProbe:
+            httpGet: { path: /ready, port: http }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /ready, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /metrics, port: http }
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/loki }
+            - { name: data, mountPath: /loki }
+      volumes:
+        - name: config
+          configMap: { name: loki-config }
+        - name: data
+          persistentVolumeClaim: { claimName: loki-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/part-of: ashml
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: loki
+  ports:
+    - name: http
+      port: 3100
+      targetPort: http

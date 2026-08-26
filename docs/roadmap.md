@@ -849,14 +849,59 @@ report nothing. `make cluster-dns-check` asks a Pod; `make cluster-dns` restores
   cluster cannot produce one: no device reaches a k3d node (ADR 0008), so a job never
   fails for a reason a GPU could cause. Writing the pattern blind would be a guess about
   a string we have never seen.
-- **DCGM-exporter, Loki and OTel traces.** DCGM is covered above: it would export zeroes.
-  Loki and tracing are the two that are genuinely just not done — the control plane
-  already emits structured JSON logs with `request_id`/`job_id` correlation, so shipping
-  them is a collector and a query language rather than a design, and a trace crossing the
-  API, the executor and a Pod is a `traceparent` that has to be threaded through the
-  manifest. Both are worth doing and neither is claimed.
+- **DCGM-exporter, ~~Loki~~ and OTel traces.** DCGM is covered above: it would export
+  zeroes. **Loki is now deployed** — see below. A trace crossing the API, the executor and
+  a Pod is still a `traceparent` that has to be threaded through the manifest, and is
+  still not claimed.
 - **Alertmanager.** Rules exist and page nobody. Where an alert goes and who is on call
-  are decisions this cluster cannot answer.
+  are decisions this cluster cannot answer. Loki's ruler is off for the same reason.
+
+### The logs, which used to last exactly as long as the pod
+
+Closed after v1, and worth stating as a gap that had no symptom until you needed it.
+
+`ash job logs` reads a Pod through the Kubernetes API, which is right for a running job and
+carries a property nobody had written down: it answers for exactly as long as the Pod
+object exists. A cancellation deletes it, an eviction replaces it, a node reclaim takes it.
+So the platform kept a job's *state* forever — every transition with its reason, in
+`job_events` — and its *output* for as long as Kubernetes happened to feel like it. For the
+runs worth explaining afterwards that is backwards: the failed attempt whose last twenty
+lines would say why is the one most likely to have had its pod removed.
+
+Loki and Grafana Alloy now sit beside Prometheus in `deploy/observability`, applied by the
+same `make observability`. Every AshML pod has carried `ashml.io/job-id` since Phase 2, so
+the archive is queried by the identifier that already reaches the database rows and the
+metrics:
+
+    {job_id="6993051b-a577-47cf-ad92-3eaf083b68a6"}
+
+**`ash job logs` is unchanged**, deliberately. It still asks the cluster and still says
+plainly when the cluster no longer knows — a fallback to querying Loki would give the
+control plane a required dependency on a log store, a client to configure and a new way for
+a log request to be slow, in exchange for a fallback path. Grafana is where history is read
+(ADR 0010); the API reports what it observed.
+
+Three decisions in it that could each have gone quietly wrong:
+
+- **Alloy rather than Promtail**, because Promtail reached end of life in March 2026.
+  Choosing it would have been choosing an unmaintained agent in order to match the
+  tutorials.
+- **Read through the Kubernetes API rather than off the node's disk.** The usual DaemonSet
+  wants a hostPath mount on every node, in a cluster whose whole Phase 10 argument is that
+  a workload must not reach the host. The cost is stated rather than hidden: a pod that
+  starts and finishes while Alloy is down leaves nothing behind. What it does *not* cost is
+  duplication — the source has no positions file and re-reads every pod from the start on
+  each restart, and that was measured rather than assumed: three lines before a restart,
+  the same pod re-tailed, three lines after, because Loki discards entries identical in
+  stream, timestamp and content.
+- **Alloy's grant is a Role in `ashml-jobs`, not a ClusterRole.** Reading `pods/log`
+  cluster-wide is a standing credential over every line every container has ever printed,
+  and a monitoring identity is never rotated by anything.
+
+Demonstrated end to end rather than asserted: a job that exits 3, its output read through
+`ash job logs`, the Kubernetes Job deleted, `ash job logs` then answering *"the Pod for this
+job no longer exists in the cluster"* — and Loki returning all six lines under the job's own
+id. Reasoning in [ADR 0018](adr/0018-logs-that-outlive-the-pod.md).
 
 ---
 

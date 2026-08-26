@@ -58,6 +58,27 @@ data:
           sslmode: disable
           postgresVersion: 1600
           timescaledb: false
+
+      # ------------------------------------------------------------------- printed
+      #
+      # The third kind of number is not a number. A run's *output* is the thing that says
+      # why it failed, and until this datasource existed it lived only in the Pod — so it
+      # was readable until a cancellation, an eviction or a node reclaim deleted the Pod,
+      # and then not at all. AshML keeps a job's state forever and its output for as long
+      # as Kubernetes felt like it (ADR 0018).
+      #
+      # `ash job logs` still asks the cluster and still says plainly when the cluster no
+      # longer knows. This is where the same lines are afterwards.
+      - name: Loki
+        uid: ashml-loki
+        type: loki
+        access: proxy
+        url: http://loki.ashml-observability.svc.cluster.local:3100
+        # No `derivedFields`. They exist to turn a *token inside a log line* into a link —
+        # a trace id in the text — and what identifies a run here is already a label on the
+        # stream, put there by Alloy from `ashml.io/job-id`. So the query is
+        # `{job_id="…"}` and the same id reaches the database rows, the metrics and the
+        # logs without anything having to parse the output of user code.
 ---
 apiVersion: v1
 kind: ConfigMap

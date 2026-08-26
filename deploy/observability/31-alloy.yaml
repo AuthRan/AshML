@@ -1,0 +1,257 @@
+# Grafana Alloy: the thing that actually carries a pod's output into Loki.
+#
+# **Alloy and not Promtail**, which is the agent every Loki tutorial still shows. Promtail
+# was deprecated in February 2025 and reached end of life in March 2026; choosing it today
+# would be choosing an agent that receives no fixes, in order to match documentation.
+# Alloy is its replacement and reads the same Kubernetes metadata.
+#
+# **It reads logs through the Kubernetes API, not from the node's disk.** The usual shape
+# is a DaemonSet with `/var/log/pods` mounted from the host, which is faster and survives
+# an agent restart by remembering its position in a file. It also means a hostPath mount
+# on every node, in a cluster whose whole Phase 10 argument is that a pod should not be
+# able to reach the host — and it makes the collector's correctness depend on the
+# container runtime's log layout. One Deployment holding an API watch has neither problem.
+#
+# What that costs is stated rather than hidden: **a pod that starts and finishes while
+# Alloy is down leaves nothing behind.** There is no file to catch up from. For a
+# development cluster where the agent is up or the cluster is, that is the right trade; a
+# deployment that must not lose a line wants the DaemonSet and the hostPath.
+#
+# It also needs no NetworkPolicy exception. Alloy never opens a connection *to* a training
+# pod — it asks the API server — so the per-project egress policies AshML applies in
+# `ashml-jobs` neither block it nor have to make room for it.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: ashml
+---
+# A Role in `ashml-jobs`, not a ClusterRole, and that is the whole point of writing it out
+# rather than copying the upstream example. Reading `pods/log` cluster-wide is a standing
+# credential that can read every line every container in the cluster has printed —
+# including namespaces that have nothing to do with AshML — and a monitoring identity is
+# never rotated by anything. This one can read pods and their logs in the one namespace
+# AshML runs workloads in, and nowhere else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ashml-alloy-logs
+  namespace: ashml-jobs
+  labels:
+    app.kubernetes.io/part-of: ashml
+rules:
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: ['']
+    resources: [pods/log]
+    verbs: [get]
+---
+# The binding lives in the namespace being read; the subject lives in the namespace doing
+# the reading. That asymmetry is what keeps the grant with the thing being granted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ashml-alloy-logs
+  namespace: ashml-jobs
+  labels:
+    app.kubernetes.io/part-of: ashml
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ashml-alloy-logs
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: ashml-observability
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: ashml
+data:
+  config.alloy: |
+    logging {
+      level  = "info"
+      format = "logfmt"
+    }
+
+    // Only `ashml-jobs`. Alloy has no permission to read anything else, so widening this
+    // would produce a stream of authorization errors rather than more logs — but it is
+    // said here too, because the Role and this block have to agree and they are in
+    // different files.
+    discovery.kubernetes "ashml_pods" {
+      role = "pod"
+      namespaces {
+        names = ["ashml-jobs"]
+      }
+    }
+
+    // Which pod labels become Loki labels, which is the decision that makes these logs
+    // findable or merely stored.
+    //
+    // `job_id` is high cardinality — one stream per attempt — and Loki's own advice is to
+    // keep labels low cardinality. It is here anyway, because it is the question people
+    // actually ask ("what did *that* run print"), and on a platform with hundreds of jobs
+    // rather than millions the index cost is nothing. The day that stops being true it
+    // moves to structured metadata and the queries gain a `|` filter; the note is here so
+    // that is a change somebody makes on purpose.
+    discovery.relabel "ashml_pods" {
+      targets = discovery.kubernetes.ashml_pods.targets
+
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "pod"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "container"
+      }
+      // `ashml.io/project` -> `project`. Non-alphanumeric characters in a Kubernetes label
+      // name become underscores in the meta label, which is why these read the way they do.
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_ashml_io_project"]
+        target_label  = "project"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_ashml_io_job_id"]
+        target_label  = "job_id"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_ashml_io_attempt"]
+        target_label  = "attempt"
+      }
+      // training-job, model-server, router. What a line came from, without having to know
+      // the naming scheme of the pod that wrote it.
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_component"]
+        target_label  = "component"
+      }
+    }
+
+    loki.source.kubernetes "ashml_pods" {
+      targets    = discovery.relabel.ashml_pods.output
+      forward_to = [loki.process.ashml_pods.receiver]
+    }
+
+    // Two labels the source adds by itself, and both are dropped on purpose.
+    //
+    // `job` is the Prometheus convention for "which scrape config produced this", and
+    // here it holds the constant `loki.source.kubernetes.ashml_pods` — a label named for
+    // the central noun of this entire platform, whose value has nothing to do with any
+    // training job. Leaving it would mean `{job=...}` and `{job_id=...}` sitting next to
+    // each other in every autocomplete, one of them useless and the other the one people
+    // want. `instance` is `namespace/pod:container`, which `pod` and `container` already
+    // say, at one stream per container either way.
+    loki.process "ashml_pods" {
+      stage.label_drop {
+        values = ["job", "instance"]
+      }
+      forward_to = [loki.write.ashml.receiver]
+    }
+
+    loki.write "ashml" {
+      endpoint {
+        url = "http://loki.ashml-observability.svc.cluster.local:3100/loki/api/v1/push"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: ashml
+spec:
+  # One replica, and it matters more here than for a stateless service: two Alloys watching
+  # the same pods would each tail every container and Loki would hold two copies of every
+  # line. There is no leader election in this shape, so "scale it up" is not a thing to do
+  # to this Deployment.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alloy
+        app.kubernetes.io/part-of: ashml
+      annotations:
+        ashml.io/config-hash: replaced-by-make
+    spec:
+      serviceAccountName: alloy
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 473
+        runAsGroup: 473
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.12.1
+          args:
+            - run
+            - /etc/alloy/config.alloy
+            - --storage.path=/tmp/alloy
+            - --server.http.listen-addr=0.0.0.0:12345
+            # `loki.source.kubernetes` reads logs through the API rather than off the
+            # node's disk, and Alloy classes that as experimental. The flag is what says
+            # so out loud: this is a deliberate choice of the API-based collector over a
+            # hostPath DaemonSet, not a default that happened to be in effect.
+            - --stability.level=experimental
+          ports:
+            - name: http
+              containerPort: 12345
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /-/ready, port: http }
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/alloy }
+            - { name: state, mountPath: /tmp/alloy }
+      volumes:
+        - name: config
+          configMap: { name: alloy-config }
+        # An emptyDir: what Alloy keeps here is its own working state, and losing it costs
+        # nothing that Loki does not already hold.
+        - name: state
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy
+  namespace: ashml-observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: ashml
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: alloy
+  ports:
+    - name: http
+      port: 12345
+      targetPort: http

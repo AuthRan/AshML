@@ -38,6 +38,12 @@ the `GpuProvider`.
 No Pushgateway. The training dashboard queries `training_metrics` directly and plots
 against the `step` column the run reported, in Grafana **Trend** panels.
 
+> **Three, since Phase 9's log gap was closed.**
+> [ADR 0018](0018-logs-that-outlive-the-pod.md) adds Loki, and the third one is not a
+> number: it is what the container printed, which used to live only in the Pod and
+> therefore only until something deleted it. The split this ADR draws is unchanged —
+> scraped, pushed, and now printed.
+
 **3. The stack is plain YAML in `deploy/observability/`, and the dashboards are `.json`
 files in git.** No operator, no Helm, no CRDs. `make observability` applies them.
 
