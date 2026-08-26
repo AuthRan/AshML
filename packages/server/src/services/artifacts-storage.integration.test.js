@@ -100,7 +100,7 @@ describe('artifacts against a real store (integration)', { skip }, () => {
     await runOnce(pool, backend);
     const launched = await getJob(pool, job.id);
     assert.equal(launched.state, JobState.STARTING, 'setup: the job should have launched');
-    backend._setPhase('ashml-test', launched.k8s_job_name, Phase.RUNNING);
+    backend._setPhase(launched.namespace, launched.k8s_job_name, Phase.RUNNING);
     await runOnce(pool, backend);
     return job;
   }

@@ -421,10 +421,22 @@ observability-down: ## Remove Prometheus, Loki and Grafana (this deletes every s
 	$(KCTL) delete namespace $(OBS_NS) --ignore-not-found
 	$(KCTL) delete clusterrole ashml-prometheus --ignore-not-found
 	$(KCTL) delete clusterrolebinding ashml-prometheus --ignore-not-found
-	# Alloy's grant lives in the *workload* namespace, so deleting the observability
-	# namespace does not take it with it. Left behind it is a RoleBinding to a
-	# ServiceAccount that no longer exists -- harmless, and exactly the kind of leftover
-	# nobody ever finds again.
+	$(KCTL) delete clusterrole ashml-alloy-discovery --ignore-not-found
+	$(KCTL) delete clusterrolebinding ashml-alloy-discovery --ignore-not-found
+	# Alloy's log-reading grant lives in the *workload* namespaces, so deleting the
+	# observability namespace does not take it with it. Left behind it is a RoleBinding to
+	# a ServiceAccount that no longer exists -- harmless, and exactly the kind of leftover
+	# nobody ever finds again. There is one per project namespace now, so this deletes by
+	# label across all of them rather than naming one.
+	# By label and across every namespace: the only Roles AshML creates are these, and it
+	# creates one per project namespace, so there is no list of names to keep in step.
+	$(KCTL) delete role,rolebinding -l app.kubernetes.io/managed-by=ashml \
+		--all-namespaces --ignore-not-found
+	# The shared namespace's pair comes from this repo's YAML, which labels `part-of`
+	# rather than `managed-by`, so it is named explicitly.
+	$(KCTL) delete role ashml-log-reader -n $(NAMESPACE) --ignore-not-found
+	$(KCTL) delete rolebinding ashml-log-reader -n $(NAMESPACE) --ignore-not-found
+	# Renamed in ADR 0019; removed here so an upgraded cluster does not keep the old pair.
 	$(KCTL) delete role ashml-alloy-logs -n $(NAMESPACE) --ignore-not-found
 	$(KCTL) delete rolebinding ashml-alloy-logs -n $(NAMESPACE) --ignore-not-found
 

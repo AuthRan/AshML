@@ -15,6 +15,10 @@ import {
   MANAGED_BY,
   DEFAULT_CLUSTER_POD_CIDR,
   buildProjectNetworkPolicyManifest,
+  buildLogReaderRoleManifest,
+  buildLogReaderRoleBindingManifest,
+  LOG_READER_NAME,
+  projectNamespace,
 } from './manifest.js';
 import { cidrContains, isIpv4Cidr, podCidrsOf } from './cidr.js';
 
@@ -161,6 +165,7 @@ function parseMemory(quantity) {
 export function createKubernetesBackend({
   namespace = 'ashml-jobs', kubeconfig = null, kubeconfigContext = null,
   networkPolicyEnabled = true, clusterPodCidr = DEFAULT_CLUSTER_POD_CIDR,
+  logCollectorServiceAccount = null,
 } = {}) {
   // Credentials are resolved on first use, not here. Constructing a backend is
   // therefore pure, which is what lets `buildApp` decorate one unconditionally —
@@ -199,6 +204,7 @@ export function createKubernetesBackend({
       batch: kc.makeApiClient(k8s.BatchV1Api),
       apps: kc.makeApiClient(k8s.AppsV1Api),
       networking: kc.makeApiClient(k8s.NetworkingV1Api),
+      rbac: kc.makeApiClient(k8s.RbacAuthorizationV1Api),
       // Kept alongside the generated clients because `callService` needs the config
       // itself, not an API client: the generated proxy method cannot carry a request
       // body, so that one request is built by hand against the same credentials.
@@ -243,6 +249,92 @@ function namespaceLabels() {
     'pod-security.kubernetes.io/audit-version': 'latest',
   };
 }
+
+  /**
+   * Creates a namespace if absent, and keeps its labels current either way.
+   *
+   * Shared by the startup call for AshML's own namespace and by the per-project call,
+   * because the argument for re-labelling on every call is the same in both: the labels
+   * are Kubernetes' own admission control, and a namespace created by an older version
+   * of this server — or by hand — would otherwise never acquire them. An earlier version
+   * returned as soon as the namespace existed, which meant every cluster that had ever
+   * run AshML was the one cluster that would not get them.
+   */
+  async function ensureNamespaceNamed(name, labels) {
+    const { core } = connect();
+    let exists = true;
+    try {
+      await core.readNamespace({ name });
+    } catch (err) {
+      if (statusOf(err) !== 404) throw err;
+      exists = false;
+    }
+
+    if (exists) {
+      // Merge-patch: it sets the labels below and leaves anything else on the
+      // namespace alone, so a label somebody else put there is not collateral.
+      await core.patchNamespace(
+        { name, body: { metadata: { labels } } },
+        k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
+      );
+      return name;
+    }
+
+    try {
+      await core.createNamespace({ body: { metadata: { name, labels } } });
+    } catch (err) {
+      // Another server replica won the race; that is the outcome we wanted.
+      if (statusOf(err) !== 409) throw err;
+    }
+    return name;
+  }
+
+  /**
+   * Grants the log collector `pods/log` in one namespace.
+   *
+   * Applied with the namespace rather than deployed alongside the collector, because a
+   * project's namespace does not exist until that project runs something and static YAML
+   * cannot name a namespace that will be created next week. Without this a per-project
+   * namespace ships no logs at all, and the symptom is an empty Grafana panel — which
+   * reads as "this run printed nothing" rather than as a missing permission.
+   *
+   * Replaced rather than left alone when it already exists, like a NetworkPolicy and for
+   * the same reason: the contents are the point, and this server's idea of what the grant
+   * should be is newer than one written by an older version of it.
+   *
+   * Not fatal. A cluster with no collector, or one whose operator set
+   * `ASHML_LOG_COLLECTOR_SERVICE_ACCOUNT=none`, is a cluster where this is meant to do
+   * nothing — and a control plane that refused to launch training jobs because it could
+   * not configure log shipping would be trading the job for the record of it.
+   */
+  async function ensureLogReaderGrant(ns) {
+    if (!logCollectorServiceAccount) return;
+
+    const { rbac } = connect();
+    const role = buildLogReaderRoleManifest({ namespace: ns });
+    const binding = buildLogReaderRoleBindingManifest({
+      namespace: ns, serviceAccount: logCollectorServiceAccount,
+    });
+
+    try {
+      await rbac.createNamespacedRole({ namespace: ns, body: role });
+    } catch (err) {
+      if (statusOf(err) !== 409) throw err;
+      await rbac.replaceNamespacedRole({ namespace: ns, name: LOG_READER_NAME, body: role });
+    }
+
+    try {
+      await rbac.createNamespacedRoleBinding({ namespace: ns, body: binding });
+    } catch (err) {
+      if (statusOf(err) !== 409) throw err;
+      // A RoleBinding's roleRef is immutable, so a changed subject cannot be patched in.
+      // Deleting and recreating is the documented way, and it is safe here: the window is
+      // between two calls on the control plane, and a collector that misses a few seconds
+      // of discovery re-reads the pod's log from the start when it comes back.
+      await rbac.deleteNamespacedRoleBinding({ namespace: ns, name: LOG_READER_NAME });
+      await rbac.createNamespacedRoleBinding({ namespace: ns, body: binding });
+    }
+  }
 
 /** Finds the Pod belonging to a Job, or null. */
   async function podFor(ns, jobName) {
@@ -337,42 +429,45 @@ function namespaceLabels() {
     },
 
     /**
-     * Creates the namespace if it is absent, and keeps its labels current either way.
+     * Creates AshML's own namespace if it is absent, and keeps its labels current.
      *
-     * Safe to call on every startup, and it has to be: the labels below are Kubernetes'
-     * own admission control, and a namespace created by an older version of this server —
-     * or by hand — would otherwise never acquire them. An earlier version returned as soon
-     * as the namespace existed, which meant every cluster that had ever run AshML was the
-     * one cluster that would not get them.
+     * Safe to call on every startup, and it has to be — see `ensureNamespaceNamed`,
+     * which is where the argument for re-labelling lives now that a project's namespace
+     * needs the same treatment. Still called at startup with no arguments: the shared
+     * namespace holds every workload created before this cluster had per-project ones,
+     * and the status-sync loop keeps observing them there.
      */
-    async ensureNamespace() {
-      const { core } = connect();
-      let exists = true;
-      try {
-        await core.readNamespace({ name: namespace });
-      } catch (err) {
-        if (statusOf(err) !== 404) throw err;
-        exists = false;
-      }
+    ensureNamespace(name = namespace, labels = namespaceLabels()) {
+      return ensureNamespaceNamed(name, labels);
+    },
 
-      if (exists) {
-        // Merge-patch: it sets the labels below and leaves anything else on the
-        // namespace alone, so a label somebody else put there is not collateral.
-        await core.patchNamespace(
-          { name: namespace, body: { metadata: { labels: namespaceLabels() } } },
-          k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch),
-        );
-        return;
-      }
+    namespaceFor(project, { base = namespace } = {}) {
+      return projectNamespace(project, { base });
+    },
 
-      try {
-        await core.createNamespace({
-          body: { metadata: { name: namespace, labels: namespaceLabels() } },
-        });
-      } catch (err) {
-        // Another server replica won the race; that is the outcome we wanted.
-        if (statusOf(err) !== 409) throw err;
-      }
+    /**
+     * Creates the project's own namespace if it is absent, and keeps its labels current.
+     *
+     * Called on the launch path and the deployment-apply path rather than once at
+     * startup, for the same reason `ensureProjectIsolation` is: a namespace is created
+     * when a project first runs something, and projects are created long after the
+     * server started. It is one API call on a path that already makes several, and it
+     * is the call that makes every later one land somewhere the cluster keeps apart
+     * from other projects.
+     *
+     * The labels are the same Pod Security Admission set the shared namespace carries —
+     * that control was won in this phase and must not be lost by workloads moving to a
+     * namespace that does not have it — plus `ashml.io/project`, which is what makes
+     * `kubectl get ns -l ashml.io/project=<name>` the way an operator finds one.
+     */
+    async ensureProjectNamespace(project, { base = namespace } = {}) {
+      const name = projectNamespace(project, { base });
+      await ensureNamespaceNamed(name, {
+        ...namespaceLabels(),
+        'ashml.io/project': project.name,
+      });
+      await ensureLogReaderGrant(name);
+      return name;
     },
 
     /**
@@ -395,19 +490,19 @@ function namespaceLabels() {
      * Service — the whole point of the object is its contents, and this server's idea of
      * what the rules should be is newer than a policy written by an older version of it.
      */
-    async ensureProjectIsolation(project) {
+    async ensureProjectIsolation(project, { namespace: ns = namespace } = {}) {
       if (!networkPolicyEnabled) return;
 
       const manifest = buildProjectNetworkPolicyManifest(project, {
-        namespace, clusterPodCidr,
+        namespace: ns, clusterPodCidr,
       });
       const { networking } = connect();
       try {
-        await networking.createNamespacedNetworkPolicy({ namespace, body: manifest });
+        await networking.createNamespacedNetworkPolicy({ namespace: ns, body: manifest });
       } catch (err) {
         if (statusOf(err) !== 409) throw err;
         await networking.replaceNamespacedNetworkPolicy({
-          namespace,
+          namespace: ns,
           name: manifest.metadata.name,
           body: manifest,
         });

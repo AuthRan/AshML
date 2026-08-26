@@ -128,7 +128,9 @@ check('a submitted job runs a real container and reaches SUCCEEDED', async () =>
 
   // The cluster's own view, not AshML's: this is what makes the run real.
   const podPhase = await kubectl(
-    'get', 'pods', '-n', NAMESPACE,
+    // The namespace the job recorded, not the configured one: a job runs in its
+    // project's namespace and `NAMESPACE` is only the base those are built from.
+    'get', 'pods', '-n', running.namespace ?? NAMESPACE,
     '-l', `job-name=${running.k8s_job_name}`,
     '-o', 'jsonpath={.items[0].status.phase}',
   );
@@ -144,7 +146,7 @@ check('a submitted job runs a real container and reaches SUCCEEDED', async () =>
 
   // And Kubernetes agrees it succeeded.
   const succeeded = await kubectl(
-    'get', 'job', running.k8s_job_name, '-n', NAMESPACE,
+    'get', 'job', running.k8s_job_name, '-n', running.namespace ?? NAMESPACE,
     '-o', 'jsonpath={.status.succeeded}',
   );
   assert.equal(succeeded, '1', 'Kubernetes must independently report success');
@@ -193,14 +195,14 @@ check('an unpullable image fails the job instead of hanging forever', async () =
   while (Date.now() < deadline) {
     await runOnce(app.db, app.k8s);
     job = await getJob(app.db, submitted.id);
-    const observation = await app.k8s.observeJob(NAMESPACE, job.k8s_job_name);
+    const observation = await app.k8s.observeJob(job.namespace ?? NAMESPACE, job.k8s_job_name);
     if (observation && /ImagePull|ErrImage/.test(observation.reason)) {
       break;
     }
     await new Promise((resolve) => { setTimeout(resolve, 1000); });
   }
 
-  const observation = await app.k8s.observeJob(NAMESPACE, job.k8s_job_name);
+  const observation = await app.k8s.observeJob(job.namespace ?? NAMESPACE, job.k8s_job_name);
   assert.match(
     observation.reason, /ImagePull|ErrImage/,
     `the pull failure must be surfaced; got "${observation?.reason}"`,
@@ -230,7 +232,7 @@ check('cancelling a running job removes its Pod from the cluster', async () => {
   await until(submitted.id, (j) => j.state === JobState.CANCELLED, 'the cancellation to complete');
 
   const remaining = await kubectl(
-    'get', 'jobs', '-n', NAMESPACE,
+    'get', 'jobs', '-n', running.namespace ?? NAMESPACE,
     '-o', `jsonpath={.items[?(@.metadata.name=="${running.k8s_job_name}")].metadata.name}`,
   );
   assert.equal(remaining, '', 'the Kubernetes Job must be gone once AshML says CANCELLED');

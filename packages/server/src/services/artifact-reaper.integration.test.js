@@ -108,7 +108,7 @@ describe('artifact reaper (integration)', { skip: pool ? false : SKIP_MESSAGE },
 
     await runOnce(pool, backend);
     const launched = await getJob(pool, job.id);
-    backend._setPhase('ashml-test', launched.k8s_job_name, Phase.RUNNING);
+    backend._setPhase(launched.namespace, launched.k8s_job_name, Phase.RUNNING);
     await runOnce(pool, backend);
 
     const registered = await app.inject({

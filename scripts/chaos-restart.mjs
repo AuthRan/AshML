@@ -187,15 +187,18 @@ check('a job is submitted and starts training', async () => {
   });
 
   globalThis.__before = running;
+  // Recorded alongside the pod, because the control plane is about to be killed and the
+  // checks below still have to know which namespace to ask about.
+  globalThis.__ns = running.namespace ?? NAMESPACE;
   globalThis.__pod = await kubectl(
-    'get', 'pods', '-n', NAMESPACE, '-l', `job-name=${running.k8s_job_name}`,
+    'get', 'pods', '-n', running.namespace ?? NAMESPACE, '-l', `job-name=${running.k8s_job_name}`,
     '-o', 'jsonpath={.items[0].metadata.name}',
   );
   note(`job running as ${running.k8s_job_name}, pod ${globalThis.__pod}`);
 });
 
 check('killing the control plane does not touch the training pod', async () => {
-  const linesBefore = (await kubectl('logs', globalThis.__pod, '-n', NAMESPACE)).split('\n').length;
+  const linesBefore = (await kubectl('logs', globalThis.__pod, '-n', globalThis.__ns)).split('\n').length;
 
   await killControlPlane();
   assert.equal(await isUp(), false, 'the control plane must actually be gone');
@@ -206,7 +209,7 @@ check('killing the control plane does not touch the training pod', async () => {
   // The pod is not merely alive — it is still working. A container that had wedged
   // waiting on the API would also report Running.
   const phase = await kubectl(
-    'get', 'pod', globalThis.__pod, '-n', NAMESPACE, '-o', 'jsonpath={.status.phase}',
+    'get', 'pod', globalThis.__pod, '-n', globalThis.__ns, '-o', 'jsonpath={.status.phase}',
   );
   assert.equal(phase, 'Running', 'the training pod must not depend on the control plane');
 
@@ -214,7 +217,7 @@ check('killing the control plane does not touch the training pod', async () => {
   // plane being reachable. Metrics would not do here: they are buffered in the process
   // and may never have arrived, so their absence proves nothing about whether the run
   // kept working.
-  const linesAfter = (await kubectl('logs', globalThis.__pod, '-n', NAMESPACE)).split('\n').length;
+  const linesAfter = (await kubectl('logs', globalThis.__pod, '-n', globalThis.__ns)).split('\n').length;
   assert.ok(
     linesAfter > linesBefore + 1,
     `the pod stopped making progress during the outage (${linesBefore} -> ${linesAfter} log lines)`,

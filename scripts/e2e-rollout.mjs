@@ -54,6 +54,15 @@ import { withToken, explainIfUnauthorized } from './lib/token.mjs';
 
 const ENDPOINT = (process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 const NAMESPACE = process.env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs';
+
+/**
+ * The namespace a deployment's objects are actually in.
+ *
+ * Recorded on the row since Phase 5, and since ADR 0019 it is a namespace of the
+ * project's own rather than the one this script is configured with. The fallback is
+ * for a deployment created before either.
+ */
+const nsOf = (deployment) => deployment.namespace ?? NAMESPACE;
 const IMAGE = process.env.RESNET_IMAGE ?? 'ashml/resnet-trainer:v1';
 const LOCAL_PORT = Number(process.env.ROLLOUT_LOCAL_PORT ?? 18082);
 const TIMEOUT_MS = Number(process.env.ROLLOUT_TIMEOUT_MS ?? 900_000);
@@ -118,10 +127,10 @@ async function until(what, predicate, { timeout = TIMEOUT_MS, interval = 2000 } 
  * arrives: through the Service, with whatever selector and port it currently carries.
  * Forwarding to a pod would bypass exactly the two things that were broken.
  */
-async function portForward(service, port) {
+async function portForward(service, port, namespace) {
   const child = spawn(
     'kubectl',
-    [...contextArgs, 'port-forward', '-n', NAMESPACE, `svc/${service}`, `${port}:80`],
+    [...contextArgs, 'port-forward', '-n', namespace, `svc/${service}`, `${port}:80`],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
 
@@ -231,9 +240,9 @@ async function routerApplying(version, weight) {
  * So the forward is rebound after every move of the front door. The real callers this
  * stands in for resolve the Service per connection and never have this problem.
  */
-async function rebindAddress(service) {
+async function rebindAddress(service, namespace) {
   await globalThis.__forward?.close().catch(() => {});
-  globalThis.__forward = await portForward(service, LOCAL_PORT);
+  globalThis.__forward = await portForward(service, LOCAL_PORT, namespace);
 }
 
 /**
@@ -383,7 +392,7 @@ check('deploying one version gives it its own pods, and puts no router in the pa
   // A router exists only while there is something to decide, and right now there is not.
   assert.equal(deployment.router_k8s_name, null, 'a single-version deployment needs no router');
   const routers = await kubectl(
-    'get', 'deploy', '-n', NAMESPACE,
+    'get', 'deploy', '-n', nsOf(deployment),
     '-l', `ashml.io/deployment-id=${deployment.id},app.kubernetes.io/component=model-router`,
     '-o', 'jsonpath={.items[*].metadata.name}',
   );
@@ -391,14 +400,14 @@ check('deploying one version gives it its own pods, and puts no router in the pa
 
   globalThis.__deployment = deployment;
   globalThis.__clusterIP = await kubectl(
-    'get', 'svc', deployment.k8s_name, '-n', NAMESPACE, '-o', 'jsonpath={.spec.clusterIP}',
+    'get', 'svc', deployment.k8s_name, '-n', nsOf(deployment), '-o', 'jsonpath={.spec.clusterIP}',
   );
   note(`${deployment.k8s_name} at ${globalThis.__clusterIP}, serving v1`);
 });
 
 check('the address answers, and the pod behind it loaded v1', async () => {
   const deployment = globalThis.__deployment;
-  globalThis.__forward = await portForward(deployment.k8s_name, LOCAL_PORT);
+  globalThis.__forward = await portForward(deployment.k8s_name, LOCAL_PORT, nsOf(deployment));
 
   const answer = await ask();
   assert.equal(answer.status, 200, `the deployment's own address does not answer: ${
@@ -442,7 +451,7 @@ check('a 10% canary puts a router in the path without moving the address', async
   });
 
   const selector = JSON.parse(await kubectl(
-    'get', 'svc', deployment.k8s_name, '-n', NAMESPACE, '-o', 'jsonpath={.spec.selector}',
+    'get', 'svc', deployment.k8s_name, '-n', nsOf(deployment), '-o', 'jsonpath={.spec.selector}',
   ));
   assert.equal(selector['app.kubernetes.io/component'], 'model-router', 'the front door is not on the router');
   assert.ok(
@@ -453,7 +462,7 @@ check('a 10% canary puts a router in the path without moving the address', async
 
   // The whole promise of moving a selector instead of recreating a Service.
   const clusterIP = await kubectl(
-    'get', 'svc', deployment.k8s_name, '-n', NAMESPACE, '-o', 'jsonpath={.spec.clusterIP}',
+    'get', 'svc', deployment.k8s_name, '-n', nsOf(deployment), '-o', 'jsonpath={.spec.clusterIP}',
   );
   assert.equal(clusterIP, globalThis.__clusterIP, 'the deployment’s address moved');
 
@@ -464,14 +473,14 @@ check('a 10% canary puts a router in the path without moving the address', async
     const target = deployment.targets.find((t) => t.version === version);
     assert.ok(target.k8s_name, `v${version} has no Kubernetes objects of its own`);
     const ready = await kubectl(
-      'get', 'deploy', target.k8s_name, '-n', NAMESPACE, '-o', 'jsonpath={.status.readyReplicas}',
+      'get', 'deploy', target.k8s_name, '-n', nsOf(deployment), '-o', 'jsonpath={.status.readyReplicas}',
     );
     assert.equal(Number(ready || 0), 1, `v${version} is not answering on its own Service`);
   }
 
   // The address now resolves to the router rather than to v1's pods, so the forward
   // opened in the previous check is pointing at the wrong thing. See rebindAddress.
-  await rebindAddress(deployment.k8s_name);
+  await rebindAddress(deployment.k8s_name, nsOf(deployment));
 
   // And the router has to have re-read the split before anything measures it.
   const table = await routerApplying(2, 10);
@@ -550,7 +559,7 @@ check('moving the canary to 50% changes the split and nothing else', async () =>
   const after = await api('GET', `/api/v1/projects/${project}/deployments/${DEPLOYMENT}`);
   assert.equal(after.router_k8s_name, before.router_k8s_name, 'the router was replaced to change a weight');
   const clusterIP = await kubectl(
-    'get', 'svc', after.k8s_name, '-n', NAMESPACE, '-o', 'jsonpath={.spec.clusterIP}',
+    'get', 'svc', after.k8s_name, '-n', nsOf(after), '-o', 'jsonpath={.spec.clusterIP}',
   );
   assert.equal(clusterIP, globalThis.__clusterIP, 'the address moved during a weight change');
 
@@ -573,7 +582,7 @@ check('promote ends the rollout: the address goes to v2 and the router leaves', 
 
   await until('the router pods to go', async () => {
     const names = await kubectl(
-      'get', 'pods', '-n', NAMESPACE,
+      'get', 'pods', '-n', nsOf(deployment),
       '-l', `ashml.io/deployment-id=${deployment.id},app.kubernetes.io/component=model-router`,
       '-o', 'jsonpath={.items[*].metadata.name}',
     );
@@ -581,7 +590,7 @@ check('promote ends the rollout: the address goes to v2 and the router leaves', 
   }, { timeout: 120_000 });
 
   // And with the router gone, the address must still answer — now directly from v2.
-  await rebindAddress(deployment.k8s_name);
+  await rebindAddress(deployment.k8s_name, nsOf(deployment));
   const answer = await until('v2 to answer on the address directly', async () => {
     const a = await ask();
     return a.status === 200 && a.artifactId === deployment.targets.find((t) => t.version === 2).artifact_id
@@ -590,7 +599,7 @@ check('promote ends the rollout: the address goes to v2 and the router leaves', 
 
   assert.equal(answer.servedBy, null, 'the router left the path but is still attributing requests');
   const clusterIP = await kubectl(
-    'get', 'svc', deployment.k8s_name, '-n', NAMESPACE, '-o', 'jsonpath={.spec.clusterIP}',
+    'get', 'svc', deployment.k8s_name, '-n', nsOf(deployment), '-o', 'jsonpath={.spec.clusterIP}',
   );
   assert.equal(clusterIP, globalThis.__clusterIP, 'the address moved when the rollout ended');
 
@@ -608,7 +617,7 @@ check('the rollback is a weight change, and it brings v1 back', async () => {
     return d.serving_version === 1 ? d : null;
   });
 
-  await rebindAddress(deployment.k8s_name);
+  await rebindAddress(deployment.k8s_name, nsOf(deployment));
   const expected = deployment.targets.find((t) => t.version === 1).artifact_id;
   const answer = await until('v1 to answer on the address', async () => {
     const a = await ask();
@@ -640,7 +649,7 @@ check('retiring the version that is serving is refused; retiring the other one w
 
   await until('v2’s objects to be removed from the cluster', async () => {
     const names = await kubectl(
-      'get', 'deploy', '-n', NAMESPACE,
+      'get', 'deploy', '-n', nsOf(after),
       '-l', `ashml.io/deployment-id=${after.id},ashml.io/model-version=2`,
       '-o', 'jsonpath={.items[*].metadata.name}',
     );
@@ -651,7 +660,7 @@ check('retiring the version that is serving is refused; retiring the other one w
   const answer = await ask();
   assert.equal(answer.status, 200, 'the address stopped answering after the retire');
   const clusterIP = await kubectl(
-    'get', 'svc', after.k8s_name, '-n', NAMESPACE, '-o', 'jsonpath={.spec.clusterIP}',
+    'get', 'svc', after.k8s_name, '-n', nsOf(after), '-o', 'jsonpath={.spec.clusterIP}',
   );
   assert.equal(clusterIP, globalThis.__clusterIP,
     'the address moved at some point across deploy, canary, promote, rollback and retire');

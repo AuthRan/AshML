@@ -35,7 +35,16 @@ import { issueRunToken, expireRunTokens } from './auth.js';
 export async function launchJob(pool, backend, job, {
   logger = null, apiUrl = null, runTokenTtlSeconds = null,
 } = {}) {
-  const namespace = backend.namespace;
+  // The project's own namespace, created if this is the project's first workload. Not
+  // `backend.namespace`, which is the shared namespace this replaces and which remains
+  // the answer only for jobs launched before per-project namespaces existed.
+  //
+  // Before the isolation policy and the Secret, because both are created *in* it: a
+  // namespace that does not exist yet turns either of those into a 404 on the launch
+  // path. Kubernetes creates a `default` ServiceAccount in it as a side effect, which is
+  // the other half of the sentence Phase 10 could not close — projects no longer share
+  // one, and no pod mounts its token in any case (`podHardening`).
+  const namespace = await backend.ensureProjectNamespace(job.project_ref);
 
   // Minted before the Job is created, and scoped to this attempt. Any token from a
   // previous attempt is revoked in the same transaction (services/auth.js), which is what
@@ -53,7 +62,7 @@ export async function launchJob(pool, backend, job, {
   // window or reports it later. A failure here fails the launch, and the job stays in
   // SCHEDULING for the next tick to retry (see the header) — an unisolated training pod
   // is not the more conservative outcome.
-  await backend.ensureProjectIsolation(job.project);
+  await backend.ensureProjectIsolation(job.project, { namespace });
 
   const { token: runToken } = await issueRunToken(pool, job.id, job.attempt ?? 0, {
     ttlSeconds: runTokenTtlSeconds,
@@ -91,6 +100,33 @@ export async function launchJob(pool, backend, job, {
 }
 
 /**
+ * Where this job's workload is, which is not the same question as where a new one would
+ * go.
+ *
+ * Three cases, and they are distinguishable, which is the reason this is a function
+ * rather than `job.namespace ?? backend.namespace`:
+ *
+ *   1. **A namespace was recorded.** Use it. It is the only account of where the Job was
+ *      actually created, and it stays right through a rename of the project or a change
+ *      to how namespaces are named.
+ *   2. **No namespace, but a Job name.** The job was launched before this column
+ *      existed, which means it was launched into the shared namespace. Every job running
+ *      across an upgrade is this case.
+ *   3. **Neither.** Nothing was ever recorded, so if a workload exists at all it is
+ *      because a launch created the Job and crashed before the transaction that would
+ *      have written both fields. That Job was created moments ago by *this* version, so
+ *      it is in the project's namespace. Falling back to the shared namespace here is
+ *      what would leak it — `cancelWorkload` deletes by a deterministic name precisely
+ *      to catch this case, and deleting the right name in the wrong namespace is a
+ *      no-op that leaves a Pod holding a GPU.
+ */
+function namespaceOf(backend, job) {
+  if (job.namespace) return job.namespace;
+  if (job.k8s_job_name) return backend.namespace;
+  return job.project_ref ? backend.namespaceFor(job.project_ref) : backend.namespace;
+}
+
+/**
  * Tears down the workload for a job the user cancelled, then marks it CANCELLED.
  *
  * The delete is issued whether or not a Job name was recorded. A job cancelled during
@@ -102,7 +138,7 @@ export async function launchJob(pool, backend, job, {
 export async function cancelWorkload(pool, backend, job, { logger = null } = {}) {
   const name = job.k8s_job_name ?? kubeJobName(job);
 
-  await backend.deleteJob(backend.namespace, name);
+  await backend.deleteJob(namespaceOf(backend, job), name);
   // The attempt's Secret is not deleted here. CANCELLED is a terminal state like any
   // other, so `runOnce` removes it on the same pass along with every other attempt's —
   // one place that cleans up after a run, rather than one per way a run can end.
@@ -161,7 +197,7 @@ export async function reconcileJob(pool, backend, job, {
     return placeAndLaunch(pool, backend, job, { logger, apiUrl, runTokenTtlSeconds });
   }
 
-  const observation = await backend.observeJob(backend.namespace, job.k8s_job_name);
+  const observation = await backend.observeJob(namespaceOf(backend, job), job.k8s_job_name);
 
   if (observation === null) {
     // The Job is gone but AshML never saw it finish. This is not a success: the
@@ -238,7 +274,7 @@ export async function runOnce(pool, backend, {
         //
         // Not fatal either, and less so. A leaked Secret holds a token the database has
         // already expired, so the cost of failing here is tidiness, not exposure.
-        await backend.deleteSecrets(backend.namespace, { 'ashml.io/job-id': job.id })
+        await backend.deleteSecrets(namespaceOf(backend, job), { 'ashml.io/job-id': job.id })
           .catch((err) => {
             logger?.warn({ err, job_id: job.id }, 'deleting the run token secret failed');
           });

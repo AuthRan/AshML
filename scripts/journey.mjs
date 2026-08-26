@@ -57,6 +57,15 @@ const exec = promisify(execFile);
 
 const ENDPOINT = (process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 const NAMESPACE = process.env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs';
+
+/**
+ * The namespace a job's or a deployment's objects are actually in.
+ *
+ * Since ADR 0019 that is a namespace of the project's own, recorded on the row when
+ * the workload was created rather than derived from the project now. The fallback is
+ * for anything created before the column existed, which is the shared namespace.
+ */
+const nsOf = (row) => row.namespace ?? NAMESPACE;
 const CLI = fileURLToPath(new URL('../packages/cli/src/index.js', import.meta.url));
 const MANIFEST = process.env.JOURNEY_MANIFEST ?? 'examples/training/resnet-cifar-journey.yaml';
 const RETRY_MANIFEST = process.env.JOURNEY_RETRY_MANIFEST ?? 'examples/training/sdk-smoke-retry.yaml';
@@ -250,7 +259,7 @@ step(3, 'Scheduler processes the job', async () => {
   assert.ok(running.k8s_job_name, 'the job is RUNNING with no Kubernetes Job recorded');
 
   const node = await kubectl(
-    'get', 'pods', '-n', NAMESPACE, '-l', `job-name=${running.k8s_job_name}`,
+    'get', 'pods', '-n', nsOf(running), '-l', `job-name=${running.k8s_job_name}`,
     '-o', 'jsonpath={.items[0].spec.nodeName}',
   );
   assert.equal(
@@ -376,7 +385,7 @@ step(6, 'Deploy the model', async () => {
 
   // Asked of the cluster: AshML calling itself READY is the claim under test.
   const ready = await kubectl(
-    'get', 'deploy', `${deployment.k8s_name}-v${globalThis.__version}`, '-n', NAMESPACE,
+    'get', 'deploy', `${deployment.k8s_name}-v${globalThis.__version}`, '-n', nsOf(deployment),
     '-o', 'jsonpath={.status.readyReplicas}',
   );
   assert.equal(Number(ready), deployment.ready_replicas,
@@ -535,7 +544,7 @@ step(9, 'Failure: kill the inference pod, then a training worker', async () => {
    * replacement" would make the assertion below pass while proving nothing.
    */
   const servingPod = () => kubectl(
-    'get', 'pods', '-n', NAMESPACE,
+    'get', 'pods', '-n', nsOf(deployment),
     '-l', `ashml.io/model-version=${globalThis.__version},ashml.io/deployment-id=${deployment.id}`,
     '--field-selector', 'status.phase=Running',
     '-o', 'jsonpath={.items[0].metadata.name}',
@@ -550,7 +559,7 @@ step(9, 'Failure: kill the inference pod, then a training worker', async () => {
   // replacement can become ready before the original leaves, `readyReplicas` never
   // reaches zero, and the outage being demonstrated never happens. The assertion below
   // would then wait for a DEGRADED that was true for no observable instant.
-  await kubectl('delete', 'pod', before, '-n', NAMESPACE, '--grace-period=0', '--force');
+  await kubectl('delete', 'pod', before, '-n', nsOf(deployment), '--grace-period=0', '--force');
   line(`killed serving pod ${before}`);
 
   const noticed = await until('AshML to notice the pod is gone', async (because) => {
@@ -619,10 +628,10 @@ step(9, 'Failure: kill the inference pod, then a training worker', async () => {
   }, { timeout: 300_000, interval: 2000 });
 
   const victim = await kubectl(
-    'get', 'pods', '-n', NAMESPACE, '-l', `job-name=${checkpointed.job.k8s_job_name}`,
+    'get', 'pods', '-n', nsOf(checkpointed.job), '-l', `job-name=${checkpointed.job.k8s_job_name}`,
     '-o', 'jsonpath={.items[0].metadata.name}',
   );
-  await kubectl('delete', 'pod', victim, '-n', NAMESPACE, '--wait=false', '--grace-period=0', '--force');
+  await kubectl('delete', 'pod', victim, '-n', nsOf(checkpointed.job), '--wait=false', '--grace-period=0', '--force');
   line(`killed training pod ${victim} with a checkpoint confirmed at step ${checkpointed.at}`);
 
   // AshML's own loop has to notice and act. Nothing here calls the retry path — a script
@@ -648,7 +657,7 @@ step(9, 'Failure: kill the inference pod, then a training worker', async () => {
   // a pod that starts six hours later does not crash-loop on a dead signature.
   const resumeFrom = await until('the retry pod to be created with a checkpoint offered', async (because) => {
     const env = await kubectl(
-      'get', 'pods', '-n', NAMESPACE, '-l', `job-name=${retried.k8s_job_name}`,
+      'get', 'pods', '-n', nsOf(retried), '-l', `job-name=${retried.k8s_job_name}`,
       '-o', 'jsonpath={.items[0].spec.containers[0].env[?(@.name=="ASHML_RESUME_FROM")].value}',
     ).catch(() => '');
     if (!env) {

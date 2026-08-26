@@ -14,6 +14,7 @@
  */
 
 import { Phase, registerBackend } from './backend.js';
+import { projectNamespace } from './manifest.js';
 
 /**
  * @param {object} [options]
@@ -46,6 +47,15 @@ export function createSimBackend({
 
   /** Projects `ensureProjectIsolation` was called for, in the order they were asked. */
   const isolatedProjects = new Set();
+
+  /** Project name -> the namespace its boundary was drawn in. */
+  const isolatedIn = new Map();
+
+  /** Namespaces `ensureNamespace`/`ensureProjectNamespace` were asked to create. */
+  const ensuredNamespaces = new Set();
+
+  /** Namespaces a log collector was granted `pods/log` in. */
+  const logReaderGrants = new Set();
 
   /**
    * `${namespace}/${name}` -> `{ selector }`.
@@ -108,7 +118,36 @@ export function createSimBackend({
       };
     },
 
-    async ensureNamespace() {},
+    async ensureNamespace(name = namespace) {
+      ensuredNamespaces.add(name);
+      return name;
+    },
+
+    namespaceFor(project, { base = namespace } = {}) {
+      return projectNamespace(project, { base });
+    },
+
+    /**
+     * There is no cluster, so nothing is created — but the *name* is real, and it is what
+     * every object this launch goes on to build is placed in. Returning the same string
+     * the Kubernetes backend would return is the whole point: it is what lets a test
+     * assert that two projects' jobs landed in different namespaces without a cluster.
+     */
+    async ensureProjectNamespace(project, { base = namespace } = {}) {
+      const name = projectNamespace(project, { base });
+      ensuredNamespaces.add(name);
+      // No cluster, so no RBAC — but the *fact* of the grant is recorded, because a
+      // namespace that ships no logs is the kind of regression that shows up as an empty
+      // panel weeks later rather than as a failure here.
+      logReaderGrants.add(name);
+      return name;
+    },
+
+    /** The namespaces a log collector was granted read access in. */
+    logReaderGrants,
+
+    /** The namespaces this backend was asked to create, in insertion order. */
+    ensuredNamespaces,
 
     /**
      * Nothing here is on a network, so there is no boundary to draw.
@@ -117,9 +156,13 @@ export function createSimBackend({
      * isolation before launching its job, which is the ordering that matters and the one
      * a no-op would let regress unnoticed.
      */
-    async ensureProjectIsolation(project) {
+    async ensureProjectIsolation(project, { namespace: ns = namespace } = {}) {
       isolatedProjects.add(project);
+      isolatedIn.set(project, ns);
     },
+
+    /** Which namespace each project's boundary was last drawn in. */
+    isolatedIn,
 
     /** The projects this backend was asked to isolate, in insertion order. */
     isolatedProjects,

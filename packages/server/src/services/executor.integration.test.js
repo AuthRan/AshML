@@ -75,6 +75,15 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     project = res.json();
   });
 
+  /**
+   * Where this project's workloads live: its own namespace, not the shared one the
+   * backend is configured with. Asked of the backend rather than spelled out, so these
+   * tests keep testing the executor and not the naming scheme.
+   */
+  function ns() {
+    return backend.namespaceFor(project);
+  }
+
   async function submit(overrides = {}) {
     const res = await app.inject({
       method: 'POST',
@@ -142,12 +151,12 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     await runOnce(pool, backend);
 
     const job = await getJob(pool, submitted.id);
-    const manifest = backend._jobManifest('ashml-test', job.k8s_job_name);
+    const manifest = backend._jobManifest(ns(), job.k8s_job_name);
     const entry = manifest.spec.template.spec.containers[0].env
       .find((e) => e.name === 'ASHML_RUN_TOKEN');
     assert.ok(entry.valueFrom?.secretKeyRef?.name, 'the token must reach the pod by reference');
 
-    const secret = backend._secret('ashml-test', entry.valueFrom.secretKeyRef.name);
+    const secret = backend._secret(ns(), entry.valueFrom.secretKeyRef.name);
     assert.ok(secret, 'the Secret the Job points at must exist');
     assert.ok(secret.stringData.token, 'and it must hold a credential');
 
@@ -182,18 +191,18 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     await runOnce(pool, backend);
 
     const job = await getJob(pool, submitted.id);
-    const name = backend._jobManifest('ashml-test', job.k8s_job_name)
+    const name = backend._jobManifest(ns(), job.k8s_job_name)
       .spec.template.spec.containers[0].env
       .find((e) => e.name === 'ASHML_RUN_TOKEN').valueFrom.secretKeyRef.name;
-    assert.ok(backend._secret('ashml-test', name));
+    assert.ok(backend._secret(ns(), name));
 
-    backend._setPhase('ashml-test', job.k8s_job_name, Phase.SUCCEEDED, 'completed');
+    backend._setPhase(ns(), job.k8s_job_name, Phase.SUCCEEDED, 'completed');
     await runOnce(pool, backend);
 
     assert.equal((await getJob(pool, submitted.id)).state, JobState.SUCCEEDED);
     // Deleted by label, so a job that retried has every attempt's removed and not just
     // the last one's.
-    assert.equal(backend._secret('ashml-test', name), null);
+    assert.equal(backend._secret(ns(), name), null);
   });
 
   test('a pending pod does not move the job off STARTING', async () => {
@@ -214,7 +223,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     await runOnce(pool, backend);
     const { k8s_job_name: name } = await getJob(pool, submitted.id);
 
-    backend._setPhase('ashml-test', name, Phase.PENDING, 'ImagePullBackOff: no such image');
+    backend._setPhase(ns(), name, Phase.PENDING, 'ImagePullBackOff: no such image');
     await runOnce(pool, backend);
 
     const job = await getJob(pool, submitted.id);
@@ -245,7 +254,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     await runOnce(pool, backend);
     const { k8s_job_name: name } = await getJob(pool, submitted.id);
 
-    backend._setPhase('ashml-test', name, Phase.PENDING, 'ImagePullBackOff: no such image');
+    backend._setPhase(ns(), name, Phase.PENDING, 'ImagePullBackOff: no such image');
     await runOnce(pool, backend);
     await runOnce(pool, backend);
     await runOnce(pool, backend);
@@ -261,11 +270,11 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     await runOnce(pool, backend);
     const { k8s_job_name: name } = await getJob(pool, submitted.id);
 
-    backend._setPhase('ashml-test', name, Phase.PENDING, 'ContainerCreating');
+    backend._setPhase(ns(), name, Phase.PENDING, 'ContainerCreating');
     await runOnce(pool, backend);
     assert.ok((await getJob(pool, submitted.id)).pending_reason);
 
-    backend._setPhase('ashml-test', name, Phase.RUNNING, 'pod running');
+    backend._setPhase(ns(), name, Phase.RUNNING, 'pod running');
     await runOnce(pool, backend);
 
     const job = await getJob(pool, submitted.id);
@@ -278,7 +287,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     await runOnce(pool, backend);
 
     const { k8s_job_name: name } = await getJob(pool, submitted.id);
-    backend._setPhase('ashml-test', name, Phase.RUNNING, 'pod running');
+    backend._setPhase(ns(), name, Phase.RUNNING, 'pod running');
     await runOnce(pool, backend);
 
     const job = await getJob(pool, submitted.id);
@@ -291,9 +300,9 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     await runOnce(pool, backend);
     const { k8s_job_name: name } = await getJob(pool, submitted.id);
 
-    backend._setPhase('ashml-test', name, Phase.RUNNING);
+    backend._setPhase(ns(), name, Phase.RUNNING);
     await runOnce(pool, backend);
-    backend._setPhase('ashml-test', name, Phase.SUCCEEDED, 'completed');
+    backend._setPhase(ns(), name, Phase.SUCCEEDED, 'completed');
     await runOnce(pool, backend);
 
     const job = await getJob(pool, submitted.id);
@@ -311,7 +320,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     const { k8s_job_name: name } = await getJob(pool, submitted.id);
 
     // Never observed RUNNING: the pod started and finished inside one interval.
-    backend._setPhase('ashml-test', name, Phase.SUCCEEDED, 'completed');
+    backend._setPhase(ns(), name, Phase.SUCCEEDED, 'completed');
     await runOnce(pool, backend);
 
     const job = await getJob(pool, submitted.id);
@@ -330,7 +339,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     await runOnce(pool, backend);
     const { k8s_job_name: name } = await getJob(pool, submitted.id);
 
-    backend._setPhase('ashml-test', name, Phase.FAILED, 'container exited 1 (Error)');
+    backend._setPhase(ns(), name, Phase.FAILED, 'container exited 1 (Error)');
     await runOnce(pool, backend);
 
     const job = await getJob(pool, submitted.id);
@@ -344,7 +353,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     const { k8s_job_name: name } = await getJob(pool, submitted.id);
 
     // Someone ran `kubectl delete job` by hand, or the pod was evicted.
-    await backend.deleteJob('ashml-test', name);
+    await backend.deleteJob(ns(), name);
     await runOnce(pool, backend);
 
     const job = await getJob(pool, submitted.id);
@@ -356,7 +365,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     const submitted = await submit();
     await runOnce(pool, backend);
     const { k8s_job_name: name } = await getJob(pool, submitted.id);
-    backend._setPhase('ashml-test', name, Phase.RUNNING);
+    backend._setPhase(ns(), name, Phase.RUNNING);
     await runOnce(pool, backend);
 
     const cancelled = await cancelJob(pool, submitted.id);
@@ -392,7 +401,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     assert.equal(claimed.k8s_job_name, null);
 
     const { buildJobManifest } = await import('../k8s/manifest.js');
-    await backend.createJob(buildJobManifest(claimed, { namespace: 'ashml-test' }));
+    await backend.createJob(buildJobManifest(claimed, { namespace: ns() }));
     assert.equal(backend._size(), 1);
 
     const cancelled = await cancelJob(pool, submitted.id);
@@ -479,7 +488,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     const submitted = await submit();
     await runOnce(pool, backend);
     const { k8s_job_name: name } = await getJob(pool, submitted.id);
-    backend._setPhase('ashml-test', name, Phase.RUNNING);
+    backend._setPhase(ns(), name, Phase.RUNNING);
     await runOnce(pool, backend);
 
     const events = await getJobEvents(pool, submitted.id);
@@ -487,7 +496,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     const running = events.find((e) => e.to_state === JobState.RUNNING);
 
     assert.equal(starting.details.k8s_job_name, name);
-    assert.equal(starting.details.namespace, 'ashml-test');
+    assert.equal(starting.details.namespace, ns());
     // The sim backend never hides that nothing really ran (spec Rule 5).
     assert.equal(starting.details.simulated, true);
     assert.equal(running.details.simulated, true);
@@ -522,7 +531,7 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     const submitted = await submit();
     await runOnce(pool, backend);
     const { k8s_job_name: name } = await getJob(pool, submitted.id);
-    backend._setPhase('ashml-test', name, Phase.SUCCEEDED);
+    backend._setPhase(ns(), name, Phase.SUCCEEDED);
     await runOnce(pool, backend);
 
     const finished = await getJob(pool, submitted.id);
@@ -532,5 +541,115 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     const changed = await reconcileJob(pool, backend, finished);
     assert.equal(changed, null);
     assert.equal((await getJob(pool, submitted.id)).state, JobState.SUCCEEDED);
+  });
+  // ------------------------------------------------- a namespace per project
+
+  describe('the namespace a job runs in', () => {
+    test('is the project\'s own, and is recorded rather than recomputed later', async () => {
+      const submitted = await submit();
+      await runOnce(pool, backend);
+
+      const launched = await getJob(pool, submitted.id);
+      assert.equal(launched.namespace, ns());
+      assert.notEqual(
+        launched.namespace, 'ashml-test',
+        'a job must not land in the shared namespace its project replaced',
+      );
+
+      // The Job is really there, under that name, in that namespace.
+      assert.ok(backend._jobManifest(launched.namespace, launched.k8s_job_name));
+    });
+
+    test('is created before the workload that goes in it', async () => {
+      // Ordering, not existence. A Secret or a Job created in a namespace that does not
+      // exist yet is a 404 on the launch path, so the namespace has to come first.
+      const submitted = await submit();
+      await runOnce(pool, backend);
+
+      assert.ok(
+        backend.ensuredNamespaces.has(ns()),
+        `the project namespace should have been ensured; got ${[...backend.ensuredNamespaces]}`,
+      );
+      // The attempt's Secret is in that namespace too, which is the object the launch
+      // would have 404'd on had the namespace not been created first.
+      const { runSecretName } = await import('../k8s/manifest.js');
+      const launched = await getJob(pool, submitted.id);
+      assert.ok(backend._secret(ns(), runSecretName(launched)));
+    });
+
+    test('differs between two projects, which is the whole point', async () => {
+      const other = (await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        payload: { name: uniqueName('proj'), description: 'the other project' },
+      })).json();
+
+      const mine = await submit();
+      const theirs = await submit({ project: other.name });
+      await runOnce(pool, backend);
+
+      const a = await getJob(pool, mine.id);
+      const b = await getJob(pool, theirs.id);
+      assert.ok(a.namespace && b.namespace);
+      assert.notEqual(
+        a.namespace, b.namespace,
+        'two projects sharing a namespace is the isolation gap this closes',
+      );
+    });
+
+    test('each project gets its own network boundary, drawn in its own namespace', async () => {
+      const other = (await app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        payload: { name: uniqueName('proj'), description: 'the other project' },
+      })).json();
+
+      await submit();
+      await submit({ project: other.name });
+      await runOnce(pool, backend);
+
+      assert.equal(backend.isolatedIn.get(project.name), backend.namespaceFor(project));
+      assert.equal(backend.isolatedIn.get(other.name), backend.namespaceFor(other));
+    });
+
+    test('the log collector is granted read access in it', async () => {
+      // Without this a per-project namespace ships no logs at all, and the symptom is an
+      // empty Grafana panel — which reads as "this run printed nothing" rather than as a
+      // missing permission. ADR 0018's grant was a Role in one namespace; there is one
+      // namespace per project now, so it has to be created with each of them.
+      await submit();
+      await runOnce(pool, backend);
+
+      assert.ok(
+        backend.logReaderGrants.has(ns()),
+        `no log-reader grant for ${ns()}; got ${[...backend.logReaderGrants]}`,
+      );
+    });
+
+    test('a job launched before this existed is still observed where it actually is', async () => {
+      // The upgrade case, and the one a recomputed namespace would break. A job already
+      // running when the column arrived has no namespace recorded and its Pod is in the
+      // shared namespace; asking the project's namespace for it returns nothing, which
+      // the executor is required to read as "the workload is gone" — so a healthy run
+      // would be failed and its GPU released while it still holds it.
+      const submitted = await submit();
+      await runOnce(pool, backend);
+      const launched = await getJob(pool, submitted.id);
+
+      // Rewind this row to what an upgraded cluster's rows look like, and put the Job
+      // where such a job's Pod would be.
+      await pool.query('UPDATE training_jobs SET namespace = NULL WHERE id = $1', [submitted.id]);
+      const { buildJobManifest } = await import('../k8s/manifest.js');
+      await backend.createJob(buildJobManifest(launched, { namespace: 'ashml-test' }));
+      backend._setPhase('ashml-test', launched.k8s_job_name, Phase.RUNNING);
+
+      await runOnce(pool, backend);
+
+      const observed = await getJob(pool, submitted.id);
+      assert.equal(
+        observed.state, JobState.RUNNING,
+        'a job in the shared namespace must still be found there',
+      );
+    });
   });
 });

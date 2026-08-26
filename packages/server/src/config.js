@@ -42,6 +42,19 @@ export function loadConfig(env = process.env) {
     // so on a workstation with more than one cluster, leaving this unset means a
     // control plane that comes back from a restart pointed somewhere else.
     kubeconfigContext: env.ASHML_KUBECONFIG_CONTEXT ?? null,
+    // Who may read pod logs in a project's namespace (ADR 0019).
+    //
+    // Every project gets a namespace of its own, and a log collector that could only
+    // read `ashml-jobs` would silently stop shipping the moment that happened — the
+    // failure being an empty Grafana panel, which reads as "this run printed nothing".
+    // So AshML grants the collector `pods/log` in each namespace it creates.
+    //
+    // Defaulted rather than left unset, because the alternative is a cluster that runs
+    // `make observability`, looks healthy, and collects nothing until somebody notices.
+    // It names the service account the shipped stack actually uses; a RoleBinding to a
+    // service account that does not exist is legal and inert, so the default costs
+    // nothing on a cluster with no collector. `none` turns it off.
+    logCollectorServiceAccount: parseServiceAccount(env.ASHML_LOG_COLLECTOR_SERVICE_ACCOUNT),
 
     // Per-project network isolation (Phase 10, spec §31).
     //
@@ -221,6 +234,31 @@ export function loadConfig(env = process.env) {
  * ceiling of zero days would mint tokens that have already expired, so every caller would
  * be handed a credential that fails on first use and no message would say why.
  */
+/**
+ * Parses `namespace/name` into the subject of a RoleBinding.
+ *
+ * Refused rather than guessed when it is malformed. A collector identity that is subtly
+ * wrong produces a RoleBinding Kubernetes accepts and nothing ever uses, and the symptom
+ * is missing logs weeks later — so this fails at startup, where the cause is still
+ * attached to the change that caused it.
+ */
+function parseServiceAccount(raw) {
+  if (raw === undefined || raw === null || raw === '') {
+    return { namespace: 'ashml-observability', name: 'alloy' };
+  }
+  if (String(raw).trim().toLowerCase() === 'none') return null;
+
+  const [namespace, name, ...rest] = String(raw).trim().split('/');
+  const label = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+  if (rest.length > 0 || !label.test(namespace ?? '') || !label.test(name ?? '')) {
+    throw new Error(
+      `ASHML_LOG_COLLECTOR_SERVICE_ACCOUNT="${raw}": want "namespace/name", `
+      + 'or "none" to grant nothing',
+    );
+  }
+  return { namespace, name };
+}
+
 function parseTokenTtlDays(raw) {
   if (raw === undefined || raw === null || raw === '') return DEFAULT_MAX_TTL_DAYS;
   if (String(raw).trim().toLowerCase() === 'none') return null;

@@ -348,10 +348,20 @@ export async function applyDesiredState(pool, backend, deploymentId, {
   // holding, and because a Secret-sourced env var is fixed at container start, nothing
   // would restart to pick up the replacement — the router would 401 on its next poll and
   // go on serving the last table it had. See `ensureServingToken`.
+  // The namespace recorded on the deployment wins over the one this process would
+  // choose, for the same reason it does on the status path: a deployment created before
+  // per-project namespaces existed lives in the shared one, and a rollout is not the
+  // moment to start creating its new pods somewhere its Service is not.
+  //
+  // Only a deployment with nothing recorded gets a namespace chosen for it, and that is
+  // its project's — created here if this is the project's first workload of any kind.
+  const ns = deployment.namespace
+    ?? await backend.ensureProjectNamespace(deployment.project_ref, { base: namespace });
+
   // Before any of this deployment's objects, and on every apply rather than on the
   // first: a model server is the pod another project would most like to reach, and the
   // boundary that refuses it has to already exist when the pod does (`k8s/manifest.js`).
-  await backend.ensureProjectIsolation(deployment.project);
+  await backend.ensureProjectIsolation(deployment.project, { namespace: ns });
 
   const secretName = servingSecretName(deployment);
   const serving = await ensureServingToken(pool, deployment.id, {
@@ -359,7 +369,7 @@ export async function applyDesiredState(pool, backend, deploymentId, {
   });
   if (serving.created) {
     await backend.applySecret(
-      buildServingSecretManifest(deployment, serving.token, { namespace }),
+      buildServingSecretManifest(deployment, serving.token, { namespace: ns }),
     );
   }
 
@@ -369,9 +379,9 @@ export async function applyDesiredState(pool, backend, deploymentId, {
     const resolved = { ...target, arch: target.arch ?? arch };
     try {
       await backend.applyDeployment(
-        buildTargetManifest(deployment, resolved, { namespace, apiUrl, secretName }),
+        buildTargetManifest(deployment, resolved, { namespace: ns, apiUrl, secretName }),
       );
-      await backend.applyService(buildTargetServiceManifest(deployment, resolved, { namespace }));
+      await backend.applyService(buildTargetServiceManifest(deployment, resolved, { namespace: ns }));
     } catch (err) {
       await deploymentsRepo.recordObservation(pool, deployment.id, {
         status: DeploymentStatus.FAILED,
@@ -382,11 +392,11 @@ export async function applyDesiredState(pool, backend, deploymentId, {
     }
     await deploymentsRepo.recordTargetLaunch(pool, deployment.id, target.model_version_id, {
       k8sName: kubeTargetName(deployment, target.version),
-      endpointUrl: targetServiceUrl(deployment, target.version, { namespace }),
+      endpointUrl: targetServiceUrl(deployment, target.version, { namespace: ns }),
     });
   }
 
-  await applyRouter(pool, backend, deployment, { namespace, apiUrl, secretName });
+  await applyRouter(pool, backend, deployment, { namespace: ns, apiUrl, secretName });
 
   const front = desiredFront(deployment);
   if (!deployment.k8s_name) {
@@ -398,11 +408,11 @@ export async function applyDesiredState(pool, backend, deploymentId, {
     // ready pod. That is the same "not ready yet" a brand-new model server is in, and the
     // status says PROGRESSING for both.
     const version = front.kind === 'version' ? front.version : null;
-    await backend.applyService(buildServiceManifest(deployment, { namespace, version }));
+    await backend.applyService(buildServiceManifest(deployment, { namespace: ns, version }));
     await deploymentsRepo.recordLaunch(pool, deployment.id, {
       k8sName: kubeDeploymentName(deployment),
-      namespace,
-      endpointUrl: serviceUrl(deployment, { namespace }),
+      namespace: ns,
+      endpointUrl: serviceUrl(deployment, { namespace: ns }),
     });
     await deploymentsRepo.recordServingVersion(pool, deployment.id, version);
     deployment.k8s_name = kubeDeploymentName(deployment);
@@ -420,10 +430,8 @@ export async function applyDesiredState(pool, backend, deploymentId, {
     judge(fresh, fresh.targets, { previousStatus: deployment.status }),
   );
 
-  await removeRouterIfUnused(pool, backend, deployment, {
-    namespace: deployment.namespace ?? namespace,
-  });
-  await reap(pool, backend, deployment.id, { namespace: deployment.namespace ?? namespace });
+  await removeRouterIfUnused(pool, backend, deployment, { namespace: ns });
+  await reap(pool, backend, deployment.id, { namespace: ns });
 }
 
 /**

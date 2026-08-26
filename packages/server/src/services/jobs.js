@@ -228,7 +228,7 @@ export async function claimNextJob(pool, { claimedBy = 'scheduler', excludeIds =
  */
 export async function markLaunched(pool, jobId, k8sJobName, { namespace, simulated = false } = {}) {
   return withTransaction(pool, async (client) => {
-    await jobsRepo.setK8sJobName(client, jobId, k8sJobName);
+    await jobsRepo.setK8sJobName(client, jobId, k8sJobName, namespace ?? null);
     await applyTransition(client, jobId, JobState.STARTING, {
       message: `kubernetes Job ${k8sJobName} created`,
       details: { k8s_job_name: k8sJobName, namespace, simulated },

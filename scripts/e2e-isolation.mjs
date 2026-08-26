@@ -5,11 +5,20 @@
  *   rather than of AshML: can a pod in project A open a connection to a pod in
  *   project B?
  *
- * This is the gap Phase 10 named and left open — every project's workloads share one
- * namespace, so until now the answer was yes, and nothing in the platform had an opinion
- * about it. AshML's own authorization cannot close it, because that traffic never goes
- * near the control plane: it is pod to pod, inside one namespace, and only the cluster
- * can refuse it (`k8s/manifest.js`, ADR 0017).
+ * This is the gap Phase 10 named and left open. AshML's own authorization cannot close
+ * it, because that traffic never goes near the control plane: it is pod to pod, and only
+ * the cluster can refuse it (`k8s/manifest.js`, ADR 0017).
+ *
+ * It is now closed twice over, and the checks below are deliberately written against
+ * both halves. Each project has a **namespace of its own** (ADR 0019), which is the
+ * structural half: separate namespaces, separate service accounts, and a Pod Security
+ * Admission label the cluster applies to each. And each project keeps its **egress
+ * NetworkPolicy**, which is the half that still does the refusing — a namespace by
+ * itself does not stop a pod dialling an IP in another one.
+ *
+ * Both are checked because either alone would leave a false claim in the README. The
+ * namespaces could be right while the policy is unenforced, and the policy could be
+ * enforced while a change quietly puts two projects back in one namespace.
  *
  * Which is exactly why this script exists in the shape it does. A NetworkPolicy is an
  * object every cluster *accepts* and only some clusters *enforce* — a CNI without a
@@ -85,6 +94,9 @@ async function createProject(name) {
     payload: { name, description: 'per-project network isolation' },
   });
   assert.equal(res.statusCode, 201, res.payload);
+  // Returned rather than discarded: a project's namespace is named from its id as well
+  // as its name, so the checks below need the row and not just the string they passed in.
+  return res.json();
 }
 
 /**
@@ -134,14 +146,20 @@ async function runningPod(jobId, what) {
     throw new Error(`timed out waiting for ${what} to run; it is ${job?.state}`);
   }
 
+  // The namespace the job recorded when it launched, not the one this script is
+  // configured with. They are different now: a job runs in its project's own namespace,
+  // and `NAMESPACE` is only the base those names are built from.
+  const ns = job.namespace;
+  assert.ok(ns, `${what} is running but recorded no namespace`);
+
   const pod = await kubectl(
-    'get', 'pods', '-n', NAMESPACE, '-l', `job-name=${job.k8s_job_name}`,
+    'get', 'pods', '-n', ns, '-l', `job-name=${job.k8s_job_name}`,
     '-o', 'jsonpath={.items[0].metadata.name}',
   );
-  const ip = await kubectl('get', 'pod', pod, '-n', NAMESPACE, '-o', 'jsonpath={.status.podIP}');
-  const node = await kubectl('get', 'pod', pod, '-n', NAMESPACE, '-o', 'jsonpath={.spec.nodeName}');
+  const ip = await kubectl('get', 'pod', pod, '-n', ns, '-o', 'jsonpath={.status.podIP}');
+  const node = await kubectl('get', 'pod', pod, '-n', ns, '-o', 'jsonpath={.spec.nodeName}');
   assert.ok(ip, `${what} is running but has no pod IP`);
-  return { pod, ip, node };
+  return { pod, ip, node, namespace: ns };
 }
 
 /** The address another pod would use to reach a pod that is serving. */
@@ -155,10 +173,10 @@ const served = (target) => `http://${target.ip}:${PORT}/`;
  * is long enough to tell those apart from a slow answer without adding a minute to the
  * run for each blocked check.
  */
-async function canReach(pod, url) {
+async function canReach(from, url) {
   try {
     const body = await kubectl(
-      'exec', '-n', NAMESPACE, pod, '--',
+      'exec', '-n', from.namespace, from.pod, '--',
       'wget', '-q', '-O', '-', '-T', '4', url,
     );
     return { ok: true, body: body.trim() };
@@ -168,6 +186,8 @@ async function canReach(pod, url) {
 }
 
 const pods = {};
+/** The project rows, kept because a namespace is named from the id as well as the name. */
+const projects = {};
 
 // --------------------------------------------------------------- the checks
 
@@ -175,8 +195,8 @@ check('two projects, two real containers each, all running on the cluster', asyn
   await app.k8s.ensureNamespace();
   await discoverCluster(app.db, app.k8s, app.gpuProvider);
 
-  await createProject(alpha);
-  await createProject(beta);
+  projects.alpha = await createProject(alpha);
+  projects.beta = await createProject(beta);
 
   const submitted = {
     alphaServer: await submit(alpha, `srv-a-${suffix}`, 'serve'),
@@ -196,11 +216,35 @@ check('two projects, two real containers each, all running on the cluster', asyn
   console.log(`        pods are on ${nodes.size} node(s): ${[...nodes].join(', ')}`);
 });
 
+check('the two projects are in different namespaces, and the cluster hardens both', async () => {
+  // The structural half of the boundary, and the one that does not depend on a CNI
+  // enforcing anything. Two namespaces is what makes every rule below a rule Kubernetes
+  // applies rather than one AshML remembers to.
+  const nsAlpha = pods.alphaServer.namespace;
+  const nsBeta = pods.betaServer.namespace;
+  assert.notEqual(nsAlpha, nsBeta, 'each project must have a namespace of its own');
+  assert.equal(nsAlpha, app.k8s.namespaceFor(projects.alpha));
+  assert.equal(nsBeta, app.k8s.namespaceFor(projects.beta));
+
+  // Pod Security Admission is the cluster refusing a privileged pod whoever asks for it,
+  // including anything with write access that is not AshML. It was won for the shared
+  // namespace in Phase 10 and would be silently lost by moving workloads to namespaces
+  // that do not carry it, which is exactly the kind of regression a manifest assertion
+  // would not catch.
+  for (const ns of [nsAlpha, nsBeta]) {
+    const enforce = await kubectl(
+      'get', 'namespace', ns,
+      '-o', 'jsonpath={.metadata.labels.pod-security\\.kubernetes\\.io/enforce}',
+    );
+    assert.equal(enforce, 'baseline', `${ns} should be labelled for Pod Security Admission`);
+  }
+});
+
 check('each project has a NetworkPolicy, applied by the platform and not by hand', async () => {
-  for (const project of [alpha, beta]) {
+  for (const [key, project] of [['alphaServer', alpha], ['betaServer', beta]]) {
     const name = projectNetworkPolicyName(project);
     const found = await kubectl(
-      'get', 'networkpolicy', name, '-n', NAMESPACE,
+      'get', 'networkpolicy', name, '-n', pods[key].namespace,
       '-o', 'jsonpath={.metadata.labels.app\\.kubernetes\\.io/managed-by}',
     );
     assert.equal(found, 'ashml', `${name} should exist and be managed by AshML`);
@@ -208,11 +252,11 @@ check('each project has a NetworkPolicy, applied by the platform and not by hand
 });
 
 check('a project can reach its own pods — the control for every refusal below', async () => {
-  const own = await canReach(pods.alphaClient.pod, served(pods.alphaServer));
+  const own = await canReach(pods.alphaClient, served(pods.alphaServer));
   assert.ok(own.ok, `alpha could not reach its own server: ${own.body}`);
   assert.equal(own.body, alpha);
 
-  const theirs = await canReach(pods.betaClient.pod, served(pods.betaServer));
+  const theirs = await canReach(pods.betaClient, served(pods.betaServer));
   assert.ok(theirs.ok, `beta could not reach its own server: ${theirs.body}`);
   assert.equal(theirs.body, beta);
 });
@@ -220,7 +264,7 @@ check('a project can reach its own pods — the control for every refusal below'
 check('a pod cannot reach another project\'s pod, at the address that project just used', async () => {
   // The whole point, and the reason the check above runs first: this address answered a
   // request seconds ago, from a pod in the project that owns it.
-  const across = await canReach(pods.alphaClient.pod, served(pods.betaServer));
+  const across = await canReach(pods.alphaClient, served(pods.betaServer));
   assert.equal(
     across.ok, false,
     `alpha reached beta's pod and got "${across.body}" — the network policy is not being `
@@ -229,7 +273,7 @@ check('a pod cannot reach another project\'s pod, at the address that project ju
   );
 
   // And symmetrically, which is what makes this a boundary rather than a one-way filter.
-  const back = await canReach(pods.betaClient.pod, served(pods.alphaServer));
+  const back = await canReach(pods.betaClient, served(pods.alphaServer));
   assert.equal(back.ok, false, `beta reached alpha's pod and got "${back.body}"`);
 });
 
@@ -238,7 +282,7 @@ check('a pod can still reach the control plane, which is outside the cluster', a
   // able to report metrics, upload a checkpoint and fetch a dataset. A policy that
   // isolated projects by isolating them from the platform would pass every check above.
   const health = await canReach(
-    pods.alphaClient.pod,
+    pods.alphaClient,
     new URL('/healthz', config.apiAdvertiseUrl).toString(),
   );
   assert.ok(
@@ -256,7 +300,7 @@ check('the API server can still proxy to a pod, which is how ash predict works',
   // refuses it only for the pods that happen not to share a node with the API server.
   const body = await kubectl(
     'get', '--raw',
-    `/api/v1/namespaces/${NAMESPACE}/pods/${pods.betaServer.pod}:${PORT}/proxy/`,
+    `/api/v1/namespaces/${pods.betaServer.namespace}/pods/${pods.betaServer.pod}:${PORT}/proxy/`,
   );
   assert.equal(
     body.trim(), beta,
@@ -295,6 +339,18 @@ while (Date.now() < deadline) {
   const states = await Promise.all(started.map((id) => getJob(app.db, id)));
   if (states.every((job) => job.state === JobState.CANCELLED)) break;
   await new Promise((resolve) => { setTimeout(resolve, 1000); });
+}
+
+// And the namespaces the two throwaway projects were given. Nothing else removes them:
+// a project has no delete endpoint, so its namespace outlives every run that made one,
+// and a script that leaves two behind on every invocation is how a cluster ends up with
+// hundreds. Deleted by name, after the pods inside them are gone, and only ever the ones
+// this run created.
+for (const project of Object.values(projects)) {
+  if (!project) continue;
+  try {
+    await kubectl('delete', 'namespace', app.k8s.namespaceFor(project), '--wait=false');
+  } catch { /* the checks above already reported anything that matters */ }
 }
 
 console.log(`\n${results.length - failed}/${results.length} isolation checks passed`);

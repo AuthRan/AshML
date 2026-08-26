@@ -94,7 +94,7 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
     await runOnce(pool, backend);
     const launched = await getJob(pool, job.id);
     assert.equal(launched.state, JobState.STARTING, 'setup: should have launched');
-    backend._setPhase('ashml-test', launched.k8s_job_name, Phase.RUNNING);
+    backend._setPhase(launched.namespace, launched.k8s_job_name, Phase.RUNNING);
     await runOnce(pool, backend);
     return getJob(pool, job.id);
   }
@@ -108,7 +108,7 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
    * state in between.
    */
   async function failJob(job, reason = 'container exited 1 (Error)') {
-    backend._setPhase('ashml-test', job.k8s_job_name, Phase.FAILED, reason);
+    backend._setPhase(job.namespace, job.k8s_job_name, Phase.FAILED, reason);
     await reconcileJob(pool, backend, await getJob(pool, job.id));
     return getJob(pool, job.id);
   }
@@ -161,7 +161,7 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
     // died on a lost node is back in flight within a single tick rather than waiting a
     // whole interval to be picked up.
     const job = await runningJob({ maxRetries: 2 });
-    backend._setPhase('ashml-test', job.k8s_job_name, Phase.FAILED, 'container exited 1 (Error)');
+    backend._setPhase(job.namespace, job.k8s_job_name, Phase.FAILED, 'container exited 1 (Error)');
 
     const summary = await runOnce(pool, backend);
     assert.equal(summary.retried, 1);
@@ -195,14 +195,14 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
     const job = await runningJob({ maxRetries: 1 });
 
     // Attempt 0 fails; one pass retries it and launches attempt 1.
-    backend._setPhase('ashml-test', job.k8s_job_name, Phase.FAILED, 'container exited 1 (Error)');
+    backend._setPhase(job.namespace, job.k8s_job_name, Phase.FAILED, 'container exited 1 (Error)');
     await runOnce(pool, backend);
     let current = await getJob(pool, job.id);
     assert.equal(current.attempt, 1);
     assert.equal(current.state, JobState.STARTING);
 
     // Attempt 1 fails too, and there is no budget left for a third.
-    backend._setPhase('ashml-test', current.k8s_job_name, Phase.FAILED, 'container exited 1 (Error)');
+    backend._setPhase(current.namespace, current.k8s_job_name, Phase.FAILED, 'container exited 1 (Error)');
     await runOnce(pool, backend);
 
     current = await getJob(pool, job.id);
@@ -342,7 +342,7 @@ describe('retry driver (integration)', { skip: pool ? false : SKIP_MESSAGE }, ()
   test('a workload that vanished is retried, because nothing was learned from it', async () => {
     const job = await runningJob({ maxRetries: 1 });
     // Delete the Job out from under AshML, as an operator or an evicting node would.
-    await backend.deleteJob('ashml-test', job.k8s_job_name);
+    await backend.deleteJob(job.namespace, job.k8s_job_name);
     await reconcileJob(pool, backend, job);
 
     const failed = await getJob(pool, job.id);

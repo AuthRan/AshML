@@ -128,6 +128,7 @@ export async function buildApp(config, {
       kubeconfigContext: config.kubeconfigContext,
       networkPolicyEnabled: config.networkPolicyEnabled,
       clusterPodCidr: config.clusterPodCidr,
+      logCollectorServiceAccount: config.logCollectorServiceAccount,
     });
   } catch (err) {
     throw new Error(

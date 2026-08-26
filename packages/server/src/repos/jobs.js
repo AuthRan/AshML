@@ -10,8 +10,9 @@ const JOB_COLUMNS = `
   j.cpu_request, j.memory_request, j.gpu_request, j.gpu_memory_min,
   j.spec, j.attempt, j.max_retries, j.failure_reason, j.pending_reason,
   j.retry_decision, j.retry_decided_at, j.resume_artifact_id,
-  j.scheduled_node_id, j.placement_reason, j.k8s_job_name,
+  j.scheduled_node_id, j.placement_reason, j.k8s_job_name, j.namespace,
   j.queued_at, j.started_at, j.finished_at, j.created_at, j.updated_at,
+  j.project_id,
   p.name AS project_name,
   j.experiment_id,
   e.name AS experiment_name,
@@ -38,6 +39,11 @@ function toJob(row) {
     id: row.id,
     name: row.name,
     project: row.project_name,
+    // The project as an object as well as a name, because the two things Kubernetes is
+    // asked for on the launch path — the namespace and the isolation policy — are named
+    // from the id and the name respectively. Kept beside `project` rather than replacing
+    // it: `project` is the name everywhere in the API and the CLI, and this is internal.
+    project_ref: { id: row.project_id, name: row.project_name },
     state: row.state,
     priority: row.priority,
     resources: {
@@ -53,6 +59,8 @@ function toJob(row) {
     attempt: row.attempt,
     max_retries: row.max_retries,
     k8s_job_name: row.k8s_job_name || null,
+    // Null means "launched before namespaces were per-project", which is the shared one.
+    namespace: row.namespace || null,
     failure_reason: row.failure_reason || null,
     pending_reason: row.pending_reason || null,
     retry: {
@@ -257,10 +265,17 @@ export async function lockNextQueuedJob(client, { excludeIds = [] } = {}) {
  * separately, a crash between them would leave a running Pod that no database row
  * points at — a workload nothing can observe or cancel.
  */
-export async function setK8sJobName(client, id, k8sJobName) {
+export async function setK8sJobName(client, id, k8sJobName, namespace = null) {
   await client.query(
-    `UPDATE training_jobs SET k8s_job_name = $2, updated_at = now() WHERE id = $1`,
-    [id, k8sJobName],
+    `UPDATE training_jobs
+        SET k8s_job_name = $2,
+            -- COALESCE, so a retry that somehow arrives without a namespace cannot
+            -- erase the one the running workload was actually created in. The column is
+            -- the only record of where to look for that Pod.
+            namespace = COALESCE($3, namespace),
+            updated_at = now()
+      WHERE id = $1`,
+    [id, k8sJobName, namespace],
   );
 }
 

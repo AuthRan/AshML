@@ -629,10 +629,11 @@ Training pods, model servers and routers now all run with
 `capabilities: drop: [ALL]` and the runtime's own seccomp profile. On the development
 cluster they now mount no volumes at all.
 
-The half AshML cannot do for itself is the namespace label. The workload namespace carries
-`pod-security.kubernetes.io/enforce=baseline`, so the **cluster** refuses a privileged or
-host-networked pod there whoever submits it — the difference between AshML checking AshML
-and a rule that binds anything with write access to that namespace:
+The half AshML cannot do for itself is the namespace label. Every workload namespace
+carries `pod-security.kubernetes.io/enforce=baseline` — the shared one, and each project's
+own — so the **cluster** refuses a privileged or host-networked pod there whoever submits
+it, which is the difference between AshML checking AshML and a rule that binds anything
+with write access to that namespace:
 
 ```console
 $ kubectl -n ashml-jobs run psa-probe --image=busybox:1.36 --dry-run=server     --overrides='{"spec":{"hostNetwork":true,…,"privileged":true}}'
@@ -654,20 +655,31 @@ including why `baseline` and not `restricted`.
 ### One project cannot reach another's pods
 
 Everything above governs what a pod *is*. It says nothing about who a pod can reach, and
-until recently the answer was everyone: all projects' workloads share one namespace, so a
+until recently the answer was everyone: all projects' workloads shared one namespace, so a
 training pod in one project could open a socket to a model server in another and nothing
 in the platform had an opinion about it. AshML's own authorization cannot close that,
 because the traffic never goes near the control plane — it is pod to pod, and only the
 cluster can refuse it.
 
-Each project now gets a NetworkPolicy, applied before the first workload that needs it:
+Each project now gets **a namespace of its own**, and a NetworkPolicy inside it, applied
+before the first workload that needs it:
 
 ```console
-$ kubectl -n ashml-jobs get networkpolicy
+$ kubectl get ns -l app.kubernetes.io/managed-by=ashml
+NAME                          STATUS   AGE
+ashml-jobs                    Active   31d
+ashml-jobs-vision-3f2b1c4d    Active   2m
+ashml-jobs-fraud-a70baab0     Active   2m
+
+$ kubectl -n ashml-jobs-vision-3f2b1c4d get networkpolicy
 NAME                   POD-SELECTOR                AGE
 ashml-project-vision   ashml.io/project=vision     2m
-ashml-project-fraud    ashml.io/project=fraud      2m
 ```
+
+The two do different work, and the namespace does not make the policy redundant.
+Kubernetes scopes *names*, not routes: nothing about being in one namespace stops a pod
+opening a connection to a pod IP in another. The namespace is what separates Secrets,
+service accounts and anything scoped per-namespace; the policy is what refuses the packet.
 
 A project's pods may reach **their own project on any port**, **DNS**, and **everything
 that is not a pod in this cluster** — the control plane, the artifact store, a dataset on
@@ -696,10 +708,20 @@ Every refusal it asserts is paired with the same address answering a pod in the 
 that owns it, at the same moment — "alpha cannot reach beta" proves nothing without "beta
 can, right now". It needs only `busybox`, so it runs in CI beside `make e2e`.
 
-**Still true, and the next real step:** the isolation is between projects, not between a
-project and the platform. Every project's pods still share one namespace and one service
-account, so a compromised training image is contained by the namespace and by this policy,
-not by Kubernetes RBAC. That needs a namespace per project.
+It checks both halves separately — that the two projects are in different namespaces and
+that the cluster hardens both, and that neither can reach the other — because either alone
+would leave a false claim here: the namespaces could be right while the policy is
+unenforced, and the policy could be enforced while a change quietly put two projects back
+in one namespace.
+
+**Still true, and smaller than it was:** nothing reclaims a namespace. There is no
+delete-project endpoint, so a cluster accumulates one namespace per project that has ever
+launched anything, forever. And the control plane still holds credentials that can write
+to all of them — this separates projects from each other and from the platform's
+namespace, not from the platform's reach.
+[ADR 0019](docs/adr/0019-a-namespace-per-project.md) has the reasoning, including why the
+namespace is recorded on the row rather than derived, which is what lets an existing
+cluster upgrade without moving a single running workload.
 
 ### What it refused, and who it refused
 
@@ -875,6 +897,26 @@ $ # and in Grafana, {job_id="6993051b…"} still returns all six lines
 `ash job logs` is deliberately unchanged: it asks the cluster, and says plainly when the
 cluster no longer knows. Wiring it to fall back to Loki would give the control plane a
 required dependency on a log store for a fallback path.
+The collector's grant is split, and the split is the part worth knowing. Since each
+project runs in a namespace of its own, discovering pods across them has to be
+cluster-wide — Alloy can only filter namespaces by a fixed list, and a fixed list cannot
+name a namespace created next week. So a ClusterRole grants `pods`: names, labels, phases.
+**`pods/log` is not in it.** That half is a Role per namespace, created by AshML alongside
+the namespace itself, so Alloy can see that a pod exists anywhere and read what it printed
+only inside AshML's namespaces:
+
+```console
+$ kubectl auth can-i get pods/log -n ashml-jobs-vision-3f2b1c4d \
+    --as=system:serviceaccount:ashml-observability:alloy
+yes
+$ kubectl auth can-i get pods/log -n kube-system \
+    --as=system:serviceaccount:ashml-observability:alloy
+no
+```
+
+Listing pods says a workload exists; `pods/log` says what the code printed — a secret in a
+stack trace, a row of the dataset — and a monitoring identity is a standing credential that
+nothing ever rotates.
 [ADR 0018](docs/adr/0018-logs-that-outlive-the-pod.md) has the rest — including why the
 collector reads through the API rather than mounting `/var/log` from every node, and why
 restarting it does not duplicate a single line.
@@ -1110,7 +1152,8 @@ docs/              architecture, roadmap, ADRs
 | `ASHML_DATABASE_URL` | `postgresql://ashml:ashml@127.0.0.1:5432/ashml` | PostgreSQL connection |
 | `ASHML_DB_POOL_MAX` | `10` | Maximum pooled connections |
 | `ASHML_K8S_BACKEND` | `kubernetes` | `kubernetes` or `sim` |
-| `ASHML_K8S_NAMESPACE` | `ashml-jobs` | Namespace training Jobs are created in |
+| `ASHML_K8S_NAMESPACE` | `ashml-jobs` | The base every project's namespace is built from — a project's workloads run in `<base>-<project>-<id8>` (ADR 0019). Also where workloads created before per-project namespaces still live, so do not change it on an existing cluster |
+| `ASHML_LOG_COLLECTOR_SERVICE_ACCOUNT` | `ashml-observability/alloy` | Granted `pods/log` in each project namespace, so log shipping keeps working when a project gets a namespace of its own. `none` grants nobody anything |
 | `ASHML_NETWORK_POLICY_ENABLED` | `true` | A NetworkPolicy per project, so one project's pods cannot reach another's. Logs a warning on every start when off |
 | `ASHML_CLUSTER_POD_CIDR` | `10.42.0.0/16` | The addresses this cluster gives to pods — k3s's by default. The policy's "everything that is not a pod here" rule is written against it, and too narrow a value permits the traffic it was meant to refuse, so the control plane checks it against every node at startup |
 | `ASHML_KUBECONFIG` | — | Kubeconfig path; unset uses `$KUBECONFIG`, `~/.kube/config`, then in-cluster credentials |
@@ -1287,14 +1330,17 @@ functionality, scheduling, distributed training, or performance numbers.**
    frontier-model project.
 3. **AshGPU is not integrated.** The provider seam exists; the implementation does not.
 4. **Authentication has no identity provider.** Tokens are issued out of band and `ash
-   login` stores one — no OIDC, no SSO, no passwords. **Projects are not isolated from each
-   other inside the cluster:** every project's pods share one namespace and one service
-   account, so a pod in one project can reach a model server in another. Pods are hardened
-   and the namespace enforces Kubernetes' `baseline` policy (see
-   [What a pod may do in the cluster](#what-a-pod-may-do-in-the-cluster)), but that
-   constrains what a pod *is*, not who it can talk to. Rate limiting counts in one process,
-   so two API replicas are two budgets; the audit trail records refusals and not successful
-   privileged actions, and nothing prunes it.
+   login` stores one — no OIDC, no SSO, no passwords. Projects *are* isolated from each
+   other inside the cluster: each has its own namespace, its own service account, and an
+   egress NetworkPolicy that stops its pods reaching another project's, and pods are
+   hardened by Kubernetes' own `baseline` admission in every one of those namespaces (see
+   [One project cannot reach another's pods](#one-project-cannot-reach-anothers-pods)).
+   **What that does not cover is the platform itself:** the control plane holds
+   credentials that can write to every project's namespace, so the boundary is between
+   projects, not between a project and AshML. Nothing reclaims a namespace either — there
+   is no delete-project endpoint — so they accumulate one per project. Rate limiting counts
+   in one process, so two API replicas are two budgets; the audit trail records refusals
+   and not successful privileged actions, and nothing prunes it.
    [ADR 0013](docs/adr/0013-tokens-for-people-and-tokens-for-pods.md) lists the rest.
 
 ## License

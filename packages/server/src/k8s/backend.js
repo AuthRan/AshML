@@ -10,8 +10,10 @@
  *
  *   {
  *     name: string,
- *     ensureNamespace(): Promise<void>,
- *     ensureProjectIsolation(project): Promise<void>,
+ *     ensureNamespace(name?, labels?): Promise<string>,
+ *     namespaceFor(project, options?): string,
+ *     ensureProjectNamespace(project, options?): Promise<string>,
+ *     ensureProjectIsolation(project, options?): Promise<void>,
  *     verifyClusterPodCidr(): Promise<string[]>,
  *     listNodes(): Promise<NodeInfo[]>,
  *     createJob(manifest): Promise<void>,
@@ -29,6 +31,17 @@
  *     describeTarget(): { context, cluster, server, pinned },
  *     close(): Promise<void>,
  *   }
+ *
+ * `namespaceFor` and `ensureProjectNamespace` take a project — `{ id, name }`, not the
+ * name alone — because a project's namespace is named from both: the name so an operator
+ * reading `kubectl get ns` knows whose it is, the id so two projects whose names agree
+ * for the first 43 characters cannot be handed the same one. `ensureProjectNamespace`
+ * returns the namespace it ensured, so a caller places objects in the namespace it was
+ * just told about rather than deriving the same string a second time.
+ *
+ * `ensureProjectIsolation` takes the namespace to draw the boundary in, because that is
+ * now a different answer per project and the backend cannot infer which of them a given
+ * call is about.
  *
  * An `Observation` is the backend's report of what the cluster currently shows, in
  * AshML's own vocabulary rather than Kubernetes':

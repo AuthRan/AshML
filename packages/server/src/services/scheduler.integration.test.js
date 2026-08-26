@@ -185,8 +185,11 @@ describe('scheduler (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
       })).json().jobs;
       assert.equal(started.length, 2);
 
-      // Finish one, freeing a GPU.
-      backend._setPhase('ashml-test', started[0].k8s_job_name, Phase.SUCCEEDED);
+      // Finish one, freeing a GPU. The namespace comes from the backend rather than from
+      // the listing: a job's namespace is internal, so the API response does not carry it.
+      backend._setPhase(
+        backend.namespaceFor(project), started[0].k8s_job_name, Phase.SUCCEEDED,
+      );
       await runOnce(pool, backend);
 
       const queued = (await app.inject({
@@ -323,7 +326,8 @@ describe('scheduler (integration)', { skip: pool ? false : SKIP_MESSAGE }, () =>
       assert.equal((await getJob(pool, second.id)).state, JobState.QUEUED);
 
       // Free the GPUs; the same job now gets a different verdict.
-      backend._setPhase('ashml-test', (await getJob(pool, first.id)).k8s_job_name, Phase.SUCCEEDED);
+      const firstJob = await getJob(pool, first.id);
+      backend._setPhase(firstJob.namespace, firstJob.k8s_job_name, Phase.SUCCEEDED);
       await runOnce(pool, backend);
       assert.equal((await getJob(pool, second.id)).state, JobState.STARTING);
 

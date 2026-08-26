@@ -45,7 +45,12 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
     return runHeaders.get(jobId);
   }
 
-  const NAMESPACE = 'ashml-test';
+  /**
+   * Where this project's workloads live: its own namespace, not the shared one the
+   * backend is configured with. A function rather than a constant because it depends on
+   * the project, and the project is created fresh for each test.
+   */
+  const ns = () => backend.namespaceFor(project);
 
   /** One 1x1 "image". The shape is the model server's business, not this API's. */
   const INSTANCES = [[[[10, 20, 30]]]];
@@ -56,7 +61,7 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
       ASHML_K8S_BACKEND: 'sim',
       ASHML_VERSION: '0.0.0-test',
     });
-    backend = createSimBackend({ namespace: NAMESPACE, autoAdvance: false });
+    backend = createSimBackend({ namespace: 'ashml-test', autoAdvance: false });
     app = await buildApp(config, { logger: false, pool, k8s: backend, store: createNoneStore() });
     await app.ready();
     await authenticateAs(app, pool);
@@ -101,7 +106,7 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
     await runOnce(pool, backend);
     const launched = await getJob(pool, job.id);
     assert.equal(launched.state, JobState.STARTING, 'setup: the job should have launched');
-    backend._setPhase(NAMESPACE, launched.k8s_job_name, Phase.RUNNING);
+    backend._setPhase(launched.namespace, launched.k8s_job_name, Phase.RUNNING);
     await runOnce(pool, backend);
 
     const created = await app.inject({
@@ -153,7 +158,7 @@ describe('predicting through a deployment (integration)', { skip: pool ? false :
     // A ready pod behind the address, so that what these tests exercise is the proxy and
     // not a Service with no endpoints. Predicting through a deployment that has not come
     // up yet is its own test, further down.
-    backend._setReady(NAMESPACE, deployment.targets[0].k8s_name, deployment.replicas);
+    backend._setReady(ns(), deployment.targets[0].k8s_name, deployment.replicas);
     return deployment;
   }
 

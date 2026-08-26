@@ -473,7 +473,11 @@ export async function registerJobRoutes(app) {
         };
       }
 
-      const logs = await app.k8s.readLogs(app.k8s.namespace, job.k8s_job_name, {
+      // The namespace recorded when the Job was created, not the one this process would
+      // pick now. A job that predates per-project namespaces is in the shared one, and
+      // reading its logs must keep working across that upgrade.
+      const ns = job.namespace ?? app.k8s.namespace;
+      const logs = await app.k8s.readLogs(ns, job.k8s_job_name, {
         tailLines: request.query.tail ?? null,
         previous: request.query.previous ?? false,
       });

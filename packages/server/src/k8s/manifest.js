@@ -34,6 +34,48 @@ export function kubeJobName(job) {
 }
 
 /**
+ * Builds the name of the namespace one project's workloads run in.
+ *
+ * Phase 10 closed three of the four things that kept a project's pods from being
+ * isolated by the *cluster* rather than by AshML's own admission checks: Pod Security
+ * Admission labels, no mounted API credential, and a NetworkPolicy that stops one
+ * project's pods reaching another's. The sentence it could not close was the structural
+ * one — every project's pods shared a namespace and a service account, so the isolation
+ * was between projects and not between a project and the platform. This is that
+ * sentence. A namespace is the unit Kubernetes actually scopes things to, and giving
+ * each project its own is what makes the rest of the boundary follow rather than be
+ * asserted: its own `default` ServiceAccount, its own quota if one is ever wanted, and
+ * a blast radius for a compromised training image that stops at the project.
+ *
+ * Named from the id *and* the name, like `kubeDeploymentName`, and both halves earn
+ * their place. The name is there so `kubectl get ns` tells an operator whose namespace
+ * they are looking at. The id is there because the name alone is not safe to truncate:
+ * project names may be the full 63 characters a DNS-1123 label allows, so a prefix plus
+ * a long name overflows, and two projects whose names agree for the first 43 characters
+ * would otherwise be handed the same namespace — which is the one failure this whole
+ * change exists to prevent, reintroduced by the naming of it.
+ *
+ * The base is the namespace AshML was already configured with (`ASHML_K8S_NAMESPACE`)
+ * rather than a fixed string, so an operator who put AshML's workloads under a prefix of
+ * their own keeps it, and the per-project namespaces sort next to the shared one they
+ * replace.
+ *
+ * @param {{id: string, name: string}} project
+ * @param {object} [options]
+ * @param {string} [options.base] the namespace AshML is configured with
+ */
+export function projectNamespace(project, { base = 'ashml-jobs' } = {}) {
+  const id8 = String(project.id).replaceAll('-', '').slice(0, 8);
+  const suffix = `-${id8}`;
+  const prefix = `${base}-`;
+  const budget = MAX_NAME - prefix.length - suffix.length;
+
+  // Trailing dashes are illegal in a DNS-1123 label, and truncation can leave one.
+  const stem = String(project.name).slice(0, Math.max(1, budget)).replace(/-+$/, '');
+  return `${prefix}${stem}${suffix}`;
+}
+
+/**
  * Converts a byte count into a Kubernetes quantity.
  *
  * Kubernetes accepts a plain integer as bytes, which is exactly what the database
@@ -261,6 +303,74 @@ export function containerHardening() {
       privileged: false,
       capabilities: { drop: ['ALL'] },
     },
+  };
+}
+
+// -------------------------------------------------------------- log collection
+
+/** The Role, and the RoleBinding that uses it, are named the same in every namespace. */
+export const LOG_READER_NAME = `${MANAGED_BY}-log-reader`;
+
+/**
+ * The grant that lets a log collector read a project's pod logs.
+ *
+ * A Role and not a ClusterRole, which is the whole point. ADR 0018 wrote the collector's
+ * grant out by hand rather than copying the upstream example, because `pods/log`
+ * cluster-wide is a standing credential that can read every line every container in the
+ * cluster has printed, and a monitoring identity is never rotated by anything. That was a
+ * Role in one namespace while there was one namespace. Now there is one per project, so
+ * the same grant has to be created per project — and it is created by the thing that
+ * creates the namespace, which is the only component that knows a new one exists.
+ *
+ * Only `pods/log`. Discovering *which* pods exist is a separate, cluster-wide grant in
+ * `deploy/observability/`, and the split is deliberate: listing pods reveals names and
+ * labels, reading `pods/log` reveals what the code printed — secrets in a stack trace, a
+ * dataset row, a token somebody echoed. The half worth scoping tightly is this one, and
+ * this is the half that stays inside AshML's namespaces.
+ */
+export function buildLogReaderRoleManifest({ namespace }) {
+  return {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind: 'Role',
+    metadata: {
+      name: LOG_READER_NAME,
+      namespace,
+      labels: { 'app.kubernetes.io/managed-by': MANAGED_BY },
+    },
+    rules: [
+      { apiGroups: [''], resources: ['pods'], verbs: ['get', 'list', 'watch'] },
+      { apiGroups: [''], resources: ['pods/log'], verbs: ['get'] },
+    ],
+  };
+}
+
+/**
+ * The binding, in the namespace being read, for a subject in the namespace doing the
+ * reading.
+ *
+ * That asymmetry is copied from `deploy/observability/31-alloy.yaml` on purpose: it keeps
+ * the grant with the thing being granted, so deleting a project's namespace takes its
+ * collector access with it rather than leaving a binding pointing at nothing.
+ */
+export function buildLogReaderRoleBindingManifest({ namespace, serviceAccount }) {
+  return {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind: 'RoleBinding',
+    metadata: {
+      name: LOG_READER_NAME,
+      namespace,
+      labels: { 'app.kubernetes.io/managed-by': MANAGED_BY },
+    },
+    roleRef: {
+      apiGroup: 'rbac.authorization.k8s.io',
+      kind: 'Role',
+      name: LOG_READER_NAME,
+    },
+    subjects: [{
+      kind: 'ServiceAccount',
+      name: serviceAccount.name,
+      namespace: serviceAccount.namespace,
+    }],
   };
 }
 

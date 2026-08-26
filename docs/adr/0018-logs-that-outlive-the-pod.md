@@ -123,3 +123,23 @@ It is the obvious next step if the archive turns out to be what people reach for
   their logs in the one namespace AshML runs workloads in, and nowhere else. A monitoring
   identity is a standing credential that nothing ever rotates, so its scope is the part
   worth writing by hand instead of copying.
+
+  > **Amended by ADR 0019: the grant is in two halves now, and the reason it had to change
+  > is worth stating.** Each project runs in a namespace of its own, created when that
+  > project first runs something — so "the one namespace AshML runs workloads in" stopped
+  > being one namespace, and a Role pinned to `ashml-jobs` would have shipped nothing for
+  > every job launched afterwards. The failure mode is the bad one: not an error, an empty
+  > panel, which reads as *this run printed nothing*.
+  >
+  > Alloy's `discovery.kubernetes` can only filter namespaces by a fixed list, and a fixed
+  > list cannot name a namespace that will be created next week, so *discovering* pods is
+  > now a ClusterRole granting `pods` — names, labels, phases. **`pods/log` was kept out of
+  > it.** That half is still a Role, per namespace, created by AshML alongside the
+  > namespace itself (`ensureLogReaderGrant`), because the control plane is the only
+  > component that knows a new namespace exists.
+  >
+  > So the sentence above survives where it matters, in a longer form: Alloy can see that a
+  > pod exists anywhere in the cluster, and can read what it printed only inside AshML's
+  > own namespaces. Listing pods reveals names and labels; `pods/log` reveals what the code
+  > printed — a secret in a stack trace, a row of the dataset — and that is the half a
+  > standing credential should not hold cluster-wide.

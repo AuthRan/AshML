@@ -96,7 +96,7 @@ describe('training metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }
     await runOnce(pool, backend);
     const launched = await getJob(pool, job.id);
     assert.equal(launched.state, JobState.STARTING, 'setup: the job should have launched');
-    backend._setPhase('ashml-test', launched.k8s_job_name, Phase.RUNNING);
+    backend._setPhase(launched.namespace, launched.k8s_job_name, Phase.RUNNING);
     await runOnce(pool, backend);
     assert.equal((await getJob(pool, job.id)).state, JobState.RUNNING, 'setup: expected RUNNING');
     return launched;
@@ -173,7 +173,7 @@ describe('training metrics (integration)', { skip: pool ? false : SKIP_MESSAGE }
   test('a finished run may still flush its metrics', async () => {
     const job = await submit();
     const launched = await runToRunning(job);
-    backend._setPhase('ashml-test', launched.k8s_job_name, Phase.SUCCEEDED);
+    backend._setPhase(launched.namespace, launched.k8s_job_name, Phase.SUCCEEDED);
     await runOnce(pool, backend);
     assert.equal((await getJob(pool, job.id)).state, JobState.SUCCEEDED);
 

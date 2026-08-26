@@ -965,6 +965,30 @@ the cause: a model server with `HTTP 401 fetching the model`, which looks like a
 control-plane fault; a training pod with `ApiError: authentication required` at its first
 artifact upload, minutes into an otherwise healthy run.
 
+**The move to a namespace per project needs nothing beyond `npm run migrate up`**, and
+that is a property it was designed for rather than one it happened to have. Jobs launched
+before the migration have no namespace recorded, which the executor reads as the shared
+one — so they are still observed where they actually are, finish there, and are cleaned up
+there. Jobs launched after it go to their project's namespace. Nothing has to be drained,
+moved or coordinated, and the two coexist for as long as it takes the old runs to end.
+
+What an operator will notice is `kubectl get ns`: one namespace per project that has ever
+launched anything, alongside `ashml-jobs`, which stays because it is where the pre-upgrade
+workloads live. Nothing reclaims them — there is no delete-project endpoint — so they
+accumulate. A cluster that had one namespace will have as many as it has projects.
+
+If the observability stack is deployed, re-apply it — `make observability`. Alloy's grant
+was a Role in `ashml-jobs`, which after this change would have covered no new job's pods at
+all, and the symptom of missing it is an empty Grafana panel rather than an error. The new
+shape is a ClusterRole for pod discovery plus an `ashml-log-reader` Role that AshML creates
+in each namespace it creates; the old `ashml-alloy-logs` pair is left behind, inert, and
+removed by `make observability-down`.
+
+Do not change `ASHML_K8S_NAMESPACE` during an upgrade. It is now the prefix every
+per-project namespace is built from *and* the home of everything launched before the
+migration, so changing it makes the old workloads unfindable and renames every future
+namespace at the same time.
+
 ### The one asymmetry worth stating
 
 **A person cannot report a run's results — not even a platform administrator.** The value
@@ -1184,12 +1208,14 @@ Reasoning in [ADR 0017](adr/0017-egress-is-the-side-that-can-be-enforced.md).
 - **No identity provider.** No OIDC, no SSO, no passwords. Tokens are issued out of band
   and `ash login` stores one. Fine for a handful of users; the first thing to replace
   beyond that.
-- **No Kubernetes RBAC, and no per-project service accounts.** Spec §31 lists both.
-  AshML's own service account creates every workload, so a project's pods are isolated by
-  AshML's admission checks and not by the cluster's. A compromised training image is
-  therefore contained by the namespace, not by the project.
+- ~~**No Kubernetes RBAC, and no per-project service accounts.**~~ — **closed, in four
+  parts, and the entry is kept rather than deleted because the order it closed in is the
+  useful part.** As written it said: Spec §31 lists both; AshML's own service account
+  creates every workload, so a project's pods are isolated by AshML's admission checks and
+  not by the cluster's, and a compromised training image is contained by the namespace,
+  not by the project.
 
-  **Two parts of this closed; the per-project part did not.** See *What a pod may do in
+  **Two parts of this closed first; the per-project part did not.** See *What a pod may do in
   the cluster*, below. The workload namespace now carries Kubernetes' own Pod Security
   Admission labels, so `privileged`, `hostNetwork`, `hostPath` and the rest are refused by
   the *cluster* rather than merely never emitted by AshML — which is the difference
@@ -1201,11 +1227,30 @@ Reasoning in [ADR 0017](adr/0017-egress-is-the-side-that-can-be-enforced.md).
   one project could open a socket to a model server in another; it now cannot, and the
   cluster is what refuses it (*One project cannot reach another's*, below).
 
-  What is still true is the narrower sentence: every project's pods share one namespace
+  ~~What is still true is the narrower sentence: every project's pods share one namespace
   and one service account, so the isolation is between projects and not between a project
-  and the platform. A compromised training image is contained by the namespace and by that
-  policy, not by Kubernetes RBAC. That needs a namespace per project, and it is the next
-  real step here.
+  and the platform.~~ **That closed too, and it was the last of the four.** Each project's
+  workloads now run in a namespace of its own — `ashml-jobs-<name>-<id8>` — carrying the
+  same Pod Security Admission labels the shared one does, and Kubernetes puts a `default`
+  ServiceAccount in each, so the per-project service account needed no building. A run's
+  Secret is no longer readable by another project's pods, which one namespace and one
+  `get secrets` had made it. ADR 0019.
+
+  No RBAC Role came with it, deliberately. Nothing AshML runs reads the Kubernetes API and
+  nothing mounts a credential to do it with, so the right permission set is the empty one
+  it already has; an empty Role added to be able to write the word "RBAC" would describe
+  the platform less accurately than its absence does.
+
+  The NetworkPolicy is kept rather than retired. A namespace scopes *names*, not routes —
+  nothing about being in one namespace stops a pod dialling a pod IP in another — so the
+  policy is still the half that refuses the packet, and `make e2e-isolation` checks the
+  two halves separately, because either alone would leave a false claim in the README.
+
+  **What replaces the sentence is smaller.** Namespaces are never reclaimed: there is no
+  delete-project endpoint, so empty namespaces accumulate one per project, forever. And
+  the control plane still holds credentials that can write to every one of them — this
+  separates projects from each other and from the platform's namespace, not from the
+  platform's reach.
 - ~~**The training run token is visible in the Job's pod spec**~~ — **closed.** It reaches
   the container through a `secretKeyRef` now, like the serving token, so reading it takes
   `get secrets` rather than `get jobs`. Those are not the same grant: `get jobs` is what an

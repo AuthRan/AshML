@@ -30,6 +30,16 @@ paths and the `ash` CLI's namespace assumptions all take a namespace that is cur
 constant. It also cannot be applied to a running cluster without moving every existing
 workload.
 
+> **Amended: this was done, and the last sentence was wrong.** ADR 0019 gives each project
+> its own namespace. The cost of the first sentence was real and is why this ADR came
+> first. The claim that it cannot be applied without moving every workload assumed the
+> namespace would be *derived* from the project on every call — and deriving it is what
+> breaks an upgrade, because the day the rule changes every running Job is looked for
+> somewhere it is not. Recorded on the row instead, an upgrade moves nothing: a null means
+> the shared namespace, running jobs finish where they started, and new ones go to their
+> project's. The NetworkPolicy below is kept rather than replaced; see *The NetworkPolicy
+> is kept, not replaced* in ADR 0019 for why a namespace does not make it redundant.
+
 **A NetworkPolicy per project** costs one object per project and one API call on the path
 that already creates the workload. Every AshML pod has carried `ashml.io/project` since
 Phase 2, so the selector already exists. And on k3s it is enforced rather than decorative:
@@ -129,8 +139,9 @@ address answering a pod in the project that owns it — because "alpha cannot re
 proves nothing without "beta can, right now".
 
 ## Revisit when
-- **A project needs to be isolated from AshML's own workloads, not only from other
-  projects.** That is a namespace per project, with everything it costs.
+- ~~**A project needs to be isolated from AshML's own workloads, not only from other
+  projects.** That is a namespace per project, with everything it costs.~~ — **done**,
+  ADR 0019. Each project has its own namespace; this policy now applies inside it.
 - **A cluster runs a CNI that does not enforce NetworkPolicy.** The control plane cannot
   detect this and says so at startup rather than implying otherwise.
 - **The cluster is dual-stack.** The `except` clause is IPv4; pod-to-pod traffic over IPv6
@@ -151,4 +162,4 @@ proves nothing without "beta can, right now".
 - The roadmap's "next real step" for Phase 10 moves from *nothing stops a training pod in
   one project from reaching a model server in another* to *a project's pods share a
   namespace and a service account with every other project's*, which is a smaller
-  sentence and a true one.
+  sentence and a true one. That sentence was closed in turn by ADR 0019.

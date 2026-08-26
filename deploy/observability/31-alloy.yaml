@@ -30,16 +30,58 @@ metadata:
     app.kubernetes.io/name: alloy
     app.kubernetes.io/part-of: ashml
 ---
-# A Role in `ashml-jobs`, not a ClusterRole, and that is the whole point of writing it out
-# rather than copying the upstream example. Reading `pods/log` cluster-wide is a standing
-# credential that can read every line every container in the cluster has printed —
-# including namespaces that have nothing to do with AshML — and a monitoring identity is
-# never rotated by anything. This one can read pods and their logs in the one namespace
-# AshML runs workloads in, and nowhere else.
+# The grant is in two halves, and the split is the decision worth reading.
+#
+# Since ADR 0019 each project's workloads run in a namespace of its own, created when that
+# project first runs something. Static YAML cannot name a namespace that will exist next
+# week, and Alloy's `discovery.kubernetes` can only filter namespaces by a fixed list — so
+# *discovering* pods across them has to be cluster-wide. That is the ClusterRole below, and
+# it grants `pods` only: names, labels and phases.
+#
+# `pods/log` is not in it. Reading logs cluster-wide is a standing credential that can read
+# every line every container in the cluster has printed — including namespaces that have
+# nothing to do with AshML — and a monitoring identity is never rotated by anything. That
+# half stays a Role, per namespace, and AshML creates it in each namespace it creates
+# (`ensureLogReaderGrant`), which is the only component that knows a new one exists.
+#
+# So the property ADR 0018 bought is kept where it matters: Alloy can see that a pod exists
+# anywhere, and can read what it printed only inside AshML's namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ashml-alloy-discovery
+  labels:
+    app.kubernetes.io/part-of: ashml
+rules:
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ashml-alloy-discovery
+  labels:
+    app.kubernetes.io/part-of: ashml
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ashml-alloy-discovery
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: ashml-observability
+---
+# The other half, for the namespace that predates per-project ones. Its per-project
+# equivalents are created by AshML rather than applied from here, and they are identical
+# in shape — `ashml-log-reader`, a Role and a RoleBinding, in the namespace being read
+# with the subject in the namespace doing the reading. That asymmetry is what keeps the
+# grant with the thing being granted: deleting a project's namespace takes its collector
+# access with it rather than leaving a binding pointing at nothing.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: ashml-alloy-logs
+  name: ashml-log-reader
   namespace: ashml-jobs
   labels:
     app.kubernetes.io/part-of: ashml
@@ -51,19 +93,17 @@ rules:
     resources: [pods/log]
     verbs: [get]
 ---
-# The binding lives in the namespace being read; the subject lives in the namespace doing
-# the reading. That asymmetry is what keeps the grant with the thing being granted.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: ashml-alloy-logs
+  name: ashml-log-reader
   namespace: ashml-jobs
   labels:
     app.kubernetes.io/part-of: ashml
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: ashml-alloy-logs
+  name: ashml-log-reader
 subjects:
   - kind: ServiceAccount
     name: alloy
@@ -84,14 +124,21 @@ data:
       format = "logfmt"
     }
 
-    // Only `ashml-jobs`. Alloy has no permission to read anything else, so widening this
-    // would produce a stream of authorization errors rather than more logs — but it is
-    // said here too, because the Role and this block have to agree and they are in
-    // different files.
+    // Every namespace, filtered to AshML's pods by label rather than by a list of
+    // namespace names — since ADR 0019 there is one namespace per project and they are
+    // created while this config is running, so a fixed list would go stale the first time
+    // somebody made a project.
+    //
+    // The label selector is what keeps this from watching the whole cluster in practice:
+    // every object AshML creates carries `app.kubernetes.io/managed-by=ashml`, so nothing
+    // else is discovered even though the grant permits listing it. And discovery is all
+    // it permits — reading what these pods printed needs `pods/log`, which Alloy holds
+    // only in AshML's own namespaces (see the Role above).
     discovery.kubernetes "ashml_pods" {
       role = "pod"
-      namespaces {
-        names = ["ashml-jobs"]
+      selectors {
+        role  = "pod"
+        label = "app.kubernetes.io/managed-by=ashml"
       }
     }
 

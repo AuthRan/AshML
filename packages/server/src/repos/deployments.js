@@ -67,6 +67,7 @@ const DEPLOYMENT_COLUMNS = `
   d.last_error, d.created_at, d.updated_at,
   d.serving_version, d.router_image, d.router_k8s_name,
   d.router_status, d.router_ready_replicas,
+  d.project_id,
   p.name AS project_name,
   m.name AS model_name,
   ${TARGETS_JSON}
@@ -102,6 +103,9 @@ function toDeployment(row) {
     id: row.id,
     name: row.name,
     project: row.project_name,
+    // The id alongside the name, because the project's namespace is named from both
+    // (`projectNamespace`). Internal, like the same field on a job row.
+    project_ref: { id: row.project_id, name: row.project_name },
     model: row.model_name,
     status: row.status,
     image: row.image,

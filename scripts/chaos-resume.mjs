@@ -231,7 +231,7 @@ check('killing the pod mid-run fails the job, and the failure is explained', asy
   await sleep(3000);
 
   const pod = await kubectl(
-    'get', 'pods', '-n', NAMESPACE, '-l', `job-name=${before.k8s_job_name}`,
+    'get', 'pods', '-n', before.namespace ?? NAMESPACE, '-l', `job-name=${before.k8s_job_name}`,
     '-o', 'jsonpath={.items[0].metadata.name}',
   );
   assert.ok(pod, 'there must be a pod to kill');
@@ -245,7 +245,7 @@ check('killing the pod mid-run fails the job, and the failure is explained', asy
   globalThis.__killedNear = lastStepBefore ?? 'not yet reported';
 
   note(`killing pod ${pod} (last step reported to the API: ${globalThis.__killedNear})`);
-  await kubectl('delete', 'pod', pod, '-n', NAMESPACE, '--grace-period=0', '--force');
+  await kubectl('delete', 'pod', pod, '-n', before.namespace ?? NAMESPACE, '--grace-period=0', '--force');
 
   // FAILED, or already past it: the executor requeues and relaunches within one pass,
   // so a job that died on a lost node can be back in flight before this poll looks.
@@ -310,7 +310,7 @@ check('the second attempt is handed the checkpoint as ASHML_RESUME_FROM', async 
 
   // The cluster's copy of the environment, not AshML's intention to set it.
   const env = JSON.parse(await kubectl(
-    'get', 'job', relaunched.k8s_job_name, '-n', NAMESPACE,
+    'get', 'job', relaunched.k8s_job_name, '-n', relaunched.namespace ?? NAMESPACE,
     '-o', 'jsonpath={.spec.template.spec.containers[0].env}',
   ));
   const resume = env.find((e) => e.name === 'ASHML_RESUME_FROM');

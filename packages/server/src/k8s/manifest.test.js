@@ -14,6 +14,7 @@ import {
   buildRunSecretManifest,
   runSecretName,
   kubeJobName,
+  projectNamespace,
   MANAGED_BY,
   DEFAULT_CLUSTER_POD_CIDR,
   buildProjectNetworkPolicyManifest,
@@ -65,6 +66,53 @@ describe('kubeJobName', () => {
     const a = kubeJobName(makeJob({ id: '11111111-2222-3333-4444-555555555555' }));
     const b = kubeJobName(makeJob({ id: '66666666-7777-8888-9999-000000000000' }));
     assert.notEqual(a, b);
+  });
+});
+
+describe('projectNamespace', () => {
+  const proj = (over = {}) => ({
+    id: '3f2b1c4d-1111-2222-3333-444444444444', name: 'vision', ...over,
+  });
+
+  test('is built from the configured base, so an operator keeps their prefix', () => {
+    assert.equal(projectNamespace(proj()), 'ashml-jobs-vision-3f2b1c4d');
+    assert.equal(
+      projectNamespace(proj(), { base: 'ml' }), 'ml-vision-3f2b1c4d',
+    );
+  });
+
+  test('is stable, because it is the address of everything already created there', () => {
+    // Recomputed on every launch and every deployment apply. If it were not stable, the
+    // second call would put a pod somewhere the first one's Service is not.
+    assert.equal(projectNamespace(proj()), projectNamespace(proj()));
+  });
+
+  test('two projects whose names share a long prefix get different namespaces', () => {
+    // The reason the id is in the name at all. Project names may be the full 63
+    // characters a DNS-1123 label allows, so the name alone cannot survive truncation —
+    // and two projects sharing a namespace is the failure this whole change prevents.
+    const long = 'a'.repeat(63);
+    const a = projectNamespace({ id: '11111111-1111-1111-1111-111111111111', name: long });
+    const b = projectNamespace({ id: '22222222-2222-2222-2222-222222222222', name: long });
+    assert.notEqual(a, b);
+  });
+
+  test('stays within the 63-character limit Kubernetes imposes on names', () => {
+    const ns = projectNamespace(proj({ name: 'a'.repeat(63) }));
+    assert.ok(ns.length <= 63, `namespace was ${ns.length} characters: ${ns}`);
+  });
+
+  test('is a valid DNS-1123 label, including when truncation lands on a dash', () => {
+    const stem = `${'a'.repeat(37)}-suffix`;
+    const ns = projectNamespace(proj({ name: stem }));
+    assert.doesNotMatch(ns, /-{2,}/);
+    assert.match(ns, /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, `not a valid DNS-1123 label: ${ns}`);
+  });
+
+  test('is never the shared namespace it replaces', () => {
+    // A project whose namespace collided with the base would put its pods back among
+    // everything launched before this existed, silently undoing the separation.
+    assert.notEqual(projectNamespace(proj()), 'ashml-jobs');
   });
 });
 

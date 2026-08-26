@@ -167,6 +167,15 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
 
   // ------------------------------------------------------------- fixtures
 
+  /**
+   * Where this project's workloads live: its own namespace, not the shared one the
+   * backend is configured with. Asked of the backend rather than spelled out, so these
+   * tests keep testing serving and not the naming scheme.
+   */
+  function ns() {
+    return backend.namespaceFor(project);
+  }
+
   async function runningJob() {
     const submitted = await app.inject({
       method: 'POST',
@@ -184,7 +193,7 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     await runOnce(pool, backend);
     const launched = await getJob(pool, job.id);
     assert.equal(launched.state, JobState.STARTING, 'setup: the job should have launched');
-    backend._setPhase('ashml-test', launched.k8s_job_name, Phase.RUNNING);
+    backend._setPhase(ns(), launched.k8s_job_name, Phase.RUNNING);
     await runOnce(pool, backend);
     return job;
   }
@@ -412,7 +421,7 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     const pods = deployment.targets[0].k8s_name;
 
     // One replica ready out of two is still not serving what was asked for.
-    backend._setReady('ashml-test', pods, 1);
+    backend._setReady(ns(), pods, 1);
     await syncDeployments(pool, backend);
     let current = (await app.inject({
       method: 'GET',
@@ -421,7 +430,7 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     assert.equal(current.status, DeploymentStatus.PROGRESSING);
     assert.equal(current.ready_replicas, 1);
 
-    backend._setReady('ashml-test', pods, 2);
+    backend._setReady(ns(), pods, 2);
     await syncDeployments(pool, backend);
     current = (await app.inject({
       method: 'GET',
@@ -436,10 +445,10 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     const deployment = (await deploy(model, { replicas: 1 })).json();
     const pods = deployment.targets[0].k8s_name;
 
-    backend._setReady('ashml-test', pods, 1);
+    backend._setReady(ns(), pods, 1);
     await syncDeployments(pool, backend);
 
-    backend._setReady('ashml-test', pods, 0);
+    backend._setReady(ns(), pods, 0);
     await syncDeployments(pool, backend);
 
     const current = (await app.inject({
@@ -468,7 +477,7 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     // And nothing is left in the cluster still answering — the version's pods, which is
     // where the model actually runs, not just the address in front of them.
     assert.equal(
-      await backend.observeDeployment('ashml-test', deployment.targets[0].k8s_name),
+      await backend.observeDeployment(ns(), deployment.targets[0].k8s_name),
       null,
     );
   });
@@ -485,7 +494,7 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     const first = (await deploy(model, { replicas: 1 })).json();
     const oldPods = first.targets[0].k8s_name;
 
-    backend._setReady('ashml-test', oldPods, 1);
+    backend._setReady(ns(), oldPods, 1);
     await syncDeployments(pool, backend);
     assert.equal((await get(first.name)).status, DeploymentStatus.READY);
 
@@ -496,8 +505,8 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
 
     // Both exist. The old one is still the only thing that can answer, and it is still
     // what the address resolves to — this is the window a rolling update does not have.
-    assert.ok(await backend.observeDeployment('ashml-test', oldPods));
-    assert.ok(await backend.observeDeployment('ashml-test', newPods));
+    assert.ok(await backend.observeDeployment(ns(), oldPods));
+    assert.ok(await backend.observeDeployment(ns(), newPods));
     let current = await get(first.name);
     assert.equal(current.serving_version, 1, 'the address must not move to pods with no model');
     assert.equal(current.status, DeploymentStatus.PROGRESSING);
@@ -506,7 +515,7 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     await syncDeployments(pool, backend);
     assert.equal((await get(first.name)).serving_version, 1);
 
-    backend._setReady('ashml-test', newPods, 1);
+    backend._setReady(ns(), newPods, 1);
     await syncDeployments(pool, backend);
 
     current = await get(first.name);
@@ -524,7 +533,7 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     const { model } = await seedModel();
     const first = (await deploy(model, { replicas: 1 })).json();
     const oldPods = first.targets[0].k8s_name;
-    backend._setReady('ashml-test', oldPods, 1);
+    backend._setReady(ns(), oldPods, 1);
     await syncDeployments(pool, backend);
 
     await addVersion(model);
@@ -534,27 +543,27 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     // Scaling the old version down here would drop every request in flight: it has been
     // taken out of rotation and it is still the only thing answering.
     assert.equal(
-      (await backend.observeDeployment('ashml-test', oldPods)).desired,
+      (await backend.observeDeployment(ns(), oldPods)).desired,
       1,
       'the outgoing version must keep its pods as long as the address points at it',
     );
 
-    backend._setReady('ashml-test', newPods, 1);
+    backend._setReady(ns(), newPods, 1);
     await syncDeployments(pool, backend);
 
     assert.equal(
-      (await backend.observeDeployment('ashml-test', oldPods)).desired,
+      (await backend.observeDeployment(ns(), oldPods)).desired,
       0,
       'once nothing points at it, its pods are capacity held for no one',
     );
     // And it is still there to go back to — the objects are the rollback.
-    assert.ok(await backend.observeDeployment('ashml-test', oldPods));
+    assert.ok(await backend.observeDeployment(ns(), oldPods));
   });
 
   test('redeploying the version already serving changes nothing about the address', async () => {
     const { model } = await seedModel();
     const first = (await deploy(model, { replicas: 1 })).json();
-    backend._setReady('ashml-test', first.targets[0].k8s_name, 1);
+    backend._setReady(ns(), first.targets[0].k8s_name, 1);
     await syncDeployments(pool, backend);
 
     const again = (await deploy(model)).json();
@@ -570,11 +579,11 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     let d = await get(name);
     for (const target of d.targets) {
       if (target.traffic_weight > 0 || target.version === d.serving_version) {
-        backend._setReady('ashml-test', target.k8s_name, target.replicas);
+        backend._setReady(ns(), target.k8s_name, target.replicas);
       }
     }
     if (d.router_k8s_name) {
-      backend._setReady('ashml-test', d.router_k8s_name, 2);
+      backend._setReady(ns(), d.router_k8s_name, 2);
     }
     await syncDeployments(pool, backend);
     d = await get(name);
@@ -720,7 +729,7 @@ describe('deployments (integration)', { skip: pool ? false : SKIP_MESSAGE }, () 
     });
     assert.equal(res.statusCode, 200, res.payload);
     assert.deepEqual(res.json().targets.map((t) => t.version), [2]);
-    assert.equal(await backend.observeDeployment('ashml-test', v1Pods), null);
+    assert.equal(await backend.observeDeployment(ns(), v1Pods), null);
   });
 
   async function get(name) {

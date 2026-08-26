@@ -191,7 +191,7 @@ check('every running job landed on the node AshML chose', async () => {
     let actual = '';
     while (Date.now() < deadline && actual === '') {
       actual = await kubectl(
-        'get', 'pods', '-n', NAMESPACE,
+        'get', 'pods', '-n', job.namespace ?? NAMESPACE,
         '-l', `job-name=${job.k8s_job_name}`,
         '-o', 'jsonpath={.items[0].spec.nodeName}',
       ).catch(() => '');

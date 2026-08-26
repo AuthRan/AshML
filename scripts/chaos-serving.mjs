@@ -38,6 +38,15 @@ import { withToken, explainIfUnauthorized } from './lib/token.mjs';
 
 const ENDPOINT = (process.env.ASHML_ENDPOINT ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 const NAMESPACE = process.env.ASHML_K8S_NAMESPACE ?? 'ashml-jobs';
+
+/**
+ * The namespace a deployment's objects are actually in.
+ *
+ * Recorded on the row since Phase 5, and since ADR 0019 it is a namespace of the
+ * project's own rather than the one this script is configured with. The fallback is
+ * for a deployment created before either.
+ */
+const nsOf = (deployment) => deployment.namespace ?? NAMESPACE;
 const PROJECT = process.env.CHAOS_PROJECT ?? 'vision';
 const DEPLOYMENT = process.env.CHAOS_DEPLOYMENT ?? 'resnet18-cifar10';
 const LOCAL_PORT = Number(process.env.CHAOS_LOCAL_PORT ?? 18081);
@@ -81,10 +90,10 @@ async function until(what, predicate, { timeout = TIMEOUT_MS, interval = 1000 } 
  * down and re-established around the kill rather than kept open: the forward is bound to
  * the pod it chose, and that pod is the one about to be deleted.
  */
-async function portForward(service, port) {
+async function portForward(service, port, namespace) {
   const child = spawn(
     'kubectl',
-    [...contextArgs, 'port-forward', '-n', NAMESPACE, `svc/${service}`, `${port}:80`],
+    [...contextArgs, 'port-forward', '-n', namespace, `svc/${service}`, `${port}:80`],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
 
@@ -153,7 +162,7 @@ check('a deployment is serving, and the cluster agrees', async () => {
   assert.equal(deployment.status, 'READY', `nothing to break: deployment is ${deployment.status}`);
 
   const readyReplicas = await kubectl(
-    'get', 'deploy', deployment.k8s_name, '-n', NAMESPACE,
+    'get', 'deploy', deployment.k8s_name, '-n', nsOf(deployment),
     '-o', 'jsonpath={.status.readyReplicas}',
   );
   assert.equal(
@@ -167,7 +176,7 @@ check('a deployment is serving, and the cluster agrees', async () => {
 
 check('the pod is serving the artifact AshML recorded, and answers', async () => {
   const deployment = globalThis.__deployment;
-  globalThis.__forward = await portForward(deployment.k8s_name, LOCAL_PORT);
+  globalThis.__forward = await portForward(deployment.k8s_name, LOCAL_PORT, nsOf(deployment));
 
   const ready = await serve('/readyz');
   assert.equal(ready.status, 200, `the pod is not ready: ${JSON.stringify(ready.body)}`);
@@ -194,7 +203,7 @@ check('the pod is serving the artifact AshML recorded, and answers', async () =>
 check('killing the serving pod is reported as DEGRADED, not as starting up', async () => {
   const deployment = globalThis.__deployment;
   const pod = await kubectl(
-    'get', 'pods', '-n', NAMESPACE, '-l', `ashml.io/deployment-id=${deployment.id}`,
+    'get', 'pods', '-n', nsOf(deployment), '-l', `ashml.io/deployment-id=${deployment.id}`,
     '-o', 'jsonpath={.items[0].metadata.name}',
   );
   assert.ok(pod, 'there must be a serving pod to kill');
@@ -202,7 +211,7 @@ check('killing the serving pod is reported as DEGRADED, not as starting up', asy
 
   await globalThis.__forward.close();
   note(`killing pod ${pod}`);
-  await kubectl('delete', 'pod', pod, '-n', NAMESPACE, '--grace-period=0', '--force');
+  await kubectl('delete', 'pod', pod, '-n', nsOf(deployment), '--grace-period=0', '--force');
 
   // The distinction this whole status vocabulary exists for. PROGRESSING here would say
   // "starting up" about an outage.
@@ -220,7 +229,7 @@ check('Kubernetes replaces the pod and it fetches the model by artifact id', asy
 
   const replacement = await until('a replacement pod', async () => {
     const names = (await kubectl(
-      'get', 'pods', '-n', NAMESPACE, '-l', `ashml.io/deployment-id=${deployment.id}`,
+      'get', 'pods', '-n', nsOf(deployment), '-l', `ashml.io/deployment-id=${deployment.id}`,
       '-o', 'jsonpath={.items[*].metadata.name}',
     )).split(/\s+/).filter(Boolean);
     return names.find((n) => n !== globalThis.__killedPod) ?? null;
@@ -231,7 +240,7 @@ check('Kubernetes replaces the pod and it fetches the model by artifact id', asy
   // not on the process having started. That is the probe split doing its job.
   await until('the replacement to become ready', async () => {
     const ready = await kubectl(
-      'get', 'pod', replacement, '-n', NAMESPACE,
+      'get', 'pod', replacement, '-n', nsOf(deployment),
       '-o', 'jsonpath={.status.containerStatuses[0].ready}',
     );
     return ready === 'true';
@@ -241,7 +250,7 @@ check('Kubernetes replaces the pod and it fetches the model by artifact id', asy
   // environment variable it was handed; this line is printed after the weights are in
   // memory, and it names the object they came out of — which is the evidence that the
   // indirection actually happened rather than being configured.
-  const logs = await kubectl('logs', replacement, '-n', NAMESPACE);
+  const logs = await kubectl('logs', replacement, '-n', nsOf(deployment));
   const loaded = logs.match(/\[serve\] ready: (\S+) from (\S+)/);
   assert.ok(loaded, `the replacement never reported loading a model:\n${logs.slice(0, 400)}`);
 
@@ -261,7 +270,7 @@ check('AshML observes it serving again', async () => {
   }, { interval: 1000 });
 
   const readyReplicas = await kubectl(
-    'get', 'deploy', globalThis.__deployment.k8s_name, '-n', NAMESPACE,
+    'get', 'deploy', globalThis.__deployment.k8s_name, '-n', nsOf(globalThis.__deployment),
     '-o', 'jsonpath={.status.readyReplicas}',
   );
   assert.equal(Number(readyReplicas), recovered.ready_replicas);
@@ -270,7 +279,9 @@ check('AshML observes it serving again', async () => {
 });
 
 check('the replacement answers with the same model, to the digit', async () => {
-  globalThis.__forward = await portForward(globalThis.__deployment.k8s_name, LOCAL_PORT);
+  globalThis.__forward = await portForward(
+    globalThis.__deployment.k8s_name, LOCAL_PORT, nsOf(globalThis.__deployment),
+  );
 
   const after = await serve('/predict', { instances: globalThis.__instances });
   assert.equal(after.status, 200, JSON.stringify(after.body));
