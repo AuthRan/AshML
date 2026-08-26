@@ -836,9 +836,16 @@ report nothing. `make cluster-dns-check` asks a Pod; `make cluster-dns` restores
 
 ### Deferred within this phase, so far
 
-- **Weighted routing.** `deployment_targets` carries the weight column and a deployment
-  holds exactly one target at 100. Two targets are meaningless until the router exists,
-  because nothing would decide which one answers.
+- ~~**Weighted routing.**~~ — **built, later in this same phase**, and the entry stayed
+  here saying otherwise. As written it said: `deployment_targets` carries the weight column
+  and a deployment holds exactly one target at 100; two targets are meaningless until the
+  router exists, because nothing would decide which one answers. The router does exist —
+  see *Routing, as built* and *Routing, as run* above, `packages/router`, ADR 0011, and
+  `make e2e-rollout`, which measures a 10% canary against real pods.
+
+  Recorded as a correction rather than deleted, because a roadmap that lists a shipped
+  feature as deferred is the same failure as one that ticks off work nobody did: both make
+  the document stop describing the repository, and the only defence is noticing out loud.
 - **External exposure.** The Service is still a ClusterIP, and `ash predict` reaches it
   through the API server's proxy rather than by exposing anything. That is right for a
   human with a kubeconfig and is not an ingress: callers who are not AshML operators, and
