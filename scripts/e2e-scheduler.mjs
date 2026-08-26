@@ -133,6 +133,9 @@ check('a project can be created', async () => {
     payload: { name: project, description: 'phase 3 end-to-end' },
   });
   assert.equal(res.statusCode, 201, res.payload);
+  // Kept so the teardown can reclaim its namespace. A project's namespace is named from
+  // its id as well as its name, so the row is what is needed and not the string above.
+  globalThis.__project = res.json();
 });
 
 check('more jobs than fit are admitted only as capacity allows', async () => {
@@ -352,6 +355,14 @@ for (const job of leftovers) {
   }
 }
 await runOnce(app.db, app.k8s, { maxLaunches: 20 }).catch(() => {});
+
+// And the namespace the throwaway project was given, for the same reason the jobs above
+// are cancelled: nothing else reclaims it, and one per run accumulates forever.
+if (globalThis.__project) {
+  await kubectl(
+    'delete', 'namespace', app.k8s.namespaceFor(globalThis.__project), '--wait=false',
+  ).catch(() => {});
+}
 
 console.log(`\n${checks.length - failed}/${checks.length} scheduler checks passed`);
 

@@ -111,6 +111,9 @@ check('a project can be created', async () => {
     payload: { name: `e2e-${suffix}`, description: 'phase 2 end-to-end' },
   });
   assert.equal(res.statusCode, 201, res.payload);
+  // Kept so the teardown can reclaim its namespace. A project's namespace is named from
+  // its id as well as its name, so the row is what is needed and not the string above.
+  globalThis.__project = res.json();
 });
 
 check('a submitted job runs a real container and reaches SUCCEEDED', async () => {
@@ -251,6 +254,16 @@ for (const { name, fn } of results) {
     console.error(`  FAIL  ${name}`);
     console.error(`        ${err.message}`);
   }
+}
+
+// The namespace this run's throwaway project was given. Nothing else removes it: a
+// project has no delete endpoint, so its namespace outlives every run that made one, and
+// a script that leaves one behind on every invocation is how a workstation ends up with
+// hundreds. Deleted only if the project was actually created, and only that one.
+if (globalThis.__project) {
+  await kubectl(
+    'delete', 'namespace', app.k8s.namespaceFor(globalThis.__project), '--wait=false',
+  ).catch(() => {});
 }
 
 console.log(`\n${results.length - failed}/${results.length} end-to-end checks passed`);
