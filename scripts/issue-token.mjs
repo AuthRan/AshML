@@ -26,6 +26,8 @@ import { parseArgs } from 'node:util';
 import pg from 'pg';
 
 import { mintToken, TokenKind } from '../packages/server/src/auth/tokens.js';
+import { loadConfig } from '../packages/server/src/config.js';
+import { resolveTokenLifetime } from '../packages/server/src/domain/token-lifetime.js';
 
 const { values } = parseArgs({
   options: {
@@ -46,7 +48,7 @@ if (values.help || !values.user) {
   --name <name>        what it is for; unique per user   (default: bootstrap)
   --create             create the user if they do not exist
   --admin              with --create, make them a platform administrator
-  --expires-in <days>  expire after N days               (default: never)
+  --expires-in <days>  expire after N days       (default: the platform maximum)
   --database <url>     overrides ASHML_DATABASE_URL
 
 Prints the token on stdout. It is shown once; nothing stores the plaintext.`);
@@ -84,9 +86,26 @@ try {
 
   const userId = rows[0].id;
   const { token, hash, prefix } = mintToken(TokenKind.USER);
-  const expiresAt = values['expires-in']
-    ? new Date(Date.now() + Number(values['expires-in']) * 86_400_000)
-    : null;
+
+  // The same ceiling the API applies, and deliberately so. This script writes straight to
+  // the table, so it is the one path that could quietly mint the never-expiring token —
+  // and it issues the *first* token on every cluster, which is the one most likely to end
+  // up in somebody's shell profile and be forgotten. A bootstrap credential exempt from
+  // the platform's own lifetime policy would be the longest-lived token in the system.
+  const requested = values['expires-in'] ? Number(values['expires-in']) : null;
+  if (requested !== null && (!Number.isInteger(requested) || requested < 1)) {
+    console.error(`--expires-in "${values['expires-in']}": want a whole number of days`);
+    process.exit(2);
+  }
+  const lifetime = resolveTokenLifetime({
+    requestedDays: requested,
+    maxDays: loadConfig().tokenMaxTtlDays,
+  });
+  if (!lifetime.allowed) {
+    console.error(lifetime.reason);
+    process.exit(2);
+  }
+  const { expiresAt } = lifetime;
 
   await pool.query(
     `INSERT INTO api_tokens (user_id, name, token_hash, prefix, expires_at)
@@ -101,7 +120,14 @@ try {
   );
 
   // Everything explanatory goes to stderr so stdout is exactly the token.
-  console.error(`token "${values.name}" issued for ${values.user}. It is shown once.`);
+  // The expiry is stated rather than left to be discovered. A token that stops working in
+  // ninety days is fine; one that stops working in ninety days without anyone having been
+  // told is an outage with no cause anybody can find.
+  const until = expiresAt
+    ? `It expires ${expiresAt.toISOString().slice(0, 10)}`
+      + `${lifetime.defaulted ? ' (the platform maximum; --expires-in sets a shorter one)' : ''}.`
+    : 'It does not expire (ASHML_TOKEN_MAX_TTL_DAYS=none).';
+  console.error(`token "${values.name}" issued for ${values.user}. It is shown once. ${until}`);
   console.log(token);
 } finally {
   await pool.end();

@@ -6,6 +6,7 @@
  */
 
 import { DEFAULT_CLUSTER_POD_CIDR } from './k8s/manifest.js';
+import { DEFAULT_MAX_TTL_DAYS } from './domain/token-lifetime.js';
 
 export function loadConfig(env = process.env) {
   const port = Number.parseInt(env.ASHML_PORT ?? '8080', 10);
@@ -111,6 +112,17 @@ export function loadConfig(env = process.env) {
     // work without a token ceremony.
     authEnabled: parseBool(env.ASHML_AUTH_ENABLED, 'ASHML_AUTH_ENABLED', true),
 
+    // The ceiling on a personal API token's life, in days — and, because it is also the
+    // default, the guarantee that every token has an end (`domain/token-lifetime.js`).
+    // A token minted before this existed keeps working: the policy governs minting, and
+    // revoking live credentials as a side effect of editing a config file is how a
+    // security setting gets switched off.
+    //
+    // `none` is the way to have no ceiling, spelled as a word for the same reason
+    // `ASHML_ARTIFACT_STORE=none` is: an absent limit should be something somebody chose
+    // and can be read back, not the shape of an unset variable.
+    tokenMaxTtlDays: parseTokenTtlDays(env.ASHML_TOKEN_MAX_TTL_DAYS),
+
     // How long a training pod's run token lives. Long enough for a slow epoch, short
     // enough that a token scraped from a pod spec is not a standing grant — and it is
     // revoked when the job ends regardless, so this is the backstop for a job whose
@@ -200,6 +212,32 @@ export function loadConfig(env = process.env) {
 
     version: env.ASHML_VERSION ?? '0.1.0-dev',
   };
+}
+
+/**
+ * The token ceiling, in days, or null for "no ceiling".
+ *
+ * Zero is refused for the reason `parseLimit` refuses it elsewhere, and more sharply: a
+ * ceiling of zero days would mint tokens that have already expired, so every caller would
+ * be handed a credential that fails on first use and no message would say why.
+ */
+function parseTokenTtlDays(raw) {
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_MAX_TTL_DAYS;
+  if (String(raw).trim().toLowerCase() === 'none') return null;
+
+  const days = Number.parseInt(raw, 10);
+  if (Number.isNaN(days) || String(days) !== String(raw).trim()) {
+    throw new Error(
+      `ASHML_TOKEN_MAX_TTL_DAYS="${raw}": want a whole number of days, or "none" for no limit`,
+    );
+  }
+  if (days < 1) {
+    throw new Error(
+      `ASHML_TOKEN_MAX_TTL_DAYS="${raw}": a ceiling below one day would issue tokens that `
+      + 'have already expired. To have no ceiling, set it to "none".',
+    );
+  }
+  return days;
 }
 
 /**

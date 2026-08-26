@@ -10,6 +10,8 @@
 import * as authService from '../services/auth.js';
 import { Permission, Role, PrincipalKind } from '../domain/roles.js';
 import { ForbiddenError } from '../services/auth.js';
+import { ValidationError } from '../services/errors.js';
+import { resolveTokenLifetime } from '../domain/token-lifetime.js';
 
 const tokenSchema = {
   $id: 'ApiToken',
@@ -113,7 +115,10 @@ export async function registerAuthRoutes(app) {
         summary: 'Create an API token',
         description:
           'The plaintext token is returned once, in this response, and is never '
-          + 'retrievable again — only its SHA-256 hash is stored.',
+          + 'retrievable again — only its SHA-256 hash is stored. Every token expires: '
+          + 'omitting expires_in_days takes the platform maximum rather than living '
+          + 'forever, and asking for longer than the maximum is refused rather than '
+          + 'shortened.',
         body: {
           type: 'object',
           required: ['name'],
@@ -136,6 +141,7 @@ export async function registerAuthRoutes(app) {
               expires_at: { type: ['string', 'null'] },
             },
           },
+          400: { $ref: 'Error#' },
           401: { $ref: 'Error#' },
           403: { $ref: 'Error#' },
           409: { $ref: 'Error#' },
@@ -148,12 +154,33 @@ export async function registerAuthRoutes(app) {
       requireHuman(request);
 
       const { name, expires_in_days: days } = request.body;
-      const expiresAt = days ? new Date(Date.now() + days * 86_400_000) : null;
+      // The platform's ceiling, and its default. Refused rather than clamped when the
+      // request is over it: somebody silently given ninety days when they asked for a
+      // year plans around a year, and learns otherwise from a 401 in a pipeline that has
+      // worked for three months (`domain/token-lifetime.js`).
+      const lifetime = resolveTokenLifetime({
+        requestedDays: days ?? null,
+        maxDays: app.tokenMaxTtlDays,
+      });
+      if (!lifetime.allowed) {
+        throw new ValidationError(lifetime.code, lifetime.reason);
+      }
 
       const token = await authService.createToken(app.db, request.principal.userId, {
-        name, expiresAt,
+        name, expiresAt: lifetime.expiresAt,
       });
-      request.log.info({ token_name: name, prefix: token.prefix }, 'api token created');
+      request.log.info(
+        {
+          token_name: name,
+          prefix: token.prefix,
+          expires_at: token.expires_at ?? null,
+          // Whether the caller chose the lifetime or the platform did. Worth logging:
+          // "every token here expires in ninety days" and "this user asked for ninety
+          // days" are different facts about the same row.
+          lifetime: lifetime.defaulted ? 'platform default' : 'requested',
+        },
+        'api token created',
+      );
       return reply.status(201).send(token);
     },
   );

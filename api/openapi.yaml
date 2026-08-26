@@ -1137,8 +1137,11 @@ paths:
       summary: Create an API token
       tags:
         - auth
-      description: The plaintext token is returned once, in this response, and is
-        never retrievable again — only its SHA-256 hash is stored.
+      description: "The plaintext token is returned once, in this response, and is
+        never retrievable again — only its SHA-256 hash is stored. Every token
+        expires: omitting expires_in_days takes the platform maximum rather than
+        living forever, and asking for longer than the maximum is refused rather
+        than shortened."
       requestBody:
         required: true
         content:
@@ -1184,6 +1187,12 @@ paths:
                     type:
                       - "null"
                       - string
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/def-0"
         "401":
           description: Default Response
           content:

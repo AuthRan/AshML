@@ -116,6 +116,12 @@ not a row.
   own service account creates every workload, so a project's pods are isolated by
   AshML's admission checks and not by the cluster's. Recorded in the roadmap.
 - **No audit log of authorization decisions.** Job state has one; this does not.
+- ~~**Nothing requires a token to expire.**~~ **Closed.** `ASHML_TOKEN_MAX_TTL_DAYS` is a
+  ceiling and the default both, so a token minted without a thought about expiry gets one
+  anyway — which was the gap, since a ceiling alone does nothing about the token nobody
+  chose a lifetime for. Over the ceiling is refused rather than clamped
+  (`domain/token-lifetime.js`). Rotation is still a person's decision; what changed is
+  that it can no longer be postponed forever.
 - ~~**The training token is readable via `kubectl describe job`** by anyone who can already
   read Jobs in that namespace.~~ **Closed.** It is a `secretKeyRef` now, so reading it
   takes `get secrets` rather than `get jobs` — and the Secret is deleted when the run

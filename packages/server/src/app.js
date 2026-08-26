@@ -115,6 +115,10 @@ export async function buildApp(config, {
   // API bound to. The executor gets it passed in from index.js; the deployment routes
   // need it too, because a model server fetches its own weights through the API.
   app.decorate('apiAdvertiseUrl', config.apiAdvertiseUrl);
+  // The ceiling on a personal token's life, or null for none. Decorated rather than read
+  // from the environment in the route, so the policy is testable without touching
+  // process.env — the same reason every other setting arrives this way.
+  app.decorate('tokenMaxTtlDays', config.tokenMaxTtlDays ?? null);
 
   let backend;
   try {

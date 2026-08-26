@@ -1172,7 +1172,25 @@ Reasoning in [ADR 0017](adr/0017-egress-is-the-side-that-can-be-enforced.md).
   What remains is that anyone who can `exec` into the pod reads it out of the environment,
   which no arrangement of Kubernetes objects prevents. The correction to ADR 0013 is
   recorded there rather than quietly applied.
-- **No token rotation policy.** Tokens can be given an expiry; nothing requires one.
+- ~~**No token rotation policy.**~~ **Half closed, and the half that was missing.** Tokens
+  could be given an expiry and nothing required one, so the default token — every token a
+  script mints — lived forever. `ASHML_TOKEN_MAX_TTL_DAYS` is now both a ceiling *and* the
+  default, so there is no way to mint a personal token with no end; ninety days, and
+  `none` is how to say there should be no limit. A request over the ceiling is refused
+  rather than quietly shortened, because a caller given ninety days when they asked for a
+  year plans around a year and learns otherwise from a 401 in a pipeline that has worked
+  for three months. `scripts/issue-token.mjs` obeys the same ceiling — it writes straight
+  to the table and issues the *first* token on every cluster, so exempting it would have
+  left the platform's longest-lived credential outside the platform's own policy.
+
+  Tokens that already exist are untouched: this governs minting, and revoking working
+  credentials as a side effect of editing a config file is how a security setting gets
+  turned off.
+
+  **What is still not built is rotation itself.** Nothing replaces a token before it dies.
+  That is `ash token create` followed by `ash token revoke`, and it stays a decision a
+  person makes; what the policy guarantees is that the decision cannot be postponed
+  indefinitely.
 
 ### The scheduler race this phase also fixed
 

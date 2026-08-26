@@ -17,6 +17,7 @@ import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildApp } from '../app.js';
+import { DEFAULT_MAX_TTL_DAYS } from '../domain/token-lifetime.js';
 import { loadConfig } from '../config.js';
 import { createSimBackend } from '../k8s/sim.js';
 import { Role } from '../domain/roles.js';
@@ -190,6 +191,44 @@ describe('auth (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => {
         [user.userId],
       );
       assert.equal((await call(user.token, { method: 'GET', url: '/api/v1/projects' })).statusCode, 401);
+    });
+
+    test('a token minted through the API expires, without anyone asking it to', async () => {
+      // The gap this closes: `expires_in_days` existed and nothing required it, so the
+      // default token — every token a script makes — lived forever.
+      const res = await call(adminToken, {
+        method: 'POST', url: '/api/v1/auth/tokens', payload: { name: 'unattended' },
+      });
+      assert.equal(res.statusCode, 201, res.payload);
+
+      const { expires_at: expiresAt } = res.json();
+      assert.ok(expiresAt, 'a token created with no expiry must still get one');
+      const days = Math.round((Date.parse(expiresAt) - Date.now()) / 86_400_000);
+      assert.equal(days, DEFAULT_MAX_TTL_DAYS);
+    });
+
+    test('a shorter life than the platform allows is the caller\'s to choose', async () => {
+      const res = await call(adminToken, {
+        method: 'POST', url: '/api/v1/auth/tokens', payload: { name: 'brief', expires_in_days: 1 },
+      });
+      assert.equal(res.statusCode, 201, res.payload);
+      const days = Math.round((Date.parse(res.json().expires_at) - Date.now()) / 86_400_000);
+      assert.equal(days, 1);
+    });
+
+    test('a longer one is refused with the ceiling in the message, not shortened', async () => {
+      // Refused rather than clamped: a caller silently given 90 days when they asked for
+      // 365 plans around 365, and learns otherwise from a 401 months later.
+      const res = await call(adminToken, {
+        method: 'POST', url: '/api/v1/auth/tokens', payload: { name: 'forever', expires_in_days: 365 },
+      });
+      assert.equal(res.statusCode, 400, res.payload);
+      assert.equal(res.json().error.code, 'TOKEN_TTL_TOO_LONG');
+      assert.match(res.json().error.message, /90 days/);
+
+      // And nothing was created, so a retry with a legal number is not a name conflict.
+      const { rows } = await pool.query("SELECT 1 FROM api_tokens WHERE name = 'forever'");
+      assert.equal(rows.length, 0);
     });
 
     test('a path that exists nowhere is 401 unauthenticated, 404 once known', async () => {

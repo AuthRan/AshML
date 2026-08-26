@@ -513,10 +513,11 @@ $ kubectl -n ashml-jobs get job ashml-resnet-9c1f2a3b-0 -o yaml | grep -A4 ASHML
             secretKeyRef:
               key: token
               name: ashml-run-resnet-9c1f2a3b-0-token
-``` This closes the hole Phase 4 recorded in
-the roadmap and never fixed: the metric and artifact ingest paths took writes from inside
-the cluster with no authentication at all, so anything that could reach the control plane
-could report results for any job.
+```
+
+This closes the hole Phase 4 recorded in the roadmap and never fixed: the metric and
+artifact ingest paths took writes from inside the cluster with no authentication at all, so
+anything that could reach the control plane could report results for any job.
 
 > **Upgrading an existing cluster: rebuild every image.** Each one talks to the control
 > plane, and each one now has to prove who it is:
@@ -531,6 +532,31 @@ could report results for any job.
 > model`, which reads as a control-plane fault, and a training pod crashes with
 > `ApiError: authentication required` at its *first artifact upload* — minutes into a run
 > that had otherwise been going fine.
+
+### Every token expires, including the ones nobody thought about
+
+`expires_in_days` existed before this and was optional, which is a different thing from a
+policy: it meant the default token — every token a script makes, and every one that ends up
+in a CI secret store — lived forever. `ASHML_TOKEN_MAX_TTL_DAYS` is now the ceiling *and*
+the default, so there is no way to mint a personal token with no end:
+
+```console
+$ ash token create ci
+token "ci" created. It is shown once — store it now.
+
+$ ash token create ci-long --expires-in 365
+a token may live at most 90 days on this platform, and 365 were asked for.
+Ask for 90 or fewer, or raise ASHML_TOKEN_MAX_TTL_DAYS.
+```
+
+Refused rather than quietly shortened, because a caller given 90 days when they asked for
+a year plans around a year and finds out from a 401 in a pipeline that has worked for three
+months. `make token` obeys the same ceiling — it writes straight to the table and issues the
+first token on every cluster, so exempting it would leave the platform's longest-lived
+credential outside the platform's own policy. Tokens that already exist are untouched: the
+policy governs minting, not what is already in your shell profile. Rotation itself is still
+`ash token create` and `ash token revoke`; what the ceiling removes is the option of never
+getting round to it.
 
 ### How often you can call
 
@@ -1025,6 +1051,7 @@ docs/              architecture, roadmap, ADRs
 | `ASHML_RUN_TOKEN_TTL` | `86400` | Seconds a workload's token stays valid |
 | `ASHML_RUN_TOKEN_GRACE` | `300` | Seconds a *finished* run's token keeps working, so the final checkpoint's upload — confirmed after the pod exits — still lands. A retry revokes immediately regardless |
 | `ASHML_TOKEN` | — | Read by `ash` when nothing is stored by `ash login` |
+| `ASHML_TOKEN_MAX_TTL_DAYS` | `90` | The longest a personal token may live, **and the default**, so a token minted without a thought about expiry still gets one. Over it is refused, not shortened. `none` for no limit — existing tokens are never changed by this |
 | `ASHML_RATE_LIMIT_ENABLED` | `true` | Set false to remove both budgets. Logs a warning on every start |
 | `ASHML_RATE_LIMIT_PER_MINUTE` | `1200` | Requests a minute per *authenticated caller* — per person, run or deployment, not per token |
 | `ASHML_RATE_LIMIT_ANON_PER_MINUTE` | `600` | Requests a minute per source address for callers with no valid credential — what keeps a token lookup from being an attack. Not lower, because everything behind one NAT shares it |
