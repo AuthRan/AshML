@@ -75,6 +75,33 @@ const app = await buildApp(config, { logger: false });
 await app.ready();
 await authenticate(app);
 
+/**
+ * Actually listen, because one of the checks below is answered by a pod rather than by
+ * this process.
+ *
+ * Every other assertion here is made through `app.inject`, which needs no socket. "A pod
+ * can still reach the control plane" cannot be: it runs `wget` inside a container against
+ * `apiAdvertiseUrl`, and something has to be on the other end. Nothing was — this script
+ * had an unwritten prerequisite that a control plane be running, and in CI, where none is,
+ * the check failed with `Connection refused` on every run since it was added while the
+ * five checks around it passed.
+ *
+ * Bound to 0.0.0.0 on the port the advertise URL names, so the address a training pod is
+ * told to report to is the address this answers on — `host.k3d.internal` from inside the
+ * cluster and the host's own interface from outside are the same socket.
+ *
+ * An address already in use is not an error. It means a control plane is already running
+ * here, which is the condition this is arranging for; the check will reach that one
+ * instead. Any other listen failure is real and is left to surface.
+ */
+const advertised = new URL(config.apiAdvertiseUrl);
+try {
+  await app.listen({ host: '0.0.0.0', port: Number(advertised.port || 80) });
+} catch (err) {
+  if (err.code !== 'EADDRINUSE') throw err;
+  console.log(`        port ${advertised.port} is already served; using what is there`);
+}
+
 const suffix = Math.random().toString(36).slice(2, 8);
 const alpha = `iso-a-${suffix}`;
 const beta = `iso-b-${suffix}`;

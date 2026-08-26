@@ -258,7 +258,12 @@ jobs:
         if: failure()
         run: |
           kubectl --context k3d-ashml get nodes -o wide || true
-          kubectl --context k3d-ashml get jobs,pods -n ashml-jobs -o wide || true
-          kubectl --context k3d-ashml get networkpolicy -n ashml-jobs -o yaml || true
-          kubectl --context k3d-ashml describe pods -n ashml-jobs || true
-          kubectl --context k3d-ashml logs -n ashml-jobs --all-containers --tail=100 -l app=ashml || true
+          # Across all namespaces, not `-n ashml-jobs`: since ADR 0019 a job runs in its
+          # project's own namespace, and a failing run's pods are in one of those. Pinning
+          # these to the shared namespace prints nothing at exactly the moment somebody
+          # needs them, which is worse than not having them — it reads as "no pods".
+          kubectl --context k3d-ashml get ns -l app.kubernetes.io/managed-by=ashml || true
+          kubectl --context k3d-ashml get jobs,pods -A -l app.kubernetes.io/managed-by=ashml -o wide || true
+          kubectl --context k3d-ashml get networkpolicy -A -o yaml || true
+          kubectl --context k3d-ashml describe pods -A -l app.kubernetes.io/managed-by=ashml || true
+          kubectl --context k3d-ashml logs -A --all-containers --tail=100 -l app.kubernetes.io/managed-by=ashml || true
