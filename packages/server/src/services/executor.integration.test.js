@@ -137,6 +137,65 @@ describe('executor (integration)', { skip: pool ? false : SKIP_MESSAGE }, () => 
     assert.ok(backend.isolatedProjects.has(project.name));
   });
 
+  test('the run credential is in a Secret, and not in the Job anybody can read', async () => {
+    const submitted = await submit();
+    await runOnce(pool, backend);
+
+    const job = await getJob(pool, submitted.id);
+    const manifest = backend._jobManifest('ashml-test', job.k8s_job_name);
+    const entry = manifest.spec.template.spec.containers[0].env
+      .find((e) => e.name === 'ASHML_RUN_TOKEN');
+    assert.ok(entry.valueFrom?.secretKeyRef?.name, 'the token must reach the pod by reference');
+
+    const secret = backend._secret('ashml-test', entry.valueFrom.secretKeyRef.name);
+    assert.ok(secret, 'the Secret the Job points at must exist');
+    assert.ok(secret.stringData.token, 'and it must hold a credential');
+
+    // The property worth asserting, rather than the shape of the object: the plaintext
+    // must not be anywhere in what `kubectl get job -o yaml` would return.
+    assert.equal(JSON.stringify(manifest).includes(secret.stringData.token), false);
+  });
+
+  test('the Secret is created before the Job that references it', async () => {
+    // The other order starts a Pod whose secretKeyRef resolves to nothing. Kubernetes
+    // recovers from that, but by way of a CreateContainerConfigError somebody then has to
+    // be told to ignore.
+    const submitted = await submit();
+    const job = await claimNextJob(pool);
+    assert.equal(job.id, submitted.id);
+
+    const seen = [];
+    const recording = {
+      ...backend,
+      async applySecret(manifest) { seen.push(`secret:${manifest.metadata.name}`); },
+      async createJob(manifest) { seen.push(`job:${manifest.metadata.name}`); },
+    };
+    await launchJob(pool, recording, job, {});
+
+    assert.equal(seen.length, 2);
+    assert.match(seen[0], /^secret:/);
+    assert.match(seen[1], /^job:/);
+  });
+
+  test('a finished run leaves no Secret behind, whatever it was called', async () => {
+    const submitted = await submit();
+    await runOnce(pool, backend);
+
+    const job = await getJob(pool, submitted.id);
+    const name = backend._jobManifest('ashml-test', job.k8s_job_name)
+      .spec.template.spec.containers[0].env
+      .find((e) => e.name === 'ASHML_RUN_TOKEN').valueFrom.secretKeyRef.name;
+    assert.ok(backend._secret('ashml-test', name));
+
+    backend._setPhase('ashml-test', job.k8s_job_name, Phase.SUCCEEDED, 'completed');
+    await runOnce(pool, backend);
+
+    assert.equal((await getJob(pool, submitted.id)).state, JobState.SUCCEEDED);
+    // Deleted by label, so a job that retried has every attempt's removed and not just
+    // the last one's.
+    assert.equal(backend._secret('ashml-test', name), null);
+  });
+
   test('a pending pod does not move the job off STARTING', async () => {
     const submitted = await submit();
     await runOnce(pool, backend);

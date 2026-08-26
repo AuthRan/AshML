@@ -83,7 +83,7 @@ function resourceRequirements(resources) {
  * is applied first so it can never overwrite them — a job that shadowed
  * `ASHML_JOB_ID` would report its results onto another job's record.
  */
-function containerEnv(job, { apiUrl = null, runToken = null } = {}) {
+function containerEnv(job, { apiUrl = null, runSecret = null } = {}) {
   const env = Object.entries(job.spec.env ?? {}).map(([name, value]) => ({
     name,
     value: String(value),
@@ -113,23 +113,94 @@ function containerEnv(job, { apiUrl = null, runToken = null } = {}) {
   if (job.retry?.resume_artifact_id) {
     reserved.ASHML_RESUME_FROM = job.retry.resume_artifact_id;
   }
-  // The credential this attempt reports with (Phase 10). Minted per attempt and revoked
-  // when the attempt ends, so it is worth nothing to anything but this pod, while it
-  // runs. It is inlined rather than mounted from a Secret because it is already
-  // per-attempt and short-lived: a Secret would be a second object to create, to keep in
-  // step with the Job's lifetime, and to garbage-collect when the Job is deleted, for a
-  // value that stops working by itself. What that costs is that the token is visible in
-  // `kubectl describe job` to anyone who can already read Jobs in this namespace — which
-  // is recorded in ADR 0013 rather than left for someone to discover.
-  if (runToken) {
-    reserved.ASHML_RUN_TOKEN = runToken;
-  }
-
-  const userSupplied = env.filter((entry) => !Object.hasOwn(reserved, entry.name));
-  return [
+  // `ASHML_RUN_TOKEN` is reserved whether or not this attempt has one, and it is listed
+  // here rather than in `reserved` above because its value does not live in the manifest.
+  // Kubernetes takes the last entry when a name appears twice, so leaving a user-supplied
+  // one in place would work by accident; a job that set it would still be handed the real
+  // credential, and would also ship its own guess about a credential in the same pod spec.
+  const userSupplied = env.filter((entry) => (
+    !Object.hasOwn(reserved, entry.name) && entry.name !== 'ASHML_RUN_TOKEN'
+  ));
+  const resolved = [
     ...userSupplied,
     ...Object.entries(reserved).map(([name, value]) => ({ name, value })),
   ];
+
+  // The credential this attempt reports with (Phase 10), by reference rather than by
+  // value. Both forms hand the container the same string; what differs is who else can
+  // read it. An inline value is part of the Job's spec, so it is returned by
+  // `kubectl get job -o yaml` to anyone who can list Jobs in this namespace — a
+  // permission an operator hands out to let somebody watch their runs. Behind a
+  // `secretKeyRef` it takes `get secrets`, which is a separate grant and the one people
+  // actually think about before giving away.
+  //
+  // The earlier decision to inline it (ADR 0013) traded that for not having a second
+  // object to create and clean up. The cleanup is the part that turned out to be cheap:
+  // the Secret is named for the attempt, so a retry writes its own rather than mutating
+  // one a pod is still reading, and every attempt's Secret is deleted by label when the
+  // job reaches a terminal state.
+  if (runSecret) {
+    resolved.push({
+      name: 'ASHML_RUN_TOKEN',
+      valueFrom: { secretKeyRef: { name: runSecret, key: 'token' } },
+    });
+  }
+  return resolved;
+}
+
+/**
+ * The Secret holding one *attempt's* run credential.
+ *
+ * Per attempt and not per job, because a retry mints a new token and revokes the old one
+ * while the pod that holds it may still be shutting down. One object per job would mean
+ * the replacement overwriting a value the previous pod's container had already read —
+ * harmless in itself, since an env var is materialised at container start — but it would
+ * also mean a single name whose contents no longer say which attempt they belong to,
+ * which is the kind of ambiguity this platform keeps out of its records.
+ *
+ * Budgeted from scratch rather than appended to `kubeJobName`, which is itself allowed to
+ * reach the full 63 characters: `${jobName}-token` would then be rejected as a DNS-1123
+ * label for exactly the jobs with the longest names.
+ */
+export function runSecretName(job) {
+  const attempt = job.attempt ?? 0;
+  const id8 = String(job.id).replaceAll('-', '').slice(0, 8);
+  const suffix = `-${id8}-${attempt}-token`;
+  const prefix = `${MANAGED_BY}-run-`;
+  const budget = MAX_NAME - prefix.length - suffix.length;
+
+  const stem = String(job.name).slice(0, Math.max(1, budget)).replace(/-+$/, '');
+  return `${prefix}${stem}${suffix}`;
+}
+
+/**
+ * The Secret a training pod reads its credential from.
+ *
+ * `ashml.io/job-id` is what makes the cleanup a single call: every attempt of a job
+ * carries it, so one delete-by-label removes the lot without the caller having to know
+ * how many attempts there were.
+ */
+export function buildRunSecretManifest(job, token, { namespace = 'ashml-jobs' } = {}) {
+  if (!token) {
+    throw new Error(`job ${job.id}: a run secret needs a token to hold`);
+  }
+
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    type: 'Opaque',
+    metadata: {
+      name: runSecretName(job),
+      namespace,
+      labels: {
+        'app.kubernetes.io/managed-by': MANAGED_BY,
+        'app.kubernetes.io/component': 'run-token',
+        'ashml.io/job-id': job.id,
+        'ashml.io/attempt': String(job.attempt ?? 0),
+      },
+    },
+    stringData: { token },
+  };
 }
 
 /**
@@ -345,10 +416,12 @@ function podPlacement(nodeName) {
  * @param {object} [options]
  * @param {string} [options.namespace] namespace to create the Job in
  * @param {string} [options.nodeName] the node AshML's scheduler chose, if any
+ * @param {string} [options.apiUrl] what the pod should report back to
+ * @param {string} [options.runSecret] the Secret holding this attempt's run token
  * @returns {object} a Kubernetes batch/v1 Job
  */
 export function buildJobManifest(job, {
-  namespace = 'ashml-jobs', nodeName = null, apiUrl = null, runToken = null,
+  namespace = 'ashml-jobs', nodeName = null, apiUrl = null, runSecret = null,
 } = {}) {
   if (!job.spec?.image) {
     throw new Error(`job ${job.id}: spec.image is required to build a Kubernetes Job`);
@@ -382,7 +455,7 @@ export function buildJobManifest(job, {
     name: 'training',
     image: job.spec.image,
     imagePullPolicy: job.spec.image_pull_policy ?? 'IfNotPresent',
-    env: containerEnv(job, { apiUrl, runToken }),
+    env: containerEnv(job, { apiUrl, runSecret }),
     resources: resourceRequirements(job.resources),
     ...containerHardening(),
   };

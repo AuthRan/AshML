@@ -678,6 +678,33 @@ function namespaceLabels() {
     },
 
     /**
+     * Deletes every Secret in a namespace carrying the given labels.
+     *
+     * One call rather than one per name, because the caller that needs it — a job that
+     * has finished — does not know how many attempts it had, and a per-attempt Secret is
+     * exactly the thing there can be an unknown number of.
+     *
+     * Absent is success, like `deleteSecret`: this is called to make them not exist.
+     *
+     * @param {object} labels e.g. `{ 'ashml.io/job-id': id }`
+     */
+    async deleteSecrets(ns, labels) {
+      const { core } = connect();
+      const labelSelector = Object.entries(labels).map(([k, v]) => `${k}=${v}`).join(',');
+      if (!labelSelector) {
+        // An empty selector matches everything. Refused rather than obeyed: this is a
+        // delete, and the difference between "no labels given" and "delete every Secret
+        // in the namespace" is not one to resolve by guessing.
+        throw new Error('deleteSecrets: at least one label is required');
+      }
+      try {
+        await core.deleteCollectionNamespacedSecret({ namespace: ns ?? namespace, labelSelector });
+      } catch (err) {
+        if (statusOf(err) !== 404) throw err;
+      }
+    },
+
+    /**
      * Creates the Service if it is absent.
      *
      * Not replaced when it already exists: a Service's `spec.clusterIP` is assigned by

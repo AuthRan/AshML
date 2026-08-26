@@ -14,7 +14,7 @@
  */
 
 import { Phase } from '../k8s/backend.js';
-import { buildJobManifest, kubeJobName } from '../k8s/manifest.js';
+import { buildJobManifest, buildRunSecretManifest, kubeJobName, runSecretName } from '../k8s/manifest.js';
 import { JobState, isOutcome } from '../domain/job-state.js';
 import * as jobService from './jobs.js';
 import { scheduleJob, Placement } from './scheduler.js';
@@ -58,6 +58,15 @@ export async function launchJob(pool, backend, job, {
   const { token: runToken } = await issueRunToken(pool, job.id, job.attempt ?? 0, {
     ttlSeconds: runTokenTtlSeconds,
   });
+  // Into a Secret, and therefore before the Job that references it. The other order
+  // would start a Pod whose `secretKeyRef` resolves to nothing — Kubernetes holds it in
+  // CreateContainerConfigError and retries, so it recovers, but it recovers by way of a
+  // status this platform would have to explain to whoever read it.
+  //
+  // Named for the attempt (`runSecretName`), so a retry writes a new object rather than
+  // overwriting one the previous attempt's pod is still shutting down around.
+  await backend.applySecret(buildRunSecretManifest(job, runToken, { namespace }));
+
   // The node is passed through so the Pod lands where AshML decided, not where
   // Kubernetes would have chosen. Without this the scheduler's decision is a record of
   // an intention rather than a cause (see ADR 0003).
@@ -65,7 +74,7 @@ export async function launchJob(pool, backend, job, {
     namespace,
     nodeName: job.placement?.node_name ?? null,
     apiUrl,
-    runToken,
+    runSecret: runSecretName(job),
   });
   const name = manifest.metadata.name;
 
@@ -94,6 +103,9 @@ export async function cancelWorkload(pool, backend, job, { logger = null } = {})
   const name = job.k8s_job_name ?? kubeJobName(job);
 
   await backend.deleteJob(backend.namespace, name);
+  // The attempt's Secret is not deleted here. CANCELLED is a terminal state like any
+  // other, so `runOnce` removes it on the same pass along with every other attempt's —
+  // one place that cleans up after a run, rather than one per way a run can end.
   logger?.info({ job_id: job.id, k8s_job_name: name }, 'workload deleted for cancellation');
 
   return jobService.finishCancellation(pool, job.id, {
@@ -218,6 +230,18 @@ export async function runOnce(pool, backend, {
           // failing the reconcile here would strand the job's terminal state.
           logger?.error({ err, job_id: job.id }, 'expiring the run token failed');
         });
+        // And the objects that carried it — every attempt's, by label, because a job that
+        // retried has more than one and nothing here knows how many. Deleted rather than
+        // left: the row behind them is expiring on the line above, so what is left is an
+        // object in the namespace whose contents have stopped meaning anything, and a
+        // namespace full of those is where a real credential goes unnoticed.
+        //
+        // Not fatal either, and less so. A leaked Secret holds a token the database has
+        // already expired, so the cost of failing here is tidiness, not exposure.
+        await backend.deleteSecrets(backend.namespace, { 'ashml.io/job-id': job.id })
+          .catch((err) => {
+            logger?.warn({ err, job_id: job.id }, 'deleting the run token secret failed');
+          });
       }
     } catch (err) {
       summary.errors += 1;

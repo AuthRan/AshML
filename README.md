@@ -501,7 +501,19 @@ the run that replaced it. That is not a hypothetical failure: it would not error
 write one attempt's numbers onto another's.
 
 A run token can report for its own job and fetch artifacts in its own project. It cannot
-read the project, list anything, or mint a token. This closes the hole Phase 4 recorded in
+read the project, list anything, or mint a token. It reaches the pod through a
+`secretKeyRef` rather than as a value in the Job, so reading it takes `get secrets` and not
+`get jobs` — which are not the same grant, since `get jobs` is what gets handed out so
+somebody can watch their runs. The Secret is per attempt and is deleted when the job ends:
+
+```console
+$ kubectl -n ashml-jobs get job ashml-resnet-9c1f2a3b-0 -o yaml | grep -A4 ASHML_RUN_TOKEN
+        - name: ASHML_RUN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: token
+              name: ashml-run-resnet-9c1f2a3b-0-token
+``` This closes the hole Phase 4 recorded in
 the roadmap and never fixed: the metric and artifact ingest paths took writes from inside
 the cluster with no authentication at all, so anything that could reach the control plane
 could report results for any job.

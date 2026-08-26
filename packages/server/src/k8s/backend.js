@@ -22,6 +22,7 @@
  *     applyService(manifest): Promise<void>,
  *     applySecret(manifest): Promise<void>,
  *     deleteSecret(namespace, name): Promise<void>,
+ *     deleteSecrets(namespace, labels): Promise<void>,
  *     observeDeployment(namespace, name): Promise<DeploymentObservation|null>,
  *     deleteDeployment(namespace, name): Promise<void>,
  *     callService(namespace, name, options): Promise<ServiceResponse>,

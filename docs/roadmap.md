@@ -1161,10 +1161,17 @@ Reasoning in [ADR 0017](adr/0017-egress-is-the-side-that-can-be-enforced.md).
   and the platform. A compromised training image is contained by the namespace and by that
   policy, not by Kubernetes RBAC. That needs a namespace per project, and it is the next
   real step here.
-- **The training run token is visible in the Job's pod spec** to anyone who can already
-  read Jobs in that namespace. It is per-attempt and revoked when the attempt ends, which
-  bounds the exposure, but it is not hidden. The serving token is in a Secret, for an
-  unrelated reason recorded in ADR 0013.
+- ~~**The training run token is visible in the Job's pod spec**~~ — **closed.** It reaches
+  the container through a `secretKeyRef` now, like the serving token, so reading it takes
+  `get secrets` rather than `get jobs`. Those are not the same grant: `get jobs` is what an
+  operator hands out so a colleague can watch their runs. The Secret is named for the
+  attempt, so a retry writes its own rather than overwriting one a pod is still shutting
+  down around, and every attempt's is deleted by label when the job reaches a terminal
+  state — the object stops existing at about the moment its contents stop working.
+
+  What remains is that anyone who can `exec` into the pod reads it out of the environment,
+  which no arrangement of Kubernetes objects prevents. The correction to ADR 0013 is
+  recorded there rather than quietly applied.
 - **No token rotation policy.** Tokens can be given an expiry; nothing requires one.
 
 ### The scheduler race this phase also fixed

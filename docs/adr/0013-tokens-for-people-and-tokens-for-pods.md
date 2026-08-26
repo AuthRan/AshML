@@ -90,6 +90,16 @@ outage. A `secretKeyRef` is the same string every time. A training Job has no su
 problem: each attempt is a new Job, so a per-attempt value in the environment costs
 nothing and saves a second object to create, keep in step, and garbage-collect.
 
+> **Superseded: the run credential is in a Secret too.** The sentence above weighed the
+> cost correctly and weighed the benefit as nothing, because it read the exposure as "the
+> token is visible to someone who can already read this namespace". It is not the same
+> permission. `get jobs` is what an operator grants so a colleague can watch their runs;
+> `get secrets` is the grant people actually stop and think about, and an inline value
+> collapsed the two. The cleanup that was supposed to cost is one delete-by-label at the
+> terminal state, because the Secret carries `ashml.io/job-id` and every attempt's is
+> removed by the same call. Verified from inside a pod: the container reads the Secret,
+> posts a metric, and the control plane records it. See *Found by review, after the fact*.
+
 **Bootstrap requires database credentials, not an environment variable.** The first token
 cannot come from the API. `scripts/issue-token.mjs` writes one directly, so minting
 requires access that could already read and change every row. The usual
@@ -106,9 +116,12 @@ not a row.
   own service account creates every workload, so a project's pods are isolated by
   AshML's admission checks and not by the cluster's. Recorded in the roadmap.
 - **No audit log of authorization decisions.** Job state has one; this does not.
-- **The training token is readable via `kubectl describe job`** by anyone who can already
-  read Jobs in that namespace. It is per-attempt and revoked when the attempt ends, which
-  bounds it, but it is not hidden.
+- ~~**The training token is readable via `kubectl describe job`** by anyone who can already
+  read Jobs in that namespace.~~ **Closed.** It is a `secretKeyRef` now, so reading it
+  takes `get secrets` rather than `get jobs` — and the Secret is deleted when the run
+  ends, so the object stops existing at about the moment its contents stop working. What
+  is still true is that anyone who can `exec` into the pod reads it out of the
+  environment, which no arrangement of Kubernetes objects prevents.
 
 ## Found by review, after the fact
 
@@ -116,6 +129,14 @@ Recorded because the list is more useful than the impression that none of this n
 second pass:
 
 - The rotation bug above — the only one that would have broken a working feature.
+- **Moving the run token into a Secret found a second bug in the same function.** With the
+  value gone from `containerEnv`'s reserved map, a user-supplied `ASHML_RUN_TOKEN` in
+  `spec.env` was no longer filtered out, and the pod would have carried two entries of
+  that name. Kubernetes takes the last, so the credential would still have been the right
+  one and nothing would have failed — a job would simply have shipped its own guess about
+  a credential in the same pod spec, and the header comment claiming user environment
+  "can never overwrite" the platform's would have been quietly false. Caught by the test
+  that asserts it, which was written before the code it tests.
 - **The last-owner check was advisory.** It read `countOwners` and then wrote, with no
   lock, so two owners demoting each other concurrently both saw two owners and both
   proceeded, leaving a project with none. Now serialised on the project row.

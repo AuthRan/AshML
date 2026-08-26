@@ -11,6 +11,8 @@ import assert from 'node:assert/strict';
 
 import {
   buildJobManifest,
+  buildRunSecretManifest,
+  runSecretName,
   kubeJobName,
   MANAGED_BY,
   DEFAULT_CLUSTER_POD_CIDR,
@@ -360,5 +362,67 @@ describe('the per-project network policy', () => {
     // not produce a useless object — it would produce one that governs all of them.
     assert.throws(() => buildProjectNetworkPolicyManifest(''), /needs a project/);
     assert.throws(() => buildProjectNetworkPolicyManifest(null), /needs a project/);
+  });
+});
+
+describe('the run token a training pod is handed', () => {
+  const SECRET = 'ashml-run-resnet-cifar-3f2b1c4d-0-token';
+
+  test('reaches the container by reference, never as a value in the Job', () => {
+    // The property, stated as the thing an attacker would look for: the plaintext must
+    // not appear anywhere in the object `kubectl get job -o yaml` returns.
+    const manifest = buildJobManifest(makeJob(), { runSecret: SECRET });
+    const entry = manifest.spec.template.spec.containers[0].env
+      .find((e) => e.name === 'ASHML_RUN_TOKEN');
+
+    assert.deepEqual(entry.valueFrom, { secretKeyRef: { name: SECRET, key: 'token' } });
+    assert.equal(entry.value, undefined);
+  });
+
+  test('a job launched without one carries no empty credential', () => {
+    // Not `ASHML_RUN_TOKEN=""`. An SDK that reads an empty string sends an
+    // `Authorization: Bearer` header with nothing after it, which is refused as malformed
+    // rather than as missing — and the message a user gets should say the second.
+    const env = buildJobManifest(makeJob()).spec.template.spec.containers[0].env;
+    assert.equal(env.find((e) => e.name === 'ASHML_RUN_TOKEN'), undefined);
+  });
+
+  test('the user cannot supply their own, whichever form it takes', () => {
+    const manifest = buildJobManifest(
+      makeJob({ spec: { image: 'busybox', env: { ASHML_RUN_TOKEN: 'mine' } } }),
+      { runSecret: SECRET },
+    );
+    const entries = manifest.spec.template.spec.containers[0].env
+      .filter((e) => e.name === 'ASHML_RUN_TOKEN');
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].value, undefined);
+  });
+
+  test('each attempt gets its own Secret, so a retry cannot overwrite one in use', () => {
+    assert.notEqual(runSecretName(makeJob({ attempt: 0 })), runSecretName(makeJob({ attempt: 1 })));
+  });
+
+  test('the Secret name is a legal DNS-1123 label even for the longest job name', () => {
+    const name = runSecretName(makeJob({ name: 'x'.repeat(120) }));
+    assert.ok(name.length <= 63, `${name.length} characters is too long`);
+    assert.match(name, /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/);
+  });
+
+  test('the Secret carries the job id, which is what makes cleanup one call', () => {
+    const job = makeJob({ attempt: 2 });
+    const secret = buildRunSecretManifest(job, 'ash_run_secret');
+
+    assert.equal(secret.metadata.name, runSecretName(job));
+    assert.equal(secret.metadata.labels['ashml.io/job-id'], job.id);
+    assert.equal(secret.metadata.labels['ashml.io/attempt'], '2');
+    assert.equal(secret.stringData.token, 'ash_run_secret');
+  });
+
+  test('a Secret with nothing in it is refused rather than created empty', () => {
+    // An empty Secret is worse than none: the Pod starts, the SDK reads a blank
+    // credential, and the run fails at its first upload rather than at its first second.
+    assert.throws(() => buildRunSecretManifest(makeJob(), ''), /needs a token/);
+    assert.throws(() => buildRunSecretManifest(makeJob(), null), /needs a token/);
   });
 });

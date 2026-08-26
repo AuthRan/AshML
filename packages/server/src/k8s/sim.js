@@ -184,6 +184,18 @@ export function createSimBackend({
       secrets.delete(key(ns ?? namespace, name));
     },
 
+    async deleteSecrets(ns, labels) {
+      const wanted = Object.entries(labels);
+      if (wanted.length === 0) {
+        throw new Error('deleteSecrets: at least one label is required');
+      }
+      for (const [id, manifest] of secrets) {
+        if (!id.startsWith(`${ns ?? namespace}/`)) continue;
+        const has = manifest.metadata?.labels ?? {};
+        if (wanted.every(([k, v]) => has[k] === v)) secrets.delete(id);
+      }
+    },
+
     async applySecret(manifest) {
       const ns = manifest.metadata.namespace ?? namespace;
       secrets.set(key(ns, manifest.metadata.name), manifest);
@@ -375,12 +387,18 @@ export function createSimBackend({
       jobs.clear();
       deployments.clear();
       secrets.clear();
+      isolatedProjects.clear();
       responder = null;
     },
 
     /** What a workload was actually handed, for tests to assert against. */
     _secret(ns, name) {
       return secrets.get(key(ns, name)) ?? null;
+    },
+
+    /** The manifest a Job was created from — what a `kubectl get job -o yaml` would show. */
+    _jobManifest(ns, name) {
+      return jobs.get(key(ns, name))?.manifest ?? null;
     },
   };
 }
